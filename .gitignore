@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# 运行时数据目录（人格库 / 会话身份表 / 长期记忆库 / 日志等，含用户数据）
+dsh-qq-bot-data/
+# 旧的数据目录名（迁移前）
+dsh-qq-data/
+
+# 流程图/架构图产物
+流程图/
+
+# 系统与编辑器杂项
+.DS_Store
+*.log

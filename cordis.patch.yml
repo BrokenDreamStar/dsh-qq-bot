@@ -1,0 +1,98 @@
+# dsh-qq-bot bundle patch — 向 profile 树插入 QQ 机器人桥接行。
+#
+# 这一层是「默认值」层：安装后可用
+#   dsh plugin --profile web add file:<路径>
+# 加入 bundle 列表，随后在 profile 自己的 cordis.patch.yml 里按 id（dsh-qq-bot）
+# 覆盖任意配置项（后层覆盖前层，整行 config 替换）。
+#
+# 环境变量（便于不把密钥写进配置文件）：
+#   DSHQQ_TRANSPORT     forward（默认，插件连 napcat）| reverse（napcat 连插件）
+#   DSHQQ_WS_URL        正向 WS 地址，如 ws://127.0.0.1:3001
+#   DSHQQ_REVERSE_PORT  反向 WS 监听端口（transport=reverse 时生效），默认 6199
+#   DSHQQ_ACCESS_TOKEN  OneBot access token（留空则不发送 Authorization 头）
+#   DSHQQ_ADMIN_USERS   管理员 QQ 号，逗号分隔
+#   DSHQQ_DATA_DIR      数据目录（**唯一的路径设置**：会话目录 sessions/Friend_<QQ号>|
+#                      Group_<群号>、人格库、会话身份表、定时任务、管理员文件、群成员
+#                      缓存与消息日志都在它下面；留空 = <用户主目录>/dsh-qq-bot-data，
+#                      支持开头的 ~）
+#   DSHQQ_WORKSPACE_ROOT
+#                      旧名（v0.3 前的「会话数据根」），仍可用：仅在 DSHQQ_DATA_DIR 为空
+#                      时作为数据目录兜底（老部署路径不变），并会被自动写进 dataDir
+#   DSHQQ_GROUP_ROOT    更旧的名字（v0.2 前的「会话分组目录根」），同样只在前面两个
+#                      都为空时兜底
+#   DSHQQ_SEARCH_CHAIN  已废弃（顺序改为 WebUI 可排序列表 / searchOrder 数组）
+#   DSHQQ_EXA_API_KEY   Exa API Key（留空 = 跳过 exa 这一档）
+#   DSHQQ_TAVILY_API_KEY
+#                       Tavily API Key（留空 = 跳过 tavily 这一档）
+#   DSHQQ_MEMORY_ENABLED
+#                      长期记忆总开关（默认 false = 关闭）；开启后会按会话持久记录
+#                      消息正文（<数据目录>/memory.db）并注册 qq_recall_memory /
+#                      qq_memorize 工具。记忆工具默认仅管理员可用，普通用户要用得在
+#                      「工具权限」卡片加进 userTools
+#   DSHQQ_MEMORY_DISTILL_PROVIDER / DSHQQ_MEMORY_DISTILL_MODEL
+#                      蒸馏用的模型（留空 = 部署默认模型；建议填便宜模型）
+#
+# 无环境变量的常用配置项（在 profile 自己的 cordis.patch.yml 里按 id 覆盖）：
+#   workspaceMode  会话默认工作目录：chat（默认，会话目录）| home（网关模式，
+#                  以用户主目录为 agent 工作目录；配合管理员权限使用，见 README 安全须知）
+#   tasksEnabled   定时任务（未来任务）总开关，默认 true；taskMaxPerChat 单会话任务上限
+#   timeAware      时间感知（宿主机时间注入 system prompt），默认 true
+#   historyEnabled 聊天记录（agent 用 qq_read_history 主动回看最近的群消息），默认 true；
+#                  historyMaxMessages 单次读取上限、historyBufferPerChat 每会话本地保留
+#                  条数（只在内存）、historyRemoteFetch 是否读 OneBot 历史接口
+#   memoryEnabled  长期记忆总开关，默认 false（关闭）。开启后还有一组参数：
+#                  memoryCardMaxChars 卡片字符预算（600）、memoryMaxFacts 条数上限（40）、
+#                  memoryRecallEnabled / memoryRecallTopK / memoryRecallMaxChars /
+#                  memoryRecallHalfLifeDays（检索工具与打分）、memoryPrefetch /
+#                  memoryPrefetchMinScore / memoryPrefetchMaxItems（每轮自动预取）、
+#                  memoryDistillEvery / memoryDistillMinChars / memoryDistillIdleMs /
+#                  memoryDistillProvider / memoryDistillModel / memoryDistillMaxTokens /
+#                  memoryDistillTimeoutMs（蒸馏频率与模型）、memoryHandoffTail /
+#                  memoryHandoffDistillWaitMs（世代交接）、memoryRetentionDays /
+#                  memoryMaxEventsPerChat（档案保留）。全部可在 WebUI「长期记忆」卡片里配
+#   searchEnabled  网页搜索工具（qq_web_search）总开关，默认 true；searchOrder 搜索顺序数组
+#                  （默认 [exa, tavily, dsh]，数组顺序 = 尝试顺序，移出的不参与）、
+#                  exaApiKey / tavilyApiKey 两个密钥、searchMaxResults / searchMaxQueries /
+#                  searchTimeoutMs 参数（顺序与密钥也可在 WebUI「网页搜索」卡片里配）
+#   sessionIdleTimeoutMs
+#                  会话空闲回收（ms），默认 0 = **不回收**：写句柄一直留在插件手里，
+#                  dsh WebUI 打开这些会话只能复用同一个 agent。dsh 界面 promote 一个
+#                  会话后不会再释放它，所以回收等于定期把会话让给界面；>0 只在要省
+#                  内存时开。被界面占住时的行为由 busyStrategy（wait 默认 = 等它释放 /
+#                  rotate = 立刻换新会话）与 busyWaitMs（默认 300000）决定。
+#   askUserEnabled 提问转发：agent 的 ask_user_question（以及计划确认等走同一条
+#                  user-questions 缝的工具）需要用户拍板时，把问题与选项发到 QQ 并接受
+#                  QQ 回复作为答案，默认 true；askUserWaitMs 等待回答上限（默认 300000，
+#                  实际不超过 maxTurnMs 的一半）。关闭后提问只在 dsh 界面里回答
+#
+# 人格库与「人格与模型」映射不在这里配置：在 dsh WebUI 的
+# 「设置 → qq-bot 配置 → 人格库 / 人格与模型」里维护，数据存于数据目录下的
+# personas.json / chat-overrides.json（会话内 /persona、/model 同样生效）。
+# 定时任务同理：任务由 agent 在会话里创建（或 WebUI「定时任务」卡片手动管理），
+# 持久化在数据目录的 tasks.json。
+
+- insert:
+    - id: dsh-qq-bot
+      name: 'dsh-qq-bot'
+      config:
+        transport: !!js process.env.DSHQQ_TRANSPORT ?? 'forward'
+        url: !!js process.env.DSHQQ_WS_URL ?? 'ws://127.0.0.1:3001'
+        reversePort: !!js Number(process.env.DSHQQ_REVERSE_PORT ?? 6199)
+        accessToken: !!js process.env.DSHQQ_ACCESS_TOKEN ?? ''
+        adminUsers: !!js (process.env.DSHQQ_ADMIN_USERS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+        dataDir: !!js process.env.DSHQQ_DATA_DIR ?? ''
+        # 长期记忆：默认关闭。开启需要按会话持久记录消息正文，属于部署决策，
+        # 所以只在环境变量显式给了值时覆盖（空 = 用 schema 默认 false）。
+        memoryEnabled: !!js "process.env.DSHQQ_MEMORY_ENABLED === undefined ? undefined : process.env.DSHQQ_MEMORY_ENABLED === 'true'"
+        memoryDistillProvider: !!js process.env.DSHQQ_MEMORY_DISTILL_PROVIDER ?? ''
+        memoryDistillModel: !!js process.env.DSHQQ_MEMORY_DISTILL_MODEL ?? ''
+        # 网页搜索（qq_web_search）：两个后端的密钥可以走环境变量，这样密钥不必
+        # 落进 settings.yaml；没配 Key 的后端在链上自动跳过。搜索顺序是部署选择，
+        # 不提供环境变量——在 WebUI「网页搜索」卡片里用上下箭头排序，或在这里写
+        # searchOrder: [exa, tavily, dsh]。
+        exaApiKey: !!js process.env.DSHQQ_EXA_API_KEY ?? ''
+        tavilyApiKey: !!js process.env.DSHQQ_TAVILY_API_KEY ?? ''
+        # 旧名兜底：老部署只设了 DSHQQ_WORKSPACE_ROOT / DSHQQ_GROUP_ROOT 时数据目录不变
+        # （见 config.ts 的废弃说明；写入侧会自动把旧值搬进 dataDir）
+        workspaceRoot: !!js process.env.DSHQQ_WORKSPACE_ROOT ?? ''
+        sessionGroupRoot: !!js process.env.DSHQQ_GROUP_ROOT ?? ''
