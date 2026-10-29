@@ -55,9 +55,9 @@ function baseConfig(overrides: Partial<DshQQConfig> = {}): DshQQConfig {
 		sessionGroupRoot: '',
 		workspaceMode: 'chat',
 		dataDir: '',
-		maxTurnMs: 600000,
 		sessionIdleTimeoutMs: 1800000,
 		maxQueue: 20,
+		turnIdleTimeoutMs: 900000,
 		registerSendTools: true,
 		debug: false,
 		...overrides,
@@ -71,10 +71,14 @@ function harness(config: DshQQConfig, pending?: { accept: (text: string, msg: In
 	const sent: string[] = [];
 	/** 进入聊天记录缓冲的消息（qq_read_history 的数据源）。 */
 	const recorded: InboundMessage[] = [];
+	/** 进入长期记忆档案的正文（命令不该进来）。 */
+	const memories: string[] = [];
 	/** setReplyContext 的调用记录。 */
 	const replyContexts: Array<{ messageId: number | undefined; senderId: string; trigger?: string }> = [];
 	const bridge = {
 		label: '测试会话',
+		key: 'u-12345',
+		sessionIdString: 'sess-1',
 		mediaDir: '/tmp',
 		enqueue: (job: () => Promise<void>) => {
 			enqueued.push('job');
@@ -109,6 +113,8 @@ function harness(config: DshQQConfig, pending?: { accept: (text: string, msg: In
 		store: {} as never,
 		roster: { touchGroup: () => {}, renderMentions: async (text: string) => text } as never,
 		history: { recordMessage: (msg: InboundMessage) => recorded.push(msg) } as never,
+		// 长期记忆：只记录正文，用来验证"命令不进档案"。
+		memory: { ready: true, record: (event: { text: string }) => memories.push(event.text) } as never,
 		services: {} as never,
 		logs,
 		tasks: {} as never,
@@ -119,7 +125,7 @@ function harness(config: DshQQConfig, pending?: { accept: (text: string, msg: In
 	const drops = (): string[] => entries.filter((entry) => entry.event === 'drop').map((entry) => entry.text);
 	/** 收到的消息在日志里的记录（in 方向，访问控制之前就写下，任何拒绝都不该影响它）。 */
 	const inbound = (): string[] => entries.filter((entry) => entry.dir === 'in').map((entry) => entry.text);
-	return { dispatcher, enqueued, sent, drops, inbound, entries, recorded, replyContexts };
+	return { dispatcher, enqueued, sent, drops, inbound, entries, recorded, memories, replyContexts };
 }
 
 function messageEvent(text: string, type: 'group' | 'private' = 'group', messageId = 1) {
@@ -147,6 +153,29 @@ function mentionEvent(text: string, messageId = 1) {
 		raw_message: `[CQ:at,qq=10000] ${text}`,
 	};
 }
+
+describe('Dispatcher 长期记忆采集', () => {
+	it('已注册的命令不进记忆档案（控制指令不是对话内容）', async () => {
+		const app = harness(baseConfig());
+		app.dispatcher.handle(messageEvent('/status', 'group', 1));
+		app.dispatcher.handle(messageEvent('/memory distill', 'group', 2));
+		await Promise.resolve();
+		await Promise.resolve();
+		// 两个命令都进了聊天记录（那是"刚才群里在聊什么"的语义）……
+		expect(app.recorded.map((msg) => msg.plainText)).toEqual(['/status', '/memory distill']);
+		// ……但都不进长期记忆（否则每条命令都会白烧一次蒸馏）。
+		expect(app.memories).toEqual([]);
+	});
+
+	it('普通消息与未知的 /xxx 照记（后者会落到 agent，是真实发言）', async () => {
+		const app = harness(baseConfig({ groupMentionOnly: false }));
+		app.dispatcher.handle(messageEvent('备份用 restic', 'group', 1));
+		app.dispatcher.handle(messageEvent('/unknowncmd 帮我查一下', 'group', 2));
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(app.memories).toEqual(['备份用 restic', '/unknowncmd 帮我查一下']);
+	});
+});
 
 describe('Dispatcher 信息过滤', () => {
 	it('命中过滤前缀：不进 agent、不回提示，只记丢弃原因', async () => {

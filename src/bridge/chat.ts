@@ -26,9 +26,10 @@
 import { mkdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import type { AgentHandle, AgentOptions, Agent, WorkspaceRegistryLike } from '../dsh.ts';
+import type { AgentHandle, AgentOptions, Agent, SessionId as SessionIdType, WorkspaceRegistryLike } from '../dsh.ts';
 import { installModelSelection } from '@deepseek-ai/dsh-agent';
-import { SessionId as SessionIdOf } from '@deepseek-ai/dsh-session';
+import { buildForkSeed, SessionId as SessionIdOf, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session';
+import * as timeContextPlugin from '@deepseek-ai/dsh-time-context';
 import type { DshServices } from '../dsh.ts';
 import type { DshQQConfig } from '../config.ts';
 import { resolveSessionsRoot } from '../paths.ts';
@@ -38,8 +39,9 @@ import type { OneBotApi, ForwardNode } from '../onebot/api.ts';
 import type { OBSegment } from '../onebot/segments.ts';
 import type { RosterService } from '../onebot/roster.ts';
 import type { AdminStore } from '../pipeline/access.ts';
-import { runTurn } from './agentRunner.ts';
-import { buildQuotedBlock, formatHostTime, type QuotedContext } from './prompt.ts';
+import { readSessionEvents, runTurn } from './agentRunner.ts';
+import { describeStallMs } from './stall.ts';
+import { buildQuotedBlock, type QuotedContext } from './prompt.ts';
 import { registerToolGuard } from './toolGuard.ts';
 import { QuestionRelay, type RelayOutcome } from './asker.ts';
 import { acceptAsAnswer, askAbortedError, askTimeoutError, askUndeliverableError, isNoAnswererError, type AskRequest } from './ask.ts';
@@ -60,6 +62,7 @@ import type { MessageLogService } from '../logs/store.ts';
 import { describeSchedule } from '../tasks/schedule.ts';
 import type { ScheduledTask } from '../tasks/store.ts';
 import {
+	FORKED_NOTICE,
 	HELD_NOTICE,
 	HELD_ROTATED_NOTICE,
 	SessionBusyError,
@@ -83,7 +86,7 @@ const BUSY_POLL_MS = 5_000;
 const TASK_HINT_SECTION = [
 	'你可以为当前会话创建定时任务：task_schedule 登记，task_list / task_cancel 查看/取消。',
 	'当用户提出"每天X点叫我…""X分钟后提醒我…"这类未来要做的事时，用 task_schedule 落成任务；到期你会被重新唤醒，把结果直接发到本会话。',
-	'时间一律以上方"当前时间"（宿主机真实时间）为基准；只口头答应而不落成任务，用户是收不到提醒的。',
+	'时间一律以 dsh 内置 time-context 提供的真实时间为基准；只口头答应而不落成任务，用户是收不到提醒的。',
 ].join('\n');
 /** 聊天记录能力提示（group 会话 + 工具已注册时才注入）。 */
 const HISTORY_HINT_SECTION = [
@@ -95,12 +98,24 @@ const HISTORY_HINT_SECTION = [
 /** resume/create 共用的 agent 组合参数（不含会话 id）。 */
 interface AgentComposition {
 	agentOptions: AgentOptions | undefined;
-	meta: { cwd: string };
+	meta: {
+		cwd: string;
+		/** fork 时记录来源会话（dsh 的 seed 血缘；resume 会忽略）。 */
+		parentSession?: SessionIdType;
+		/** fork 时必须为 true，并与 inheritedEventCount 一起交给 agents.create。 */
+		isSeeded?: boolean;
+	};
 	setup: (agentCtx: Parameters<NonNullable<import('@deepseek-ai/dsh-agent').CreateAgentOptions['setup']>>[0]) => Promise<void>;
 }
 /** agent ctx 上 systemPrompt 服务（dsh 内核注入，未随 npm 包发布类型）。 */
 interface SystemPromptLike {
 	section(options: { name: string; order: number; text: string | ((context: unknown) => string) }): void;
+}
+
+/** agent ctx 上挂载子插件所需的 Cordis 最小面（时间感知兜底用）。 */
+interface AgentPluginHostLike {
+	registry?: { has(plugin: unknown): boolean };
+	plugin?(plugin: unknown, config?: unknown): PromiseLike<unknown> | unknown;
 }
 
 /** 派生进程内聊天键。 */
@@ -233,7 +248,7 @@ export interface BridgeOptions {
 	 */
 	awaitPendingDispose?: () => Promise<void>;
 	/**
-	 * 开始等待界面释放写句柄时通知用户（只发一次；`busyStrategy=wait` 时）。
+	 * 开始等待界面释放写句柄时通知用户（只发一次；仅 `busyStrategy=wait`）。
 	 * 缺省 = 不提示，只在日志里留痕。
 	 */
 	onResumeWait?: (message: string) => void;
@@ -284,6 +299,10 @@ export class ChatBridge {
 	private handleSessionId = '';
 	/** 因写句柄冲突换过新会话，下轮回复前提醒用户一次。 */
 	private rotatedNotice = false;
+	/** 因写句柄冲突从旧会话分叉，下轮回复前提醒用户一次。 */
+	private forkedNotice = false;
+	/** 本进程内分叉的来源会话 id（/status 也读 header.parentSession）。 */
+	private forkedFrom: string | undefined;
 	/** 待发送的「会话被界面占用」提示（下轮回复前发一次）。 */
 	private heldNotice: string | undefined;
 	/**
@@ -333,7 +352,6 @@ export class ChatBridge {
 			send: (segments) => options.api.sendSegments(this.target, segments),
 			options: () => ({
 				askUserWaitMs: options.config.askUserWaitMs,
-				maxTurnMs: options.config.maxTurnMs,
 				replyMaxChars: options.config.replyMaxChars,
 			}),
 			askerId: () => this.turnSenderId,
@@ -602,6 +620,38 @@ export class ChatBridge {
 	}
 
 	/**
+	 * 取出并清空"写句柄冲突"提示：fork > rotate > 正在等界面释放。
+	 * 用户消息与定时任务轮都调用，避免同一提示留到下一轮才发。
+	 */
+	private takeOccupancyNotice(): string | undefined {
+		if (this.forkedNotice) {
+			this.forkedNotice = false;
+			this.heldNotice = undefined;
+			return FORKED_NOTICE;
+		}
+		if (this.rotatedNotice) {
+			this.rotatedNotice = false;
+			this.heldNotice = undefined;
+			return HELD_ROTATED_NOTICE;
+		}
+		if (this.heldNotice !== undefined) {
+			const notice = this.heldNotice;
+			this.heldNotice = undefined;
+			return notice;
+		}
+		return undefined;
+	}
+
+	/** 发送一条非关键提示；失败只记日志，绝不因此跳过本轮对话。 */
+	private async sendNotice(text: string): Promise<void> {
+		try {
+			await this.sendText(text);
+		} catch (error) {
+			this.logger.warn(`dsh-qq-bot: ${this.label} 提示发送失败（不影响本轮）: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	/**
 	 * 按需 resume/create，并处理写句柄冲突。
 	 *
 	 * dsh 会话是单写者模型：同一 session id 在进程内只允许一个活动写句柄。
@@ -609,9 +659,10 @@ export class ChatBridge {
 	 * 空闲回收、进程重启后的残留），或该会话已被其它组件打开（最典型：用户在
 	 * dsh 界面里打开了这个 QQ 会话，宿主侧 agent 长期持有写句柄）。
 	 *
-	 * 前者退避重试即可恢复；后者**重试无效**，按配置处理（见 reclaim.ts）：
-	 * `wait`（默认）先提示并等界面关掉那个会话，等到就原地 resume 原会话，
-	 * 等不到才 `rotate`（换新会话，丢上下文）。
+	 * 前者退避重试即可恢复；后者**重试无效**，按 `busyStrategy` 处理（见 reclaim.ts）：
+	 * - `fork`（默认）：立刻从原会话分叉（完整事件前缀，不抢写句柄）；失败回退 rotate；
+	 * - `wait`：先提示并等界面关掉那个会话，等到就原地 resume；等不到再 fork，最后 rotate；
+	 * - `rotate`：直接换新会话（用户明确要“重新开始”时用）。
 	 */
 	private async openAgent(agentOptions: AgentOptions, waitOnBusy = true): Promise<AgentHandle> {
 		const base: AgentComposition = {
@@ -624,13 +675,24 @@ export class ChatBridge {
 		if (outcome.kind === 'ok') return outcome.handle;
 		if (outcome.kind === 'held') {
 			if (!waitOnBusy) throw new SessionBusyError(`会话 ${this.sessionId} 的写句柄被其它界面持有（本次不等待）`);
-			const waited = await this.waitForForeignRelease();
-			if (waited) {
-				const retry = await this.tryResumeComposition(base);
-				if (retry.kind === 'ok') return retry.handle;
-				if (retry.kind === 'held') {
-					this.logger.warn(`dsh-qq-bot: ${this.label} 会话 ${this.sessionId} 等待中被再次占用`);
+			const strategy = normalizeBusyStrategy(this.options.config.busyStrategy);
+			if (strategy === 'fork') {
+				const forked = await this.forkHeldSession(base);
+				if (forked !== undefined) return forked;
+				return await this.rotateOwnedSession(base, outcome.cause);
+			}
+			if (strategy === 'wait') {
+				const waited = await this.waitForForeignRelease();
+				if (waited) {
+					const retry = await this.tryResumeComposition(base);
+					if (retry.kind === 'ok') return retry.handle;
+					if (retry.kind === 'held') {
+						this.logger.warn(`dsh-qq-bot: ${this.label} 会话 ${this.sessionId} 等待中被再次占用`);
+					}
 				}
+				// wait 超时（或等待被打断后仍占用）：先 fork，最后才 rotate。
+				const forked = await this.forkHeldSession(base);
+				if (forked !== undefined) return forked;
 			}
 		}
 		return await this.rotateOwnedSession(base, outcome.cause);
@@ -668,21 +730,22 @@ export class ChatBridge {
 	}
 
 	/**
-	 * 写句柄被其它界面持有：按 `busyStrategy` 决定等还是换。
+	 * `wait` 策略：等界面释放写句柄。
 	 *
 	 * 等待期间宿主可能已经释放（用户关掉了界面），随后 `agents.resume` 就能
-	 * 重新接管**原会话**——这是本文件唯一不丢上下文的恢复路径。/reset、
+	 * 重新接管**原会话**——这是不 fork 也能保留上下文的路径。/reset、
 	 * 桥销毁、`/reclaim` 都会打断等待（见 reclaim.ts 的 isCanceled）。
 	 *
 	 * @returns true = 值得再试一次 resume
 	 */
 	private async waitForForeignRelease(): Promise<boolean> {
 		const config = this.options.config;
+		// 只有 wait 策略会走到这里；fork 失败直接回退 rotate，不阻塞。
 		if (normalizeBusyStrategy(config.busyStrategy) !== 'wait') return false;
 		const budgetMs = config.busyWaitMs;
 		if (!(budgetMs > 0)) return false;
-		// 与单轮超时对齐：等待本身不产生回复，绝不能让 maxTurnMs 先开火。
-		const waitMs = Math.min(budgetMs, Math.max(config.maxTurnMs / 2, 1_000));
+		// 等待上限就是 busyWaitMs（等待本身不产生回复，没有轮次超时会来抢跑）。
+		const waitMs = budgetMs;
 		const startedAt = Date.now();
 		const deadline = startedAt + waitMs;
 		const sessionAtStart = this.sessionId;
@@ -711,7 +774,7 @@ export class ChatBridge {
 			this.logger.info(`dsh-qq-bot: ${this.label} 会话 ${sessionAtStart} 的等待被打断（/reset 或 /reclaim），立即重试`);
 			return true;
 		}
-		this.logger.warn(`dsh-qq-bot: ${this.label} 会话 ${sessionAtStart} 等待 ${Math.round((Date.now() - startedAt) / 1000)}s 仍未释放，改开新会话`);
+		this.logger.warn(`dsh-qq-bot: ${this.label} 会话 ${sessionAtStart} 等待 ${Math.round((Date.now() - startedAt) / 1000)}s 仍未释放，改走 fork/换新会话`);
 		return false;
 	}
 
@@ -752,7 +815,14 @@ export class ChatBridge {
 
 	/** /status 用的一行说明。 */
 	dispositionText(): string {
-		return describeDisposition(this.disposition());
+		const base = describeDisposition(this.disposition());
+		const from = this.forkedFrom ?? this.headerParentSession();
+		return from === undefined ? base : `${base}；本会话从 ${from} 分叉`;
+	}
+
+	/** 当前 handle 的会话 header 里记录的分叉来源（重启后仍可读）。 */
+	private headerParentSession(): string | undefined {
+		return (this.handle?.agent as { session?: { header?: { parentSession?: string } } } | undefined)?.session?.header?.parentSession;
 	}
 
 	/**
@@ -765,16 +835,122 @@ export class ChatBridge {
 	}
 
 	/**
-	 * 写句柄持续被占用：改为开启新会话（同 /reset 的 id 轮换，身份表同步更新）。
+	 * 从当前会话的完整事件前缀 fork 一个新会话（不抢旧写句柄）。
+	 *
+	 * 旧会话可能正被 dsh 界面持有：同进程用 `sessions.get()` 拿 live 会话快照；
+	 * 跨进程用 `sessionPersistence.open(id, 'read')`（read 不取所有权，可在对方
+	 * 持有 write 时打开）。`buildForkSeed` 会补 inherited marker 与 open turn 的
+	 * closers，新 agent 仍走本插件的 setup（工具守卫/人格/模型）。
+	 *
+	 * @returns 成功 = 新 handle（sessionId 已更新）；失败 = undefined（调用方回退）
+	 */
+	private async forkHeldSession(base: AgentComposition): Promise<AgentHandle | undefined> {
+		const previous = this.sessionId;
+		try {
+			const snapshot = await this.readSessionForFork(previous);
+			if (snapshot === undefined || snapshot.events.length === 0) {
+				this.logger.info(`dsh-qq-bot: ${this.label} 会话 ${previous} 没有可 fork 的事件，回退`);
+				return undefined;
+			}
+			const maxEvents = this.options.config.forkMaxEvents;
+			if (maxEvents > 0 && snapshot.events.length > maxEvents) {
+				this.logger.warn(
+					`dsh-qq-bot: ${this.label} 会话 ${previous} 有 ${snapshot.events.length} 条事件，超过 forkMaxEvents=${maxEvents}，不 fork`,
+				);
+				return undefined;
+			}
+			const boundary = snapshot.events[snapshot.events.length - 1]!.seq;
+			const seed = buildForkSeed(snapshot.events, boundary);
+			const nextId = `${this.baseSessionId}-fork-${Date.now()}`;
+			const handle = await this.services.agents.create({
+				sessionId: SessionIdOf(nextId),
+				meta: {
+					...base.meta,
+					cwd: snapshot.cwd ?? base.meta.cwd,
+					parentSession: SessionIdOf(previous),
+					isSeeded: true,
+				},
+				inheritedEventCount: SessionLogOffset(boundary + 1),
+				seed,
+				...(base.agentOptions !== undefined ? { agentOptions: base.agentOptions } : {}),
+				setup: base.setup,
+			});
+			this.sessionId = nextId;
+			this.persistSessionId();
+			this.forkedNotice = true;
+			this.forkedFrom = previous;
+			this.rotatedNotice = false;
+			this.heldNotice = undefined;
+			// fork 的原文已经覆盖上一段，别再让记忆层注入一份摘要。
+			// 记忆库异常绝不能把已经建好的 fork 再回退成 rotate。
+			try {
+				this.options.memory?.markHanded?.(this.key, nextId);
+			} catch (error) {
+				this.logger.warn(`dsh-qq-bot: ${this.label} fork 后标记记忆交接失败（不影响会话）: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			this.options.logs?.record({
+				dir: 'sys',
+				scope: 'dsh',
+				event: 'fork',
+				chatType: this.scope,
+				chatId: this.chatId,
+				text: `会话 ${previous} 被占用，已 fork 到 ${nextId}（继承 ${boundary + 1} 条事件）`,
+			});
+			this.logger.warn(`dsh-qq-bot: ${this.label} 会话 ${previous} 被占用，已 fork 到 ${nextId}（继承 ${boundary + 1} 条事件）`);
+			return handle;
+		} catch (error) {
+			this.logger.warn(`dsh-qq-bot: ${this.label} 从 ${previous} fork 失败，回退：${error instanceof Error ? error.message : String(error)}`);
+			return undefined;
+		}
+	}
+
+	/**
+	 * 读旧会话的完整事件前缀。同进程优先 live 快照，跨进程用只读持久句柄；
+	 * 旧宿主没有 `read` 时返回 undefined（调用方回退 rotate）。
+	 */
+	private async readSessionForFork(
+		sessionId: string,
+	): Promise<{ events: readonly SessionEvent[]; cwd?: string } | undefined> {
+		const sessions = this.services.sessions as
+			| {
+					get?: (
+						id: SessionIdType,
+					) =>
+						| {
+								header?: { cwd?: string };
+								snapshotEvents?: () => readonly SessionEvent[];
+								events?: readonly SessionEvent[];
+						  }
+						| undefined;
+			  }
+			| undefined;
+		const live = sessions?.get?.(SessionIdOf(sessionId));
+		if (live !== undefined) {
+			return { events: readSessionEvents(live), cwd: live.header?.cwd };
+		}
+
+		const persistence = this.services.getPersistence?.();
+		if (persistence === undefined) return undefined;
+		const handle = await persistence.open(SessionIdOf(sessionId), 'read');
+		try {
+			if (typeof handle.read !== 'function') return undefined;
+			const { events } = await handle.read();
+			return { events, cwd: handle.header?.cwd };
+		} finally {
+			await handle.close();
+		}
+	}
+
+	/**
+	 * fork 失败后的最后兜底：开启全新会话（同 /reset 的 id 轮换，身份表同步更新）。
 	 *
 	 * 不接管宿主已有的 agent：它的组合可能不含本插件的工具权限守卫
 	 * （registerToolGuard 只在插件自己的 setup 里注册），接管会让 QQ 入口
 	 * 绕过 restrictTools。旧会话历史保留，仍可在 dsh 界面中查看。
+	 * **不再做记忆蒸馏/交接**——上下文交接已由 fork 承担；这里只处理 fork
+	 * 也失败（没有事件、超过 forkMaxEvents、旧宿主不支持 read）的边角情况。
 	 */
 	private async rotateOwnedSession(base: AgentComposition, cause: unknown): Promise<AgentHandle> {
-		// 换世代前尽力把这一段对话蒸馏进长期记忆（等待有上限，超时就用现有卡片 +
-		// 最后几条原话交接）。失败绝不影响轮换本身。
-		await this.finishGeneration('rotate');
 		const previous = this.sessionId;
 		const live = this.services.agents.get(SessionIdOf(previous));
 		const holder = live !== undefined ? '该会话已在 dsh 界面中打开' : '其它组件持有写句柄';
@@ -783,7 +959,11 @@ export class ChatBridge {
 		);
 		this.sessionId = `${this.baseSessionId}-reset-${Date.now()}`;
 		this.persistSessionId();
+		this.forkedFrom = undefined;
+		this.forkedNotice = false;
 		this.rotatedNotice = true;
+		// rotate 是真正的新世代（fork 失败才走到这里）：卡片解冻，但不再蒸馏/交接。
+		this.options.memory?.unfreeze(this.key);
 		return await this.services.agents.create({ sessionId: SessionIdOf(this.sessionId), ...base });
 	}
 
@@ -853,17 +1033,6 @@ export class ChatBridge {
 				this.logger.warn(`dsh-qq-bot: 聊天记录提示 section 注册失败: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
-		// 时间感知 section：每次组 prompt 求值，模型每轮都拿到宿主机当前时间；
-		// timeAware 关闭时文本为空，被 prompt 渲染丢弃，开关热应用无需重建会话。
-		try {
-			(agentCtx as unknown as { systemPrompt?: SystemPromptLike }).systemPrompt?.section({
-				name: 'dsh-qq-bot:time',
-				order: 315,
-				text: () => this.timeSection(),
-			});
-		} catch (error) {
-			this.logger.warn(`dsh-qq-bot: 时间感知 section 注册失败: ${error instanceof Error ? error.message : String(error)}`);
-		}
 		// 网页搜索提示：qq_web_search 按配置的优先级链顺延（内置 web_search 不走
 		// 这条链），只在工具注册且开关开着时给出（SearchService 每轮求值，空串即不注入）。
 		try {
@@ -917,9 +1086,30 @@ export class ChatBridge {
 		// 预设提供工具运行时等能力；挂载失败必须中止创建，否则得到
 		// 只能聊天、调工具必崩的半成品会话。
 		await this.services.agentPresets?.mount(agentCtx, this.options.config.preset === '' ? undefined : this.options.config.preset);
+		// 时间感知直接用 dsh 内置 time-context：standard / cordis / ptc 预设已挂载，
+		// 此时 registry.has 为真，不重复挂；minimal 或自定义预设没挂时在这里补上。
+		// 不再自行格式化时间或注册 system prompt section，避免两套时钟与重复注入。
+		await this.ensureTimeContext(agentCtx);
 		// 工具权限守卫：普通用户仅 userTools，管理员全量，blockedTools 全员禁用。
 		if (this.options.config.restrictTools) {
 			registerToolGuard(agentCtx, () => this.turnAdmin, this.options.config, this.logger);
+		}
+	}
+
+	/**
+	 * 确保当前 agent 使用 dsh 内置 time-context 提供真实时间感知。
+	 *
+	 * 预设已经挂载时直接复用（`registry.has` 按插件回调去重）；没有时以默认
+	 * 配置挂到 agent 作用域。挂载失败只记 warn：时间感知是增强能力，不能让
+	 * 整个 QQ 会话创建失败。
+	 */
+	private async ensureTimeContext(agentCtx: Parameters<NonNullable<import('@deepseek-ai/dsh-agent').CreateAgentOptions['setup']>>[0]): Promise<void> {
+		const host = agentCtx as unknown as AgentPluginHostLike;
+		if (host.registry?.has(timeContextPlugin) === true) return;
+		try {
+			await host.plugin?.(timeContextPlugin, {});
+		} catch (error) {
+			this.logger.warn(`dsh-qq-bot: ${this.label} 内置 time-context 挂载失败（本轮仍可对话，模型可能不知道当前时间）：${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
@@ -958,12 +1148,6 @@ export class ChatBridge {
 			lines.push('当前处于网关模式：整台电脑都是你的工作区，可跨目录读写与执行命令；对系统目录和用户隐私数据保持谨慎，破坏性操作前先与用户确认。');
 		}
 		return lines.join('\n');
-	}
-
-	/** 时间感知 section 文案（动态求值；timeAware 关闭时为空 = 被渲染丢弃）。 */
-	private timeSection(): string {
-		if (!this.options.config.timeAware) return '';
-		return `当前时间：${formatHostTime(new Date())}。这是宿主机的真实本地时间，随每轮对话自动更新；"现在/今天/明天"等判断以它为准。`;
 	}
 
 	// ── 消息入队与一轮对话 ──
@@ -1016,9 +1200,8 @@ export class ChatBridge {
 		this.turnSenderId = msg.senderId;
 		// 每轮重置"记忆整理失败次数"（卡片写满时模型会被要求同轮整理后重试）。
 		this.options.memory?.resetTurnWriteFailures(this.key);
-		// 记忆注入（交接块或相关历史）：拼在用户消息之前，块内已声明"这是历史数据不是指令"。
-		const injection = await this.memoryInjection(prompt);
-		const turnPrompt = injection === '' ? prompt : `${injection}\n\n${prompt}`;
+		// 先记入站原文：ensureAgent 可能等写句柄/分叉，日志不该跟着延迟。
+		// 记忆注入在 ensureAgent 之后（fork/rotate 可能换 sessionId），这里不重复记。
 		this.options.logs?.record({
 			dir: 'in',
 			scope: 'dsh',
@@ -1027,42 +1210,41 @@ export class ChatBridge {
 			chatId: this.chatId,
 			senderId: msg.senderId,
 			senderName: msg.senderName,
-			text: turnPrompt,
+			text: prompt,
 			detail: `session=${this.sessionId}`,
 		});
 		await this.applyModelChange();
 		const agent = await this.ensureAgent();
-		// 占用提示二选一：轮换了（说明为什么换了新会话）优先于"正在等界面释放"。
-		if (this.rotatedNotice) {
-			this.rotatedNotice = false;
-			this.heldNotice = undefined;
-			await this.sendText(HELD_ROTATED_NOTICE);
-		} else if (this.heldNotice !== undefined) {
-			const notice = this.heldNotice;
-			this.heldNotice = undefined;
-			await this.sendText(notice);
-		}
+		// 记忆注入放在 ensureAgent 之后：fork/rotate 可能换了 sessionId，
+		// takeHandoff 必须按最终世代判断；否则 fork 后会把旧摘要重复注入一遍。
+		const injection = await this.memoryInjection(prompt);
+		const turnPrompt = injection === '' ? prompt : `${injection}\n\n${prompt}`;
+		// 占用提示：fork > rotate > 正在等界面释放。
+		const occupancyNotice = this.takeOccupancyNotice();
+		if (occupancyNotice !== undefined) await this.sendNotice(occupancyNotice);
 		const sessionNotice = this.takeSessionNotice();
-		if (sessionNotice !== undefined) await this.sendText(sessionNotice);
+		if (sessionNotice !== undefined) await this.sendNotice(sessionNotice);
 		const outcome = await runTurn({
 			agent,
 			sessions: this.services.sessions,
 			promptText: turnPrompt,
-			maxTurnMs: this.options.config.maxTurnMs,
+			idleTimeoutMs: this.options.config.turnIdleTimeoutMs,
+			waitingForAnswer: () => this.asker.busy,
 		});
 		this.recordAssistantReply(outcome.text);
-		if (outcome.timedOut) {
+		if (outcome.stalled) {
+			const idle = describeStallMs(this.options.config.turnIdleTimeoutMs);
 			this.options.logs?.record({
 				dir: 'sys',
 				scope: 'dsh',
-				event: 'timeout',
+				event: 'stalled',
 				chatType: this.scope,
 				chatId: this.chatId,
 				senderId: msg.senderId,
 				senderName: msg.senderName,
-				text: '本轮处理超时，已取消',
+				text: `连续 ${idle} 没有任何进展（无模型输出、无工具调用），已判定卡死并中断本轮`,
 			});
-			await this.sendText('（处理超时，这轮任务已取消）');
+			await this.sendText(`（这一轮连续 ${idle} 没有任何动静，已按"卡死"中断。任务本来就要长时间静默的话，把「无进展中断」调大或设成 0；下次想手动停就发 /stop）`);
 			return;
 		}
 		if (outcome.text !== '') {
@@ -1125,30 +1307,34 @@ export class ChatBridge {
 		// 触发轮次的工具权限继承任务创建者（创建时有管理员权限，到期轮次同样有）。
 		this.turnAdmin = task.createdBy !== undefined && this.options.admins.isAdmin(task.createdBy);
 		this.turnSenderId = task.createdBy ?? '';
-		// 定时任务轮也一样做记忆注入：换了世代时交接块尤其重要（否则"未来的自己"
-		// 完全不知道上一段对话）。预取传空查询 → 只会走交接分支。
-		const injection = await this.memoryInjection('');
-		const turnPrompt = injection === '' ? prompt : `${injection}\n\n${prompt}`;
 		await this.applyModelChange();
 		const agent = await this.ensureAgent();
+		// 与 handleMessage 一样，记忆注入放在 ensureAgent 之后：fork 后
+		// takeHandoff 要按新 sessionId 判断，避免把旧摘要重复注入。
+		const injection = await this.memoryInjection('');
+		const turnPrompt = injection === '' ? prompt : `${injection}\n\n${prompt}`;
+		const occupancyNotice = this.takeOccupancyNotice();
+		if (occupancyNotice !== undefined) await this.sendNotice(occupancyNotice);
 		const outcome = await runTurn({
 			agent,
 			sessions: this.services.sessions,
 			promptText: turnPrompt,
-			maxTurnMs: this.options.config.maxTurnMs,
+			idleTimeoutMs: this.options.config.turnIdleTimeoutMs,
+			waitingForAnswer: () => this.asker.busy,
 		});
 		this.recordAssistantReply(outcome.text);
-		if (outcome.timedOut) {
+		if (outcome.stalled) {
+			const idle = describeStallMs(this.options.config.turnIdleTimeoutMs);
 			this.options.logs?.record({
 				dir: 'sys',
 				scope: 'dsh',
-				event: 'timeout',
+				event: 'stalled',
 				chatType: this.scope,
 				chatId: this.chatId,
 				senderName: '定时任务',
-				text: `定时任务 ${task.id} 执行超时，已取消`,
+				text: `${title}连续 ${idle} 没有任何进展，已判定卡死并中断`,
 			});
-			await this.sendText(`（${title}执行超时，这轮已取消）`);
+			await this.sendText(`（${title}执行时连续 ${idle} 没有任何动静，已按"卡死"中断）`);
 			return;
 		}
 		if (outcome.text !== '') {
@@ -1328,6 +1514,23 @@ export class ChatBridge {
 		}
 	}
 
+	/**
+	 * 打断当前正在跑的这一轮（`/stop`）：只取消这一轮的 agent 活动，
+	 * **不换会话、不丢上下文**，队列里排在后面的消息照常继续。
+	 *
+	 * 存在的理由：删掉总时长超时后，卡住的一轮会把该会话的队列占住，而
+	 * `/reset` 内部要 `await this.queue`（等这一轮结束）——没有它就只能重启 dsh。
+	 *
+	 * @returns 是否确实有正在跑的轮次（false = 当前空闲，什么都没做）
+	 */
+	abortTurn(): boolean {
+		if (!this.busy) return false;
+		// 正在等用户回答的提问一并撤掉：工具调用不必再等 askUserWaitMs 到点。
+		this.asker.cancel();
+		this.handle?.agent.cancel({ kind: 'user' });
+		return true;
+	}
+
 	/** 重置会话：换新 session id（旧会话保留），下次消息从零开始。 */
 	async reset(): Promise<void> {
 		await this.queue.catch(() => {});
@@ -1335,11 +1538,16 @@ export class ChatBridge {
 		await this.finishGeneration('reset');
 		this.sessionId = `${this.baseSessionId}-reset-${Date.now()}`;
 		this.persistSessionId();
+		// /reset 是新的血缘起点：清掉上一段 fork/占用的提示与来源。
+		this.forkedFrom = undefined;
+		this.forkedNotice = false;
+		this.rotatedNotice = false;
+		this.heldNotice = undefined;
 		await this.disposeHandle();
 	}
 
-	/** 世代结束：蒸馏 + 解冻卡片（下一世代要看到最新记忆）。 */
-	private async finishGeneration(cause: 'rotate' | 'reset'): Promise<void> {
+	/** 世代结束（/reset）：蒸馏 + 解冻卡片（下一世代要看到最新记忆）。 */
+	private async finishGeneration(cause: 'reset'): Promise<void> {
 		const memory = this.options.memory;
 		if (memory === undefined || !memory.ready) return;
 		try {

@@ -8,6 +8,7 @@ import { TOOL_OPTIONS_META_KEY } from './toolOptions.ts';
 import { SEARCH_BACKEND_IDS, type SearchBackendId } from './search/priority.ts';
 import { BUSY_STRATEGIES, DEFAULT_BUSY_STRATEGY, DEFAULT_BUSY_WAIT_MS, type BusyStrategy } from './bridge/reclaim.ts';
 import { DEFAULT_ASK_WAIT_MS } from './bridge/ask.ts';
+import { DEFAULT_STALL_IDLE_MS } from './bridge/stall.ts';
 
 export interface RateLimitConfig {
 	/** 限速时间窗口（ms）；max 为 0 时禁用限速 */
@@ -109,10 +110,6 @@ export interface DshQQConfig {
 	/** 单个后端的请求超时（ms）；超时只影响这一档，链继续顺延 */
 	searchTimeoutMs: number;
 
-	// 时间感知（卡片「Agent 与工作目录」的时间感知分节）
-	/** 把宿主机当前时间注入 system prompt（每轮动态求值） */
-	timeAware: boolean;
-
 	// ── 对话体验 ────────────────────────────────────────────────
 	// 唤醒（卡片「唤醒」）
 	/** 私聊是否也需要唤醒前缀（默认不需要） */
@@ -134,17 +131,25 @@ export interface DshQQConfig {
 	rateLimit: RateLimitConfig;
 	/** 单会话排队上限，超出直接提示繁忙 */
 	maxQueue: number;
-	/** 单轮最大等待（ms），超时取消并提示 */
-	maxTurnMs: number;
+	/**
+	 * 无进展中断（ms）：一轮里连续这么久**没有任何会话事件**（模型输出、工具调用）
+	 * 就判定卡死并中断本轮；0 = 不监视。
+	 * **它不是总时长超时**（那个已删除，见 bridge/stall.ts）：长任务只要有进展就
+	 * 不会被打断，只有"一声不吭"才会命中；等用户回答期间不计入。
+	 */
+	turnIdleTimeoutMs: number;
 	/** 会话空闲回收时间（ms），0 = 不回收 */
 	sessionIdleTimeoutMs: number;
 	/**
 	 * 会话被 dsh 界面（WebUI / TUI）占着写句柄时的策略（见 bridge/reclaim.ts）：
-	 * wait = 等对方释放（默认，关掉界面后原地恢复原会话）；rotate = 立即换新会话（丢上下文）。
+	 * fork = 从原会话分叉（默认，完整保留上下文）；wait = 等对方释放，超时再 fork；
+	 * rotate = 立即换新会话（丢上下文，用户明确要“重新开始”时用）。
 	 */
 	busyStrategy: BusyStrategy;
-	/** wait 策略的等待上限（ms），超时才换新会话；0 = 不等待直接换 */
+	/** wait 策略的等待上限（ms），超时才走 fork；0 = 不等待直接 fork */
 	busyWaitMs: number;
+	/** fork 时最多继承的事件条数；超过则回退 wait/rotate，0 = 不限制 */
+	forkMaxEvents: number;
 
 	// 回复形态（卡片「回复形态」）
 	/** 单条消息字符上限（QQ 约 4500 安全），超出自动切块发送 */
@@ -188,8 +193,8 @@ export interface DshQQConfig {
 	 */
 	askUserEnabled: boolean;
 	/**
-	 * 等待回答的上限（ms）：超时后不再等 QQ，把请求让给 dsh 界面的应答器；
-	 * 实际等待不超过单轮上限的一半（等待不产生回复，不能让 maxTurnMs 先开火）。
+	 * 等待回答的上限（ms）：超时后不再等 QQ，把请求让给 dsh 界面的应答器。
+	 * 一轮对话没有超时（已删除），所以这就是等待自己的上限。
 	 */
 	askUserWaitMs: number;
 
@@ -201,9 +206,13 @@ export interface DshQQConfig {
 	 * 采集/卡片/预取/交接/蒸馏同理，都不需要重启 dsh。
 	 */
 	memoryEnabled: boolean;
-	/** L0 卡片字符预算（超出时按分数丢弃尾部，并在卡片末尾提示未展开条数） */
+	/** 画像段字符预算（稳定层：身份/偏好/规则/置顶；超出时按分数丢弃尾部） */
 	memoryCardMaxChars: number;
-	/** 单个会话的事实条数上限（超出按「非置顶 → 低置信 → 最久未更新」淘汰） */
+	/** 画像段独立预算（缺省回落到 memoryCardMaxChars） */
+	memoryProfileMaxChars: number;
+	/** 每轮情景段预算（检索到的记忆 + 原始消息；缺省 1200） */
+	memoryEpisodicMaxChars: number;
+	/** 单个会话的活跃记忆条数上限（超出按「非置顶 → 低重要度 → 低置信 → 最久未更新」淘汰） */
 	memoryMaxFacts: number;
 	/** 每轮 qq_memorize 允许的整理失败次数（超出则提示模型本轮停止整理） */
 	memoryMaxWriteFailuresPerTurn: number;
@@ -231,8 +240,10 @@ export interface DshQQConfig {
 	memoryDistillProvider: string;
 	/** 蒸馏用模型 id（空 = 部署默认模型）；WebUI 里是与「人格与模型」同一份清单的下拉 */
 	memoryDistillModel: string;
-	/** 蒸馏单次输出 token 上限 */
+	/** 蒸馏单次输出 token 上限（首轮尝试；不够时会用「空输出重试预算」再来一次） */
 	memoryDistillMaxTokens: number;
+	/** 空输出重试预算（token；0 = 不重试）：推理模型把预算烧在思考上时，放大预算再试一次 */
+	memoryDistillRetryTokens: number;
 	/** 单次蒸馏的超时（ms） */
 	memoryDistillTimeoutMs: number;
 	/** 世代交接块里附带的最后几条原话 */
@@ -243,6 +254,20 @@ export interface DshQQConfig {
 	memoryRetentionDays: number;
 	/** 每个会话保留的档案条数上限 */
 	memoryMaxEventsPerChat: number;
+	/** 敏感类别过滤（手机号/住址/证件号/银行卡/健康/感情等；默认开启） */
+	memorySensitiveFilter: boolean;
+	/** 跨群/私聊共享用户画像（默认关闭：群友的闲聊不应自动变成跨群画像） */
+	memoryCrossGroupUserProfile: boolean;
+	/** 个人事实/低置信条目先进候选区（默认开启，管理员批准后才进画像） */
+	memoryCandidateReview: boolean;
+	/** 一般事实/事件的过期天数（默认 90；画像/偏好/规则不过期） */
+	memoryFactTtlDays: number;
+	/** 用户偏好的过期天数（默认 180） */
+	memoryUserPreferenceTtlDays: number;
+	/** 删除后的 tombstone 保留天数（默认 30；防止后台抽取复活已删内容） */
+	memoryTombstoneDays: number;
+	/** 每轮记录注入明细（id/分数/字符数；默认开启） */
+	memoryInjectLog: boolean;
 
 	// 媒体与互动（卡片「媒体与互动」）
 	/** 是否启用收图（下载图片传给 agent） */
@@ -291,7 +316,16 @@ export interface DshQQConfig {
 	sessionGroupRoot: string;
 }
 
-export const ConfigSchema: Schema<DshQQConfig> = Schema.object({
+/**
+ * 配置 schema。
+ *
+ * **根节点标记 `.volatile()`**：dsh ≥ 0.2.1 的 settings 服务只把 volatile 字段
+ * 暴露成可编辑表单，并用「整个配置的稳定引用」做热更新（loader 直接更新引用，
+ * 不重启插件）。插件在 `index.ts` 里把引用解开成普通对象使用，并监听
+ * `loader/volatile-update` 重新合并（见 `volatileConfig.ts`）。
+ * 若去掉这个标记，WebUI 的「QQ（napcat）」配置页会整体消失。
+ */
+export const ConfigSchema = Schema.object({
 	// ── 接入与安全 ──
 	transport: Schema.union(['forward', 'reverse']).default('forward')
 		.description('接入方式：forward=正向WS（插件连 napcat）；reverse=反向WS（napcat 连插件）'),
@@ -343,14 +377,17 @@ export const ConfigSchema: Schema<DshQQConfig> = Schema.object({
 		max: Schema.number().step(1).min(0).max(1000).default(30).description('窗口内最大触发次数；0 = 不限速'),
 	}).default({ windowMs: 60000, max: 30 }).description('按会话限速'),
 	maxQueue: Schema.number().step(1).min(1).max(200).default(20).description('单会话排队上限'),
-	maxTurnMs: Schema.number().step(1).min(1000).max(3600000).default(600000).description('单轮最大等待（ms），超时取消'),
+	// 一轮对话没有总时长超时（曾有的 maxTurnMs 已按用户要求删除，不要再加回来）：
+	// agent 跑到什么时候由它自己决定，只有"连续没有任何事件"才由这个看门狗兜底。
+	turnIdleTimeoutMs: Schema.number().step(1).min(0).max(3600000).default(DEFAULT_STALL_IDLE_MS).description('无进展中断（ms）：连续这么久没有任何会话事件（模型输出、工具调用）才判定卡死并中断本轮；长任务只要有进展就不会被打断，0 = 不监视'),
 	// 默认 0 = 不回收是刻意的：回收会主动释放写句柄，而 dsh 界面（WebUI）一旦
 	// promote 了那个会话就**不会**再释放（宿主没有 release/demote 入口），插件
-	// 只能等（busyStrategy）或换号。永不回收 = 界面只能复用本插件的 agent。
+	// 只能 fork/等（busyStrategy）或换号。永不回收 = 界面只能复用本插件的 agent。
 	sessionIdleTimeoutMs: Schema.number().step(1).min(0).max(86400000).default(0).description('会话空闲回收时间（ms）；0 = 不回收（默认，写句柄一直留在插件手里，dsh 界面只能复用同一个 agent，代价是每个聊过天的对象常驻一个 agent）'),
-	// 占用策略的默认值是刻意的：wait 只损失时延，rotate 会静默丢掉对话上下文。
-	busyStrategy: Schema.union([...BUSY_STRATEGIES]).default(DEFAULT_BUSY_STRATEGY).description('会话被 dsh 界面占用时的策略：wait = 等对方释放（默认）；rotate = 立即换新会话'),
-	busyWaitMs: Schema.number().step(1000).min(0).max(3600000).default(DEFAULT_BUSY_WAIT_MS).description('wait 策略的等待上限（ms）；超时才换新会话，0 = 不等待'),
+	// 占用策略的默认值是刻意的：fork 保留完整上下文，wait 只损失时延，rotate 会静默丢对话。
+	busyStrategy: Schema.union([...BUSY_STRATEGIES]).default(DEFAULT_BUSY_STRATEGY).description('会话被 dsh 界面占用时的策略：fork = 从原会话分叉（默认，完整保留上下文）；wait = 等对方释放，超时再 fork；rotate = 立即换新会话（丢上下文）'),
+	busyWaitMs: Schema.number().step(1000).min(0).max(3600000).default(DEFAULT_BUSY_WAIT_MS).description('wait 策略的等待上限（ms）；超时才走 fork，0 = 不等待直接 fork'),
+	forkMaxEvents: Schema.number().step(1).min(0).max(100000).default(4000).description('fork 时最多继承的事件条数；超过则回退 wait/rotate，0 = 不限制'),
 
 	replyMaxChars: Schema.number().step(1).min(100).max(5000).default(4500).description('单条消息字符上限，超出自动分块'),
 	foldForward: Schema.boolean().default(true).description('超长文本折叠为合并转发消息（QQ 的"聊天记录"）；关闭则一律按单条上限切块发送'),
@@ -374,8 +411,10 @@ export const ConfigSchema: Schema<DshQQConfig> = Schema.object({
 
 	// ── 长期记忆（卡片「长期记忆」）──
 	memoryEnabled: Schema.boolean().default(false).description('长期记忆总开关（默认关闭）：跨会话记住人物、群规与长期事项。开启后会按会话持久记录消息正文（<数据目录>/memory.db，含保留期与条数上限），并注册 qq_recall_memory / qq_memorize 工具（随开关即时注册/注销，无需重启）。记忆工具默认仅管理员可用，普通用户要用得在「工具权限」卡片加进 userTools'),
-	memoryCardMaxChars: Schema.number().step(50).min(200).max(2000).default(600).description('记忆卡片字符预算：每轮随系统提示注入的内容上限（超出时按分数丢弃尾部，卡片末尾会提示还有多少条可用检索工具查看）'),
-	memoryMaxFacts: Schema.number().step(5).min(5).max(200).default(40).description('单个会话的记忆条数上限（超出按「非置顶 → 低置信 → 最久未更新」淘汰）'),
+	memoryCardMaxChars: Schema.number().step(50).min(200).max(2000).default(600).description('画像段字符预算：每轮随系统提示注入的稳定记忆上限（身份/偏好/规则/置顶；超出时按分数丢弃尾部，卡片末尾会提示还有多少条可用检索工具查看）'),
+	memoryProfileMaxChars: Schema.number().step(50).min(200).max(2000).default(400).description('画像段独立预算（留空/0 时回落到「记忆卡片字符预算」）：只放稳定身份、偏好与规则，建议 300–600 字'),
+	memoryEpisodicMaxChars: Schema.number().step(100).min(200).max(4000).default(1200).description('每轮情景段预算：把检索到的相关记忆与原始消息注入到当前 user 消息尾部，不污染 system 前缀缓存'),
+	memoryMaxFacts: Schema.number().step(5).min(5).max(1000).default(200).description('单个会话的活跃记忆条数上限（超出按「非置顶 → 低重要度 → 低置信 → 最久未更新」淘汰；旧默认 40 偏小）'),
 	memoryMaxWriteFailuresPerTurn: Schema.number().step(1).min(0).max(10).default(3).description('每轮允许的记忆整理失败次数：卡片写满时报错让模型自己合并/删除，连续失败超过该值就提示它本轮停止整理（防止反复重试烧 token）'),
 	memoryRecallEnabled: Schema.boolean().default(true).description('注册 qq_recall_memory 检索工具：让 agent 主动查"几周前说过什么"（即时生效；每轮的自动预取不受它影响）'),
 	memoryRecallTopK: Schema.number().step(1).min(1).max(30).default(8).description('单次检索最多返回多少条历史记录'),
@@ -384,17 +423,25 @@ export const ConfigSchema: Schema<DshQQConfig> = Schema.object({
 	memoryPrefetch: Schema.boolean().default(true).description('每轮按用户消息自动召回相关历史并注入（本地 FTS 检索、零模型调用；覆盖率与分数不达标就不注入）'),
 	memoryPrefetchMinScore: Schema.number().step(0.05).min(0).max(1).default(0.35).description('自动预取的最低分（0~1）：低于该分本轮不注入历史片段'),
 	memoryPrefetchMaxItems: Schema.number().step(1).min(0).max(10).default(3).description('自动预取最多注入几条历史消息（0 = 关闭注入但仍保留检索工具）'),
-	memoryDistillEvery: Schema.number().step(5).min(5).max(1000).default(50).description('累计多少条新消息触发一次记忆蒸馏（这是省 token 的主要旋钮：越大越省，但记忆更新越滞后）'),
-	memoryDistillMinChars: Schema.number().step(100).min(200).max(20000).default(2000).description('蒸馏的最小新增字数（与条数阈值满足其一即触发）'),
-	memoryDistillIdleMs: Schema.number().step(60000).min(0).max(86400000).default(600000).description('空闲兜底蒸馏间隔（ms）：距上次蒸馏超过该时间且有新消息就补一次；0 = 只在世代结束或 /memory distill 时蒸馏'),
+	memoryDistillEvery: Schema.number().step(5).min(5).max(1000).default(10).description('累计多少条新消息触发一次记忆蒸馏（默认 10；旧默认 50 在安静群里可能几天都不触发）'),
+	memoryDistillMinChars: Schema.number().step(100).min(200).max(20000).default(800).description('蒸馏的最小新增字数（与条数阈值满足其一即触发；默认 800）'),
+	memoryDistillIdleMs: Schema.number().step(60000).min(0).max(86400000).default(600000).description('空闲兜底蒸馏间隔（ms）：距上次成功蒸馏超过该时间且有新消息就补一次（会真正 force，不再被条数/字数阈值挡住）；0 = 只在世代结束或 /memory distill 时蒸馏。热应用：60s 心跳实时读取'),
 	memoryDistillProvider: Schema.string().default('').description('蒸馏用模型 provider（留空 = 部署默认模型）；WebUI 里不单独出现：由蒸馏模型下拉与 model 一并写入，手改配置同样生效'),
 	memoryDistillModel: Schema.string().default('').description('蒸馏用模型 id（留空 = 部署默认模型）；WebUI 里是与「人格与模型」卡片同一份 dsh 模型清单的下拉，选中后同时写 provider 与本项'),
-	memoryDistillMaxTokens: Schema.number().step(1).min(128).max(4000).default(800).description('蒸馏单次输出 token 上限'),
-	memoryDistillTimeoutMs: Schema.number().step(1000).min(1000).max(120000).default(15000).description('单次蒸馏的超时（ms）：超时即中止本次蒸馏，水位线不推进，下次重试同一区间'),
+	memoryDistillMaxTokens: Schema.number().step(1).min(128).max(32768).default(800).description('蒸馏首轮尝试的输出 token 上限（上限 32768）。推理模型会把整个预算烧在思考上、一个可见字都不吐：这种情况插件会沿预算阶梯（4 倍递增，见「空输出重试预算」）自动往上试，并把够用/被吃光的预算记住，之后直接从那一档起步'),
+	memoryDistillRetryTokens: Schema.number().step(1).min(0).max(32768).default(16000).description('重试预算的**上限**（token；0 = 不重试）：首轮没有可见文本时，沿预算阶梯按 4 倍递增重试到这一档；哪一档成功就记住哪一档，下一轮直接起步（推理模型不必每轮重走阶梯）。推理模型的思考长度常常超过首轮预算，这里给足（默认 16000）才有可见输出。重试的超时按预算比例放宽（最多首轮的 4 倍、上限 120s）'),
+	memoryDistillTimeoutMs: Schema.number().step(1000).min(1000).max(120000).default(15000).description('单次蒸馏的超时（ms）：超时即中止本次蒸馏，水位线不推进，下次重试同一区间；空输出重试会按预算比例放宽这个上限（最多 4 倍、最高 120s）'),
 	memoryHandoffTail: Schema.number().step(1).min(0).max(50).default(10).description('世代交接块（换了新会话时注入一次）里附带的最后几条原话；0 = 只给摘要'),
 	memoryHandoffDistillWaitMs: Schema.number().step(500).min(0).max(30000).default(8000).description('世代结束（轮换/重置）时等待蒸馏完成的上限（ms）：超时就用现有卡片 + 最后几条原话先交接'),
 	memoryRetentionDays: Schema.number().step(1).min(1).max(3650).default(90).description('会话档案（消息正文镜像）保留天数，超期自动清理'),
 	memoryMaxEventsPerChat: Schema.number().step(100).min(100).max(200000).default(20000).description('每个会话保留的档案条数上限，超出删最旧的'),
+	memorySensitiveFilter: Schema.boolean().default(true).description('敏感类别过滤：手机号/住址/证件号/银行卡/健康/感情等默认不写入长期记忆（群友的隐私不该被自动做成画像）'),
+	memoryCrossGroupUserProfile: Schema.boolean().default(false).description('[预留] 跨群/私聊共享用户画像：当前版本尚未实现跨群检索，配置仅保留位；不要依赖它'),
+	memoryCandidateReview: Schema.boolean().default(false).description('个人事实/不可信来源先进候选区（pending），管理员在 WebUI 批准后才进画像；默认关闭（自动抽取直接生效），开启后更保守但需要人工批准'),
+	memoryFactTtlDays: Schema.number().step(1).min(1).max(3650).default(90).description('一般事实/事件的过期天数（默认 90；画像/偏好/规则不过期；检索命中不续期，只有再次确认才续期）'),
+	memoryUserPreferenceTtlDays: Schema.number().step(1).min(1).max(3650).default(180).description('用户偏好的过期天数（默认 180）'),
+	memoryTombstoneDays: Schema.number().step(1).min(1).max(3650).default(30).description('删除后的 tombstone 保留天数（默认 30；防止后台抽取把已删内容重新记回来）'),
+	memoryInjectLog: Schema.boolean().default(true).description('每轮记录注入明细（注入了哪些记忆 id、分数、字符数、是否截断），供 WebUI 诊断与 /memory 排查'),
 
 	mediaEnabled: Schema.boolean().default(true).description('启用收图（下载图片并把本地路径交给 agent）'),
 	mediaMaxMB: Schema.number().step(1).min(1).max(100).default(20).description('单张图片下载上限（MB）'),
@@ -406,14 +453,13 @@ export const ConfigSchema: Schema<DshQQConfig> = Schema.object({
 	messageLogToFile: Schema.boolean().default(false).description('消息日志追加落盘到 <dataDir>/message-log.ndjson（NDJSON，超 5MB 轮转），重启后保留'),
 	debug: Schema.boolean().default(false).description('调试日志'),
 
-	timeAware: Schema.boolean().default(true).description('时间感知：把宿主机当前时间（日期/星期/时刻/时区）注入 system prompt，每轮动态求值，agent 因此知道"现在几点"；定时任务与"明天/稍后"类请求都以此为准'),
 	preset: Schema.string().default('').description('Agent 预设 id；空 = 部署默认（web profile 为 standard）'),
 	workspaceMode: Schema.union(['chat', 'home']).default('chat')
 		.description('会话默认工作目录：chat=每会话隔离工作区（默认，安全）；home=用户主目录（网关模式，管理员可驱动 agent 操作整台电脑，/cwd 可对单个会话切换）'),
 	workspaceRoot: Schema.string().default('').description('[已废弃] 旧「会话数据根」：v0.3 起路径统一为 dataDir，仅在 dataDir 为空时作为数据目录兜底，并会被自动搬进 dataDir；请改用 dataDir'),
 	sessionGroupRoot: Schema.string().default('').description('[已废弃] 更旧的「会话分组目录根」：已并入 dataDir，仅在 dataDir 与 workspaceRoot 都为空时兜底'),
 	dataDir: Schema.string().default('').description('数据目录（**唯一的路径设置**）：会话目录 sessions/Friend_<QQ号>|Group_<群号>（agent 默认工作目录 + WebUI 左栏分组 + 媒体落盘根）、人格库、会话身份表、定时任务、动态管理员、群成员缓存与消息日志都放在这里，支持开头的 ~；空 = <用户主目录>/dsh-qq-bot-data。dsh 会话的工作目录创建后不可修改，所以改过目录后已存在的会话需 /reset 一次（插件会在 QQ 里提示）。'),
-});
+}).volatile() as unknown as Schema<DshQQConfig>;
 
 /**
  * 把运行时枚举到的工具名写进 userTools/blockedTools 的 schema meta：

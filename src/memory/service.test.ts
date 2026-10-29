@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openMemoryDatabase, type MemoryStore } from './store.ts';
-import { MemoryService, splitEntry, type MemoryConfigView, type MemoryLlmView } from './service.ts';
+import { buildBudgetLadder, MemoryService, splitEntry, type MemoryConfigView, type MemoryLlmView } from './service.ts';
 import type { Logger } from '../types.ts';
 
 const logger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
@@ -27,6 +27,7 @@ function config(overrides: Partial<MemoryConfigView> = {}): MemoryConfigView {
 		memoryDistillProvider: '',
 		memoryDistillModel: '',
 		memoryDistillMaxTokens: 800,
+		memoryDistillRetryTokens: 16000,
 		memoryDistillTimeoutMs: 15000,
 		memoryHandoffTail: 10,
 		memoryHandoffDistillWaitMs: 0,
@@ -51,7 +52,7 @@ let store: MemoryStore | undefined;
 let service: MemoryService | undefined;
 
 async function setup(
-	options: { config?: Partial<MemoryConfigView>; llm?: MemoryLlmView; note?: (event: string, detail: string) => void } = {},
+	options: { config?: Partial<MemoryConfigView>; llm?: MemoryLlmView; note?: (event: string, detail: string) => void; idleSweepMs?: number } = {},
 ): Promise<MemoryService> {
 	const opened = await openMemoryDatabase({
 		filePath: join(dir, 'memory.db'),
@@ -69,7 +70,7 @@ async function setup(
 		getDefaultModel: () => ({ provider: 'deepseek', model: 'deepseek-chat' }),
 		labelOf: (chatKey) => (chatKey.startsWith('g-') ? `群 ${chatKey.slice(2)}` : `好友 ${chatKey.slice(2)}`),
 		createUserMessage: (text) => ({ role: 'user', content: [{ type: 'text', text }] }),
-		idleSweepMs: 0,
+		idleSweepMs: options.idleSweepMs ?? 0,
 	});
 	service.attach(opened.store);
 	return service;
@@ -86,18 +87,16 @@ afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-describe('卡片注入（冻结语义）', () => {
-	it('首次求值渲染，之后沿用同一份（写入不打断当前世代）', async () => {
+describe('画像注入（写入即生效）', () => {
+	it('写入后下一轮就能看到，不需要 /reset', async () => {
 		const memory = await setup();
 		memory.memorize({ chatKey: 'g-888', action: 'add', content: '本群 偏好 回复简短' });
 		const first = memory.cardSection('g-888');
 		expect(first).toContain('回复简短');
 		memory.memorize({ chatKey: 'g-888', action: 'add', content: '@张三(12345) 是 运维' });
-		// 冻结：同一世代的 section 文本不变（避免打断前缀缓存）。
-		expect(memory.cardSection('g-888')).toBe(first);
-		// 解冻后拿到最新卡片。
-		memory.unfreeze('g-888');
-		expect(memory.cardSection('g-888')).toContain('运维');
+		const second = memory.cardSection('g-888');
+		expect(second).toContain('运维');
+		expect(second).not.toBe(first);
 	});
 
 	it('不同会话的卡片互相隔离', async () => {
@@ -118,16 +117,16 @@ describe('记忆写入（qq_memorize 的实现）', () => {
 		const memory = await setup();
 		const result = memory.memorize({ chatKey: 'g-888', action: 'add', content: '@张三(12345) 是 运维，负责服务器' });
 		expect(result.ok).toBe(true);
-		expect(store?.facts('g-888')[0]?.subject).toBe('@张三(12345)');
+		expect(store?.facts('g-888')[0]?.subject).toBe('@张三');
 		expect(store?.facts('g-888')[0]?.predicate).toBe('是');
 		expect(store?.facts('g-888')[0]?.object).toBe('运维，负责服务器');
 	});
 
-	it('形状不对时给出可操作错误', async () => {
+	it('自由文本不需要「主体 关系 内容」格式', async () => {
 		const memory = await setup();
-		const result = memory.memorize({ chatKey: 'g-888', action: 'add', content: '随便一句没有关系词的话' });
-		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.error).toContain('主体 关系 内容');
+		const result = memory.memorize({ chatKey: 'g-888', action: 'add', content: '张三最近在折腾 NAS' });
+		expect(result.ok).toBe(true);
+		expect(store?.facts('g-888')[0]?.content).toBe('张三最近在折腾 NAS');
 	});
 
 	it('replace 用唯一子串定位', async () => {
@@ -135,7 +134,7 @@ describe('记忆写入（qq_memorize 的实现）', () => {
 		memory.memorize({ chatKey: 'g-888', action: 'add', content: '本群 偏好 回复简短' });
 		const result = memory.memorize({ chatKey: 'g-888', action: 'replace', oldText: '回复简短', content: '本群 偏好 回复简短、先给结论' });
 		expect(result.ok).toBe(true);
-		expect(store?.facts('g-888')[0]?.object).toBe('回复简短、先给结论');
+		expect(store?.facts('g-888').some((fact) => fact.content === '本群 偏好 回复简短、先给结论')).toBe(true);
 	});
 
 	it('子串匹配不到或多条匹配时报错并带回当前条目', async () => {
@@ -155,7 +154,7 @@ describe('记忆写入（qq_memorize 的实现）', () => {
 		const memory = await setup();
 		memory.memorize({ chatKey: 'g-888', action: 'add', content: '本群 偏好 回复简短' });
 		expect(memory.memorize({ chatKey: 'g-888', action: 'remove', oldText: '回复简短' }).ok).toBe(true);
-		expect(store?.facts('g-888')[0]?.supersededBy).not.toBeNull();
+		expect(store?.facts('g-888')[0]?.status).toBe('deleted');
 	});
 
 	it('容量满时拒绝并给出使用率（而不是静默截断）', async () => {
@@ -225,10 +224,13 @@ describe('检索与预取', () => {
 		expect(memory.prefetch('g-888', '完全无关的词')).toBe('');
 	});
 
-	it('预取开关关闭时永远不注入', async () => {
-		const memory = await setup({ config: { memoryPrefetch: false } });
-		await seed(memory);
-		expect(memory.prefetch('g-888', 'restic')).toBe('');
+	it('预取开关关闭 / 条数 0 时永远不注入', async () => {
+		const off = await setup({ config: { memoryPrefetch: false } });
+		await seed(off);
+		expect(off.prefetch('g-888', 'restic')).toBe('');
+		const zero = await setup({ config: { memoryPrefetchMaxItems: 0 } });
+		await seed(zero);
+		expect(zero.prefetch('g-888', 'restic')).toBe('');
 	});
 
 	it('不跨会话检索（另一个群的记录拿不到）', async () => {
@@ -239,10 +241,31 @@ describe('检索与预取', () => {
 	});
 });
 
+describe('空闲兜底', () => {
+	it('低于条数/字数阈值时，空闲到点也会 force 蒸馏', async () => {
+		const calls: Array<Record<string, unknown>> = [];
+		const memory = await setup({
+			llm: fakeLlm('{}', calls),
+			config: { memoryDistillEvery: 50, memoryDistillMinChars: 2000, memoryDistillIdleMs: 5 },
+			idleSweepMs: 5,
+		});
+		memory.record({ chatKey: 'g-888', generation: 's1', senderId: '1', senderName: 'A', text: '就一句话', msgId: 'a' });
+		await new Promise((resolve) => setTimeout(resolve, 40));
+		expect(calls.length).toBeGreaterThanOrEqual(1);
+	});
+});
+
 describe('世代交接', () => {
 	it('首次接触不产出交接块', async () => {
 		const memory = await setup();
 		expect(await memory.takeHandoff('g-888', 'sess-1')).toBe('');
+	});
+
+	it('fork 后标记已交接，不再注入摘要', async () => {
+		const memory = await setup();
+		memory.record({ chatKey: 'g-888', generation: 'sess-1', senderId: '1', senderName: 'A', text: '上一段的尾巴', msgId: 'a' });
+		memory.markHanded('g-888', 'sess-2');
+		expect(await memory.takeHandoff('g-888', 'sess-2')).toBe('');
 	});
 
 	it('新世代拿到上一段的尾巴，且同一世代只给一次', async () => {
@@ -396,6 +419,9 @@ describe('蒸馏', () => {
 	it('输出为空（推理吃掉预算）时给出可操作的失败说明', async () => {
 		const calls: Array<Record<string, unknown>> = [];
 		const empty: MemoryLlmView = {
+			// 手工声明的模型（pi-ai 的 `models: [{ id }]`）：宿主不暴露任何推理档位，
+			// 插件连"你少想点"都提不了 —— 这正是真实事故里的形状。
+			resolveModelInfo: async () => ({}),
 			async *stream(options) {
 				calls.push(options as unknown as Record<string, unknown>);
 				yield { type: 'reasoning-delta', text: '想了很久' };
@@ -408,6 +434,198 @@ describe('蒸馏', () => {
 		const reason = memory.lastDistillError('g-888') ?? '';
 		expect(reason).toContain('没有拿到任何可见文本');
 		expect(reason).toContain('reasoning-delta×2');
+		// 两条建议都要在：调预算 / 换非推理模型；并说明宿主没暴露推理档位（无法要求它不推理）。
+		expect(reason).toContain('空输出重试预算');
+		expect(reason).toContain('非推理模型');
+		expect(reason).toContain('宿主没有为该模型暴露推理档位');
+		// 默认配置下空输出会沿预算阶梯往上试（800 → 3200 → 16000）：推理模型的
+		// 思考长度事先未知，一次试不出来就再来一档。
+		expect(calls.map((call) => call.maxTokens)).toEqual([800, 3200, 16000]);
+	});
+
+	it('宿主没有推理档位元数据时，诊断说的是"拿不到"而不是"没有"', async () => {
+		const empty: MemoryLlmView = {
+			// 老宿主没有 resolveModelInfo：不能断言 provider 没暴露档位。
+			async *stream() {},
+		};
+		const memory = await setup({ llm: empty, config: { memoryDistillRetryTokens: 0 } });
+		memory.record({ chatKey: 'g-888', generation: 'g1', senderId: '1', senderName: 'A', text: 'x', msgId: 'a' });
+		expect(await memory.distill('g-888', { force: true })).toBe(false);
+		expect(memory.lastDistillError('g-888')).toContain('拿不到该模型的推理档位元数据');
+	});
+
+	it('首轮空输出、重试拿到可见文本时算成功，并记住"够用的预算"', async () => {
+		const calls: Array<Record<string, unknown>> = [];
+		const notes: Array<{ event: string; detail: string }> = [];
+		const reply = JSON.stringify({ add: [{ subject: '本群', predicate: '进行中', object: '在试 restic', confidence: 0.9 }] });
+		let index = 0;
+		const llm: MemoryLlmView = {
+			async *stream(options) {
+				calls.push(options as unknown as Record<string, unknown>);
+				index += 1;
+				if (index === 1) {
+					// 首轮：预算全被推理吃掉（既没有可见文本，也没有推理增量——网关没透出）。
+					yield { type: 'usage', usage: { inputTokens: 900, outputTokens: 800 } };
+					yield { type: 'finish', reason: { kind: 'max-tokens' } };
+					return;
+				}
+				for (const char of reply) yield { type: 'text-delta', text: char };
+				yield { type: 'finish', reason: { kind: 'stop' } };
+			},
+		};
+		const memory = await setup({ llm, note: (event, detail) => notes.push({ event, detail }) });
+		memory.record({ chatKey: 'g-888', generation: 'g1', senderId: '1', senderName: 'A', text: 'x', msgId: 'a' });
+		expect(await memory.distill('g-888', { force: true })).toBe(true);
+		expect(store?.facts('g-888')[0]?.object).toBe('在试 restic');
+		// 第一次 800 token 空输出 → 阶梯下一档 3200 就够用了（不必走到 16000）。
+		expect(calls.map((call) => call.maxTokens)).toEqual([800, 3200]);
+		expect(notes.some((entry) => entry.event === 'memory-distill-retry')).toBe(true);
+		expect(memory.lastDistillError('g-888')).toBeUndefined();
+
+		// 预算已被记住（跨会话共用：预算需求是模型的属性）：下一次蒸馏直接从够用的预算
+		// 起步，不再白烧一次小预算。
+		memory.record({ chatKey: 'g-999', generation: 'g1', senderId: '1', senderName: 'A', text: '另一个群', msgId: 'c' });
+		expect(await memory.distill('g-999', { force: true })).toBe(true);
+		expect(calls.map((call) => call.maxTokens)).toEqual([800, 3200, 3200]);
+	});
+
+	it('重试预算不大于首轮预算时不重试（省一次调用）', async () => {
+		const calls: Array<Record<string, unknown>> = [];
+		const empty: MemoryLlmView = {
+			async *stream(options) {
+				calls.push(options as unknown as Record<string, unknown>);
+				yield { type: 'finish', reason: 'max-tokens' };
+			},
+		};
+		const memory = await setup({ llm: empty, config: { memoryDistillMaxTokens: 4000, memoryDistillRetryTokens: 0 } });
+		memory.record({ chatKey: 'g-888', generation: 'g1', senderId: '1', senderName: 'A', text: 'x', msgId: 'a' });
+		expect(await memory.distill('g-888', { force: true })).toBe(false);
+		expect(calls).toHaveLength(1);
+		// 旧宿主的 finish 是字符串：也要能识别成"被截断"。
+		expect(memory.lastDistillError('g-888')).toContain('finish=max-tokens');
+	});
+
+	it('输出被 max-tokens 截断（有可见文本但解析失败）时也放大预算重试', async () => {
+		const calls: Array<Record<string, unknown>> = [];
+		const reply = JSON.stringify({ add: [{ subject: '本群', predicate: '备注', object: 'ok' }] });
+		let index = 0;
+		const llm: MemoryLlmView = {
+			async *stream(options) {
+				calls.push(options as unknown as Record<string, unknown>);
+				index += 1;
+				// 首轮：JSON 被截断（后半截没吐出来）；重试：完整 JSON。
+				const text = index === 1 ? reply.slice(0, 12) : reply;
+				for (const char of text) yield { type: 'text-delta', text: char };
+				yield { type: 'finish', reason: { kind: index === 1 ? 'max-tokens' : 'stop' } };
+			},
+		};
+		const memory = await setup({ llm });
+		memory.record({ chatKey: 'g-888', generation: 'g1', senderId: '1', senderName: 'A', text: 'x', msgId: 'a' });
+		expect(await memory.distill('g-888', { force: true })).toBe(true);
+		expect(calls.map((call) => call.maxTokens)).toEqual([800, 3200]);
+		expect(store?.facts('g-888')[0]?.object).toBe('ok');
+	});
+
+	it('模型返回空 ops（看过但认为不值得记）时留说明，且不是失败', async () => {
+		const calls: Array<Record<string, unknown>> = [];
+		const notes: Array<{ event: string; detail: string }> = [];
+		const memory = await setup({
+			llm: fakeLlm(JSON.stringify({ add: [], update: [], supersede: [] }), calls),
+			note: (event, detail) => notes.push({ event, detail }),
+		});
+		memory.record({ chatKey: 'g-888', generation: 'g1', senderId: '1', senderName: 'A', text: '闲聊一句', msgId: 'a' });
+		expect(await memory.distill('g-888', { force: true })).toBe(false);
+		// 成功（模型跑过了）而不是失败：没有错误原因，只有说明。
+		expect(memory.lastDistillError('g-888')).toBeUndefined();
+		expect(memory.lastDistillNote('g-888')).toContain('认为没有值得长期记住的内容');
+		expect(notes.some((entry) => entry.event === 'memory-distill-noop')).toBe(true);
+		expect(calls).toHaveLength(1);
+	});
+
+	it('水位线之后没有新消息时，说明是"没有新消息"（不调模型）', async () => {
+		const calls: Array<Record<string, unknown>> = [];
+		const reply = JSON.stringify({ add: [{ subject: '本群', predicate: '备注', object: 'ok' }] });
+		const memory = await setup({ llm: fakeLlm(reply, calls) });
+		memory.record({ chatKey: 'g-888', generation: 'g1', senderId: '1', senderName: 'A', text: '一句话', msgId: 'a' });
+		expect(await memory.distill('g-888', { force: true })).toBe(true);
+		calls.length = 0;
+		// 水位线已推到最新：再蒸馏一次什么都没有。
+		expect(await memory.distill('g-888', { force: true })).toBe(false);
+		expect(calls).toHaveLength(0);
+		expect(memory.lastDistillNote('g-888')).toContain('还没有新消息');
+		expect(memory.lastDistillError('g-888')).toBeUndefined();
+	});
+
+	it('预算阶梯：从首轮按 4 倍递增，最后一档落在上限上', () => {
+		expect(buildBudgetLadder(800, 16000)).toEqual([800, 3200, 16000]);
+		expect(buildBudgetLadder(4000, 16000)).toEqual([4000, 16000]);
+		expect(buildBudgetLadder(16000, 16000)).toEqual([16000]);
+		// 上限为 0（不重试）时只有首轮。
+		expect(buildBudgetLadder(800, 0)).toEqual([800]);
+		// 首轮高于上限时也不越界（配置改小后的老 sticky 值会被夹住）。
+		expect(buildBudgetLadder(32000, 16000)).toEqual([32000]);
+	});
+
+	it('整条阶梯都被推理吃光时，下次直接从最高那档起步（不再重走阶梯）', async () => {
+		const calls: Array<Record<string, unknown>> = [];
+		const empty: MemoryLlmView = {
+			async *stream(options) {
+				calls.push(options as unknown as Record<string, unknown>);
+				yield { type: 'usage', usage: { inputTokens: 100, outputTokens: options.maxTokens } };
+				yield { type: 'finish', reason: { kind: 'max-tokens' } };
+			},
+		};
+		const memory = await setup({ llm: empty, config: { memoryDistillMaxTokens: 800, memoryDistillRetryTokens: 16000 } });
+		memory.record({ chatKey: 'g-888', generation: 'g1', senderId: '1', senderName: 'A', text: '第一段', msgId: 'a' });
+		expect(await memory.distill('g-888', { force: true })).toBe(false);
+		expect(calls.map((call) => call.maxTokens)).toEqual([800, 3200, 16000]);
+		// 预算被吃光是模型的属性：下一轮直接 16000 一档（省掉两次注定失败的调用）。
+		memory.record({ chatKey: 'g-999', generation: 'g1', senderId: '1', senderName: 'A', text: '另一段', msgId: 'b' });
+		expect(await memory.distill('g-999', { force: true })).toBe(false);
+		expect(calls.map((call) => call.maxTokens)).toEqual([800, 3200, 16000, 16000]);
+	});
+
+	it('调用错误不算"预算被吃光"：下次仍从首轮预算起步', async () => {
+		const calls: Array<Record<string, unknown>> = [];
+		let index = 0;
+		const flaky: MemoryLlmView = {
+			async *stream(options) {
+				calls.push(options as unknown as Record<string, unknown>);
+				index += 1;
+				if (index === 1) throw new Error('provider 500');
+				for (const char of JSON.stringify({ add: [{ subject: '本群', predicate: '备注', object: 'ok' }] })) {
+					yield { type: 'text-delta', text: char };
+				}
+			},
+		};
+		const memory = await setup({ llm: flaky, config: { memoryDistillMaxTokens: 800, memoryDistillRetryTokens: 16000 } });
+		memory.record({ chatKey: 'g-888', generation: 'g1', senderId: '1', senderName: 'A', text: '第一段', msgId: 'a' });
+		expect(await memory.distill('g-888', { force: true })).toBe(false);
+		memory.record({ chatKey: 'g-999', generation: 'g1', senderId: '1', senderName: 'A', text: '第二段', msgId: 'b' });
+		expect(await memory.distill('g-999', { force: true })).toBe(true);
+		expect(calls.map((call) => call.maxTokens)).toEqual([800, 800]);
+	});
+
+	it('调用超时时说清是超时，并指向「单次蒸馏超时」', async () => {
+		const hanging: MemoryLlmView = {
+			async *stream(options) {
+				// 一直不吐字，直到超时中止。
+				await new Promise<void>((resolve, reject) => {
+					const signal = options.signal;
+					signal?.addEventListener('abort', () => reject(new Error('aborted')));
+					void resolve;
+				});
+			},
+		};
+		const memory = await setup({
+			llm: hanging,
+			config: { memoryDistillMaxTokens: 128, memoryDistillRetryTokens: 0, memoryDistillTimeoutMs: 1000 },
+		});
+		memory.record({ chatKey: 'g-888', generation: 'g1', senderId: '1', senderName: 'A', text: 'x', msgId: 'a' });
+		expect(await memory.distill('g-888', { force: true })).toBe(false);
+		const reason = memory.lastDistillError('g-888') ?? '';
+		expect(reason).toContain('调用超时（1000ms）已中止');
+		expect(reason).toContain('单次蒸馏超时');
 	});
 });
 

@@ -3,14 +3,18 @@
  * BM25 原始分与候选行，排序/衰减/去重/预算都在这里做，便于单测覆盖。
  *
  * 打分（docs/memory-design.md §6.3）：
- *   score = 0.6·bm25Norm + 0.3·0.5^(ageDays/halfLife) + 0.1·min(1, log1p(hits)/2)
+ *   score = 0.7·bm25Norm·coverage + 0.3·0.5^(ageDays/halfLife)
  * 其中 `bm25Norm = c/(c+|bm25|)`，`c = 3`（SQLite 的 bm25() 返回负数，越小越相关）。
  * 记忆场景关心「最近说过的、相关的」，所以时间衰减权重不低。
  */
 
-import { sanitizeMemoryText } from './guard.ts';
 import { formatEntryTime } from '../onebot/history.ts';
-import { MAX_EVENT_CHARS, RECALL_HEADER, MEMORY_SAFETY_NOTE, type MemoryEvent, type RecallCandidate } from './types.ts';
+import { factText } from './card.ts';
+import { sanitizeMemoryText } from './guard.ts';
+import { stripQqNumbers, tokenizeQuery } from './text.ts';
+import { MAX_EVENT_CHARS, RECALL_HEADER, MEMORY_SAFETY_NOTE, type MemoryEvent, type MemoryFact, type RecallCandidate } from './types.ts';
+
+export { tokenizeQuery } from './text.ts';
 
 /**
  * 打分权重（和为 1）。
@@ -26,27 +30,6 @@ export const WEIGHT_RECENCY = 0.3;
 export const FTS_CANDIDATE_LIMIT = 200;
 /** 预取门槛：查询词元在命中文本里的覆盖率下限（防止"只有一个字沾边"就注入）。 */
 export const DEFAULT_PREFETCH_MIN_COVERAGE = 0.25;
-
-/**
- * 把用户查询切成 FTS5 可安全使用的词元。
- *
- * 保留 ASCII 字母数字词（小写化）、**单位数字**（版本号/数量是有效检索词）与
- * **单个 CJK 字符**（SQLite 的 unicode61 分词器把连续汉字拆成单字，所以查询侧
- * 也按单字切，靠 BM25 排序区分相关度）。同时去掉 FTS5 语法字符（`"` `*` `(`
- * `)` `:` `^` `-` `NEAR` 等）——用户输入直接进 MATCH 会语法错误，必须清洗。
- */
-export function tokenizeQuery(query: string): string[] {
-	const cleaned = sanitizeMemoryText(query).toLowerCase();
-	const tokens: string[] = [];
-	const re = /[a-z0-9_]{2,}|[0-9]|[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g;
-	let match = re.exec(cleaned);
-	while (match !== null) {
-		tokens.push(match[0]);
-		match = re.exec(cleaned);
-	}
-	// 去重但保留顺序；限制词元数，避免超长查询把 MATCH 表达式撑爆。
-	return [...new Set(tokens)].slice(0, 24);
-}
 
 /**
  * 构造 FTS5 MATCH 表达式：每个词元用双引号包成短语、词间 OR（宽松召回）。
@@ -100,6 +83,8 @@ export function scoreCandidate(options: {
 	now?: number;
 	coverage?: number;
 	halfLifeDays: number;
+	/** 0~1；给了才参与加权（保持旧调用/测试的分数不变）。 */
+	importance?: number;
 }): number {
 	const now = options.now ?? Date.now();
 	const bm25Norm = Math.min(1, Math.max(0, options.bm25Norm));
@@ -108,7 +93,10 @@ export function scoreCandidate(options: {
 	const recency = Math.pow(0.5, ageDays / halfLife);
 	// 覆盖率作为关键词项的乘子：一个词都没覆盖（不该发生）时只剩时间分。
 	const coverage = options.coverage === undefined ? 1 : Math.min(1, Math.max(0, options.coverage));
-	return WEIGHT_BM25 * bm25Norm * coverage + WEIGHT_RECENCY * recency;
+	const base = WEIGHT_BM25 * bm25Norm * coverage + WEIGHT_RECENCY * recency;
+	if (options.importance === undefined) return base;
+	const importance = Math.min(1, Math.max(0, options.importance));
+	return base * (0.85 + 0.15 * importance);
 }
 
 /** 按综合分从高到低排序（同分按时间新的在前，再按 seq 稳定）。 */
@@ -207,7 +195,7 @@ export function renderRecall(
 	const more = packed.dropped > 0 ? `\n（另有 ${packed.dropped} 条相关记录未展开）` : '';
 	return (
 		`${RECALL_HEADER}${options.chatLabel}中与「${sanitizeMemoryText(options.query)}」相关的 ${lines.length} 条记录` +
-		`（时间正序；【你】= 机器人自己说的）：\n${lines.join('\n')}${more}\n${MEMORY_SAFETY_NOTE}`
+		`（按相关度排序；【你】= 机器人自己说的）：\n${lines.join('\n')}${more}\n${MEMORY_SAFETY_NOTE}`
 	);
 }
 
@@ -231,4 +219,28 @@ export function shouldPrefetch(
 	const minCoverage = options.minCoverage ?? DEFAULT_PREFETCH_MIN_COVERAGE;
 	if (best.coverage !== undefined && best.coverage < minCoverage) return false;
 	return packed.selected.length >= Math.max(1, Math.trunc(options.minItems ?? 1));
+}
+
+/** 单条记忆条目的渲染（时间 + 正文；条目没有说话人，正文里已含）。 */
+export function renderItemLine(fact: MemoryFact, now: number = Date.now()): string {
+	const when = formatEntryTime(fact.updatedAt > 0 ? fact.updatedAt : now, now);
+	return `[${when}] ${sanitizeMemoryText(stripQqNumbers(factText(fact)))}`;
+}
+
+/**
+ * 把记忆条目渲染成给模型看的数据块（与原始消息档案分开表头，避免混淆）。
+ */
+export function renderItemRecall(
+	facts: readonly MemoryFact[],
+	options: { chatLabel: string; query: string; now?: number },
+): string {
+	const now = options.now ?? Date.now();
+	if (facts.length === 0) {
+		return `${RECALL_HEADER}在${options.chatLabel}的记忆里没有找到与「${sanitizeMemoryText(options.query)}」相关的条目。可以换个说法再查，或直接问用户。`;
+	}
+	const lines = facts.map((fact) => renderItemLine(fact, now));
+	return (
+		`${RECALL_HEADER}${options.chatLabel}中与「${sanitizeMemoryText(options.query)}」相关的 ${lines.length} 条记忆` +
+		`（已整理的事实，不是原始消息）：\n${lines.join('\n')}\n${MEMORY_SAFETY_NOTE}`
+	);
 }

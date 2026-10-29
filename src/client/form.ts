@@ -10,12 +10,12 @@
  * 注意：secret 字段（accessToken）在 wire 上被宿主剥离，读不到也验不了，
  * 所以它是只写控件：留空 = 不动，显式"清除"手势才 unset。
  */
-import type { SettingsDescribeFaceLike, SettingsPathOp, SettingsScope, SnapshotStore } from './types.ts';
+import type { ConfigForm, SettingsDescribeFaceLike, SettingsPathOp, SnapshotStore } from './types.ts';
 import { createSnapshotStore } from './store.ts';
 import { readToolOptions } from '../toolOptions.ts';
 import { SEARCH_BACKEND_IDS } from '../search/priority.ts';
 
-/** settings 命名空间（= host 侧 installSection 注册名 = settings.section id）。 */
+/** settings 命名空间（dsh 0.2.1 起 = profile entry id = settings.section id）。 */
 export const SETTINGS_NS = 'dsh-qq-bot';
 
 /** 连接卡片的 id（折叠头部显示"已连接"状态角标，见 components.tsx）。 */
@@ -93,7 +93,7 @@ export interface FieldGroup {
 	 * 自定义交互卡片：不走 settings schema，展开体由 RPC 驱动
 	 * （人格库 / 人格与模型 / 定时任务）。此类卡片没有 fields，保存栏由面板自持。
 	 */
-	custom?: 'personas' | 'routes' | 'tasks';
+	custom?: 'personas' | 'routes' | 'tasks' | 'memory';
 }
 
 function f(key: string, kind: FieldKind, options?: readonly string[]): FieldDef {
@@ -242,15 +242,17 @@ export const FIELD_GROUPS: FieldGroup[] = [
 			]),
 			...withSub('subRuntime', [
 				f('maxQueue', 'number'),
-				f('maxTurnMs', 'number'),
+				f('turnIdleTimeoutMs', 'number'),
 				f('sessionIdleTimeoutMs', 'number'),
 			]),
-			// 「占用与接管」单独一节的理由：这三个值是一组决策——
+			// 「占用与接管」单独一节的理由：这几个值是一组决策——
 			// sessionIdleTimeoutMs=0 让插件永不释放写句柄（界面只能复用），
-			// busyStrategy/busyWaitMs 决定真的被界面抢先占用时等还是换。
+			// busyStrategy/busyWaitMs 决定真的被界面抢先占用时 fork、等还是换，
+			// forkMaxEvents 给 fork 的全量 prefill 设一个上限。
 			...withSub('subBusy', [
-				f('busyStrategy', 'enum', ['wait', 'rotate']),
+				f('busyStrategy', 'enum', ['fork', 'wait', 'rotate']),
 				f('busyWaitMs', 'number'),
+				f('forkMaxEvents', 'number'),
 			]),
 		],
 	},
@@ -326,6 +328,8 @@ export const FIELD_GROUPS: FieldGroup[] = [
 			...withSub('subMemoryBasic', [
 				f('memoryEnabled', 'boolean'),
 				f('memoryCardMaxChars', 'number'),
+				f('memoryProfileMaxChars', 'number'),
+				f('memoryEpisodicMaxChars', 'number'),
 				f('memoryMaxFacts', 'number'),
 				f('memoryMaxWriteFailuresPerTurn', 'number'),
 			]),
@@ -350,6 +354,9 @@ export const FIELD_GROUPS: FieldGroup[] = [
 				// 配置与老配置照旧生效，见 config.ts）。
 				{ ...f('memoryDistillModel', 'modelSelect'), extraPaths: [['memoryDistillProvider']] },
 				f('memoryDistillMaxTokens', 'number'),
+				// 推理模型（尤其宿主没暴露推理档位的）默认就会把首轮预算烧在思考上，
+				// 一个可见字都不吐：所以预算旁边必须有这个"再来一次"的档位。
+				f('memoryDistillRetryTokens', 'number'),
 				f('memoryDistillTimeoutMs', 'number'),
 			]),
 			...withSub('subMemoryLifecycle', [
@@ -358,7 +365,26 @@ export const FIELD_GROUPS: FieldGroup[] = [
 				f('memoryRetentionDays', 'number'),
 				f('memoryMaxEventsPerChat', 'number'),
 			]),
+			...withSub('subMemoryPrivacy', [
+				f('memorySensitiveFilter', 'boolean'),
+				f('memoryCrossGroupUserProfile', 'boolean'),
+				f('memoryCandidateReview', 'boolean'),
+				f('memoryFactTtlDays', 'number'),
+				f('memoryUserPreferenceTtlDays', 'number'),
+				f('memoryInjectLog', 'boolean'),
+				f('memoryTombstoneDays', 'number'),
+			]),
 		],
+	},
+	{
+		// 记忆库（RPC 驱动）：查看/搜索/编辑/删除/测试召回/立即蒸馏。
+		// 配置项仍在上一张「长期记忆」卡里；这张卡只操作记忆内容。
+		id: 'memoryItems',
+		sectionKey: 'sectionChat',
+		titleKey: 'groupMemoryItems',
+		descKey: 'groupMemoryItemsDesc',
+		custom: 'memory',
+		fields: [],
 	},
 	{
 		id: 'media',
@@ -428,7 +454,6 @@ export const FIELD_GROUPS: FieldGroup[] = [
 		descKey: 'groupAgentDesc',
 		fields: [
 			...withSub('subPreset', [f('preset', 'string')]),
-			...withSub('subTime', [f('timeAware', 'boolean')]),
 			...withSub('subWorkspace', [
 				f('workspaceMode', 'enum', ['chat', 'home']),
 				f('dataDir', 'string'),
@@ -570,7 +595,7 @@ export function parseField(def: FieldDef, text: string): { kind: 'set'; value: u
 	return trimmed === '' ? { kind: 'clear' } : { kind: 'set', value: trimmed };
 }
 
-/** 暂存式表单：桥接 settings scope 与各卡片的暂存/保存。 */
+/** 暂存式表单：桥接 dsh ConfigForm 与各卡片的暂存/保存。 */
 export class DshQQCardController {
 	private readonly staged = new Map<string, Staged>();
 	private readonly savingCards = new Set<string>();
@@ -580,7 +605,7 @@ export class DshQQCardController {
 	private readonly store: SnapshotStore<CardState>;
 
 	constructor(
-		private readonly scope: SettingsScope<Record<string, unknown>>,
+		private readonly scope: ConfigForm<Record<string, unknown>>,
 		/** 跨命名空间 describe 镜像：读取宿主注入的工具选项（旧宿主缺省）。 */
 		private readonly describe?: SettingsDescribeFaceLike,
 	) {

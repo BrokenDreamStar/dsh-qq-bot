@@ -15,6 +15,7 @@ import { ConfigSchema, attachToolOptions, type DshQQConfig } from './config.ts';
 import { hotApplyConfig, rateLimitSignature } from './configSync.ts';
 import { dataDirMigration, legacySessionLeftovers, legacySessionsRoot, migrateLegacyDataFiles, resolveDataDir, resolveSessionsRoot, type DataDirMigration } from './paths.ts';
 import { getService, getLogger, type Logger } from './types.ts';
+import { unwrapVolatileConfig } from './volatileConfig.ts';
 import { CHAT_TOOLS } from './bridge/toolGuard.ts';
 import type { AgentRegistry, AgentDefaultModelLike, AgentPresetsLike, ConnectionRpcResultLike, DshServices, HostConnectionLike, LlmServiceLike, SessionPersistenceLike, SessionStore, SettingsServiceLike, ToolRegistryListLike, WebSearchSeamLike, WorkspaceRegistryLike } from './dsh.ts';
 import { ForwardTransport } from './transport/forward.ts';
@@ -29,6 +30,7 @@ import { ChatBridgeManager } from './bridge/chat.ts';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { PersonaStore } from './persona/store.ts';
 import { handlePersonaRpc, type PersonaRpcDeps } from './persona/rpc.ts';
+import { handleMemoryRpc, type MemoryRpcDeps } from './memory/rpc.ts';
 import { TaskStore, type ScheduledTask } from './tasks/store.ts';
 import { TaskScheduler } from './tasks/scheduler.ts';
 import { handleTaskRpc, type TaskRpcDeps } from './tasks/rpc.ts';
@@ -88,7 +90,10 @@ function migrateLegacyData(env: { homeDir: string; cwd: string }, config: DshQQC
 }
 
 /** 挂载插件（dsh/Cordis 入口约定）。 */
-export async function apply(ctx: Context, config: DshQQConfig): Promise<void> {
+export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void> {
+	// dsh ≥ 0.2.1 把 `.volatile()` 配置字段校验成稳定引用（`{ get(): T }`），
+	// loader 靠更新引用实现不重启插件的热应用；业务层统一用解开后的普通对象。
+	const config: DshQQConfig = unwrapVolatileConfig(rawConfig);
 	const logger = getLogger(ctx);
 
 	const agents = getService<AgentRegistry>(ctx, 'agents');
@@ -407,8 +412,8 @@ export async function apply(ctx: Context, config: DshQQConfig): Promise<void> {
 
 	// agent 提问（ask_user_question / 计划确认等走 `ctx.userQuestions` 缝的工具）：
 	// 缝上派发 `user-questions/request` 瀑布等人回答，而内置应答器只有 WebUI 的
-	// 浏览器端——QQ 用户看不到问题，整轮一直等到单轮超时。这里把请求转给会话桥
-	// （bridge/asker.ts）发到 QQ，并把用户的下一条消息作为答案回填。
+	// 浏览器端——QQ 用户看不到问题，整轮会一直等下去（QQ 侧只等 askUserWaitMs）。
+	// 这里把请求转给会话桥（bridge/asker.ts）发到 QQ，并把用户的下一条消息作为答案回填。
 	//
 	// **必须 prepend**：瀑布是"外层先答"，不抢先的话，那个 QQ 会话一旦开在
 	// dsh 界面里就会被浏览器端领走，QQ 侧只剩干等。抢先不等于独占——桥内部
@@ -456,8 +461,11 @@ export async function apply(ctx: Context, config: DshQQConfig): Promise<void> {
 				runTask: (task) => void fireTask(task),
 				logger,
 			};
+			const memoryRpc: MemoryRpcDeps = { memory, logger };
 			const handleEndpoint = async (endpoint: string, payload: unknown): Promise<ConnectionRpcResultLike> => {
 				try {
+					const memoryHandled = await handleMemoryRpc(endpoint, payload, memoryRpc);
+					if (memoryHandled !== undefined) return memoryHandled;
 					const handled = await handleTaskRpc(endpoint, payload, taskRpc);
 					if (handled !== undefined) return handled;
 					const personaHandled = await handlePersonaRpc(endpoint, payload, personaRpc);
@@ -518,16 +526,20 @@ export async function apply(ctx: Context, config: DshQQConfig): Promise<void> {
 		logger.info(`dsh-qq-bot: 传输层已重建（transport=${config.transport}）`);
 	}
 
-	// WebUI 配置节：settings 服务存在时注册（dsh >= 0.1.2-rc.1）。WebUI 修改后
-	// 宿主只回调 hooks、不重启插件，热应用逻辑见 configSync；服务缺失则没有
-	// 配置界面，插件功能不受影响。
+	// WebUI 配置节（dsh >= 0.2.1）：settings 只把 schema 上 `.volatile()` 的字段
+	// 暴露成可编辑表单，配置引用由 loader 原地更新（不重启插件）。这里把本插件的
+	// 页面标记为自定义（auto:false），并把旧路径一次性写回统一数据目录。
+	// 服务缺失则没有配置界面，插件功能不受影响。
 	(ctx as { inject(services: readonly string[], cb: (c: Context) => void): void }).inject(['settings'], (settingsCtx) => {
 		const settings = getService<SettingsServiceLike>(settingsCtx, 'settings');
 		if (settings === undefined) return;
-		let current: () => DshQQConfig = () => config;
-		// base 层必须传组合配置的快照：live config 会被热应用原地合并，
-		// 若直接传引用，"恢复默认"会回到热改后的值而非组合层原值。
-		const compositionConfig = structuredClone(config);
+		const fiber = (ctx as { fiber?: unknown }).fiber;
+		if (typeof settings.configure === 'function' && fiber !== undefined) {
+			(settingsCtx as unknown as { effect(fn: () => unknown, label?: string): unknown }).effect(
+				() => settings.configure?.({ auto: false }, fiber),
+				'dsh-qq-bot: settings page policy',
+			);
+		}
 		// 统一路径的一次性写回（v0.3 起 workspaceRoot / sessionGroupRoot 并入
 		// dataDir）：把旧根搬进新键，页面才会显示真实的根。只 set 不 unset 旧键
 		// （回退旧版本仍可用）；写失败/旧宿主无写接口都不影响运行——读取侧
@@ -548,39 +560,42 @@ export async function apply(ctx: Context, config: DshQQConfig): Promise<void> {
 					),
 				);
 		};
-		settings.installSection(ctx, name, ConfigSchema, compositionConfig, {
-			setSource: (source) => {
-				current = source;
-			},
-			onChange: () => {
-				const latest = current();
-				if (latest === undefined) return;
-				const prevRateLimit = rateLimitSignature(config.rateLimit);
-				const needRebuild = hotApplyConfig(config, latest);
-				if (rateLimitSignature(config.rateLimit) !== prevRateLimit) dispatcher.reconfigureRateLimit(config);
-				logs.reconfigure(config);
-				// 聊天记录：开关/上限即时生效（缓冲调小立即裁剪）；工具注册仍需重启。
-				history.reconfigure();
-				// 长期记忆：卡片缓存失效 + 按新的保留期裁剪一次；总开关变化会顺带
-				// 打开/关闭存储，存储状态一变就同步记忆工具（见 onStorageChange）。
-				memory.reconfigure();
-				// 空闲回收：`sessionIdleTimeoutMs` 改成 0 = 插件会话永不回收，
-				// 定时器要跟着启停（否则关掉的回收器还会继续跑）。
-				manager.reconfigureEviction();
-				if (needRebuild) rebuildTransport();
-				// 定时任务触发器热启停（工具注册仍需重启；提示文案已注明）。
-				if (config.tasksEnabled && !scheduler.running) {
-					scheduler.start();
-					logger.info('dsh-qq-bot: 定时任务触发器已随配置更新启动');
-				} else if (!config.tasksEnabled && scheduler.running) {
-					scheduler.stop();
-					logger.info('dsh-qq-bot: 定时任务触发器已随配置更新停止（已有任务保留）');
-				}
-				migrateLegacyPaths(latest);
-				logger.info('dsh-qq-bot: 检测到 WebUI 配置更新，已热应用');
-			},
-		});
+		migrateLegacyPaths(config);
 	});
+
+	// 配置热应用：0.2.1 的 loader 在 volatile 更新后派发本事件（作用域已按插件
+	// fiber 过滤）。把最新引用解开并原地合并进业务层持有的 config 对象。
+	const applyLatestConfig = (): void => {
+		const latest = unwrapVolatileConfig(rawConfig);
+		const prevRateLimit = rateLimitSignature(config.rateLimit);
+		const prevDataDir = config.dataDir;
+		const needRebuild = hotApplyConfig(config, latest);
+		if (config.dataDir !== prevDataDir) {
+			logger.warn(`dsh-qq-bot: dataDir 已改为 ${config.dataDir}，但数据目录在插件启动时解析；请重启 dsh 让新的数据目录生效`);
+		}
+		if (rateLimitSignature(config.rateLimit) !== prevRateLimit) dispatcher.reconfigureRateLimit(config);
+		logs.reconfigure(config);
+		// 聊天记录：开关/上限即时生效（缓冲调小立即裁剪）；工具注册仍需重启。
+		history.reconfigure();
+		// 长期记忆：卡片缓存失效 + 按新的保留期裁剪一次；总开关变化会顺带
+		// 打开/关闭存储，存储状态一变就同步记忆工具（见 onStorageChange）。
+		memory.reconfigure();
+		// 空闲回收：`sessionIdleTimeoutMs` 改成 0 = 插件会话永不回收，
+		// 定时器要跟着启停（否则关掉的回收器还会继续跑）。
+		manager.reconfigureEviction();
+		if (needRebuild) rebuildTransport();
+		// 定时任务触发器热启停（工具注册仍需重启；提示文案已注明）。
+		if (config.tasksEnabled && !scheduler.running) {
+			scheduler.start();
+			logger.info('dsh-qq-bot: 定时任务触发器已随配置更新启动');
+		} else if (!config.tasksEnabled && scheduler.running) {
+			scheduler.stop();
+			logger.info('dsh-qq-bot: 定时任务触发器已随配置更新停止（已有任务保留）');
+		}
+		logger.info('dsh-qq-bot: 检测到 WebUI 配置更新，已热应用');
+	};
+	(ctx as unknown as { on(event: string, listener: () => void): void }).on('loader/volatile-update', applyLatestConfig);
+
 	if (config.privateMode === 'allowlist' && config.allowedUsers.length === 0 && config.adminUsers.length === 0) {
 		logger.warn('dsh-qq-bot: 私聊 allowlist 为空 = 拒绝所有私聊。请配置 allowedUsers 或 adminUsers。');
 	}

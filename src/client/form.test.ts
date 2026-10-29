@@ -12,7 +12,7 @@ import {
 } from './form.ts';
 import { en, zh } from './locales.ts';
 import { addOrderItem, moveOrderItem, removeOrderItem } from '../search/priority.ts';
-import type { CardState, SettingsPathOp, SettingsScope, SettingsScopeSnapshot, SnapshotStore } from './types.ts';
+import type { CardState, ConfigForm, ConfigFormSnapshot, SettingsPathOp, SnapshotStore } from './types.ts';
 
 /** inject 面的确切形状（form.ts 的 DshQQCardController.inject 产物）。 */
 interface CardFace {
@@ -67,17 +67,19 @@ describe('字段定义与文案字典', () => {
 			'rateLimit.windowMs', 'rateLimit.max', 'rosterEnabled', 'rosterTtlMs', 'rosterMaxMembers', 'quoteMaxChars',
 			'historyEnabled', 'historyMaxMessages', 'historyBufferPerChat', 'historyRemoteFetch',
 			'askUserEnabled', 'askUserWaitMs',
-			'memoryEnabled', 'memoryCardMaxChars', 'memoryMaxFacts', 'memoryMaxWriteFailuresPerTurn',
+			'memoryEnabled', 'memoryCardMaxChars', 'memoryProfileMaxChars', 'memoryEpisodicMaxChars', 'memoryMaxFacts', 'memoryMaxWriteFailuresPerTurn',
 			'memoryRecallEnabled', 'memoryRecallTopK', 'memoryRecallMaxChars', 'memoryRecallHalfLifeDays',
 			'memoryPrefetch', 'memoryPrefetchMinScore', 'memoryPrefetchMaxItems',
 			'memoryDistillEvery', 'memoryDistillMinChars', 'memoryDistillIdleMs',
-			'memoryDistillModel', 'memoryDistillMaxTokens', 'memoryDistillTimeoutMs',
+			'memoryDistillModel', 'memoryDistillMaxTokens', 'memoryDistillRetryTokens', 'memoryDistillTimeoutMs',
 			'memoryHandoffTail', 'memoryHandoffDistillWaitMs', 'memoryRetentionDays', 'memoryMaxEventsPerChat',
+			'memorySensitiveFilter', 'memoryCrossGroupUserProfile', 'memoryCandidateReview',
+			'memoryFactTtlDays', 'memoryUserPreferenceTtlDays', 'memoryInjectLog', 'memoryTombstoneDays',
 			'restrictTools', 'userTools', 'blockedTools', 'replyMaxChars',
 			'foldForward', 'foldThreshold', 'replyWithQuote', 'replyQuoteOnMention', 'replyWithMention', 'mediaEnabled', 'mediaMaxMB',
 			'pokeReply', 'autoApproveRequests', 'preset', 'workspaceMode',
-			'dataDir', 'maxTurnMs', 'sessionIdleTimeoutMs', 'busyStrategy', 'busyWaitMs', 'maxQueue', 'registerSendTools',
-			'tasksEnabled', 'taskMaxPerChat', 'timeAware',
+			'dataDir', 'turnIdleTimeoutMs', 'sessionIdleTimeoutMs', 'busyStrategy', 'busyWaitMs', 'forkMaxEvents', 'maxQueue', 'registerSendTools',
+			'tasksEnabled', 'taskMaxPerChat',
 			'searchEnabled', 'searchOrder', 'exaApiKey', 'exaBaseUrl', 'tavilyApiKey', 'tavilyBaseUrl',
 			'searchMaxResults', 'searchMaxQueries', 'searchTimeoutMs',
 			'messageLog', 'messageLogMax', 'messageLogToFile', 'debug',
@@ -128,7 +130,7 @@ describe('字段定义与文案字典', () => {
 	it('一张卡 = 一个功能域：私聊/群聊的差异是卡内子分节，不再各占一张卡', () => {
 		expect(FIELD_GROUPS.map((group) => group.id)).toEqual([
 			'connection', 'access', 'tools', 'search',
-			'wake', 'session', 'reply', 'roster', 'history', 'ask', 'memory', 'media', 'tasks', 'personas', 'routes',
+			'wake', 'session', 'reply', 'roster', 'history', 'ask', 'memory', 'memoryItems', 'media', 'tasks', 'personas', 'routes',
 			'logging', 'agent',
 		]);
 		// 曾经的「私聊配置」「群聊配置」两张卡已消失。
@@ -180,16 +182,16 @@ describe('字段定义与文案字典', () => {
 
 	it('人格库、人格与模型、定时任务是三张自定义卡片，位于 Agent 之前且没有 schema 字段', () => {
 		const custom = FIELD_GROUPS.filter((group) => group.custom !== undefined);
-		expect(custom.map((group) => group.id)).toEqual(['tasks', 'personas', 'routes']);
-		expect(custom.map((group) => group.custom)).toEqual(['tasks', 'personas', 'routes']);
+		expect(custom.map((group) => group.id)).toEqual(['memoryItems', 'tasks', 'personas', 'routes']);
+		expect(custom.map((group) => group.custom)).toEqual(['memory', 'tasks', 'personas', 'routes']);
 		expect(custom.every((group) => group.fields.length === 0)).toBe(true);
 		expect(FIELD_GROUPS.map((group) => group.id).indexOf('routes')).toBeLessThan(FIELD_GROUPS.map((group) => group.id).indexOf('agent'));
 		// Agent 卡片：workspaceMode 此前没有渲染入口，现已补回；dataDir 是**唯一**
 		// 的路径设置（会话目录 + 数据文件都在它下面），所以与工作目录模式同分节。
 		// 旧键 workspaceRoot / sessionGroupRoot / adminUsersFile 仅作迁移兜底，不再出现在页面上。
 		const agent = FIELD_GROUPS.find((group) => group.id === 'agent');
-		expect(agent?.fields.map((def) => def.key)).toEqual(['preset', 'timeAware', 'workspaceMode', 'dataDir']);
-		expect(agent?.fields.map((def) => def.sub)).toEqual(['subPreset', 'subTime', 'subWorkspace', 'subWorkspace']);
+		expect(agent?.fields.map((def) => def.key)).toEqual(['preset', 'workspaceMode', 'dataDir']);
+		expect(agent?.fields.map((def) => def.sub)).toEqual(['subPreset', 'subWorkspace', 'subWorkspace']);
 		// 新卡片文案齐全。
 		for (const key of ['groupPersonas', 'groupPersonasDesc', 'groupRoutes', 'groupRoutesDesc', 'groupTasks', 'groupTasksDesc']) {
 			expect(zh[key], key).toBeTruthy();
@@ -296,14 +298,13 @@ describe('getPath / hasPath', () => {
 
 /** 假 settings scope：模拟宿主 resolve + user 层合并，捕获 mutate 调用。 */
 function fakeScope(initial: { value?: Record<string, unknown>; user?: Record<string, unknown>; writable?: boolean }) {
-	let snapshot: SettingsScopeSnapshot<Record<string, unknown>> = {
+	let snapshot: ConfigFormSnapshot<Record<string, unknown>> = {
 		status: 'ready',
 		value: initial.value,
 		base: {},
 		user: initial.user,
 		revision: 1,
 		writable: initial.writable ?? true,
-		mode: 'host',
 	};
 	const listeners = new Set<() => void>();
 	const committed: SettingsPathOp[][] = [];
@@ -311,7 +312,7 @@ function fakeScope(initial: { value?: Record<string, unknown>; user?: Record<str
 		...(initial.value ?? {}),
 		...(userLayer ?? {}),
 	});
-	const scope: SettingsScope<Record<string, unknown>> = {
+	const scope: ConfigForm<Record<string, unknown>> = {
 		getSnapshot: () => snapshot,
 		subscribe: (listener) => {
 			listeners.add(listener);

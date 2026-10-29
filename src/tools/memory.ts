@@ -94,7 +94,7 @@ export function registerMemoryTools(
 		defineTool({
 			name: 'qq_memorize',
 			description:
-				'Maintain your long-term memory card for the CURRENT QQ conversation: add / replace / remove a durable fact (who someone is, the group\'s preferences and rules, long-running projects and decisions, explicit taboos). The card is injected into your system prompt as a frozen snapshot at the start of each session, so entries written now show up in later sessions. Do NOT store one-off chatter. When the card is full the tool returns an error with the current entries — consolidate or remove entries in the same turn, then retry. Only available in dsh-qq-bot QQ sessions.',
+				'Maintain long-term memory for the CURRENT QQ conversation: add / replace / remove a durable, natural-language entry (who someone is, the group\'s preferences and rules, long-running projects and decisions, explicit taboos). Writes take effect from the next turn (the profile section is refreshed immediately). Do NOT store one-off chatter, QQ numbers, phone numbers or secrets. When memory is full the tool returns an error with the current entries — consolidate or remove entries in the same turn, then retry. Only available in dsh-qq-bot QQ sessions.',
 			parameters: {
 				action: {
 					type: 'string',
@@ -104,7 +104,12 @@ export function registerMemoryTools(
 				},
 				content: {
 					type: 'string',
-					description: 'Entry text for add/replace, formatted as "subject predicate object" — e.g. "@张三(12345) 是 运维，负责服务器" or "本群 偏好 回复简短". Required for add and replace.',
+					description: 'Natural-language entry for add/replace, e.g. "@张三 是运维，负责服务器" or "本群偏好回复简短". Required for add and replace. Do not include QQ numbers.',
+				},
+				kind: {
+					type: 'string',
+					enum: ['profile', 'preference', 'fact', 'event', 'plan', 'rule'],
+					description: 'Optional memory type. Defaults to profile for explicit "remember this" requests; use event for one-off happenings and plan for ongoing projects.',
 				},
 				old_text: {
 					type: 'string',
@@ -132,6 +137,7 @@ export function registerMemoryTools(
 					action: args.action,
 					...(args.content !== undefined ? { content: args.content } : {}),
 					...(args.old_text !== undefined ? { oldText: args.old_text } : {}),
+					...(args.kind !== undefined ? { kind: args.kind } : {}),
 				});
 				if (!result.ok) {
 					// 容量/匹配失败都是「可恢复错误」：把当前条目一起回给模型，让它自己整理。

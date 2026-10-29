@@ -30,6 +30,9 @@ const RENDERERS = [
 	join('..', 'bridge', 'prompt.ts'),
 	join('..', 'memory', 'rank.ts'),
 	join('..', 'memory', 'handoff.ts'),
+	join('..', 'memory', 'card.ts'),
+	join('..', 'memory', 'distill.ts'),
+	join('..', 'tools', 'memory.ts'),
 ] as const;
 
 /**

@@ -10,6 +10,7 @@ import { statSync } from 'node:fs';
 import type { DshQQConfig } from '../config.ts';
 import type { ChatBridgeManager } from '../bridge/chat.ts';
 import { defaultAgentCwd, isSameDir } from '../bridge/chat.ts';
+import { normalizeBusyStrategy } from '../bridge/reclaim.ts';
 import { describeModelSource, formatModelSpec, parseModelSpec } from '../bridge/modelRoutes.ts';
 import type { OneBotApi } from '../onebot/api.ts';
 import type { AdminStore } from '../pipeline/access.ts';
@@ -128,7 +129,7 @@ export const COMMANDS: Record<string, CommandDef> = {
 	},
 	reclaim: {
 		usage: '/reclaim',
-		help: '会话被界面占用时立刻重试接管（管理员）',
+		help: '会话被界面占用时重试接管（仅 wait 策略；管理员）',
 		adminOnly: true,
 		async run(ctx) {
 			// 只发信号，不做任何阻塞动作：真正卡在等待里的那一轮会立刻重试一次
@@ -142,6 +143,20 @@ export const COMMANDS: Record<string, CommandDef> = {
 			}
 			if (disposition === 'none') {
 				await ctx.reply('ℹ️ 当前没有活动写句柄：下一条消息会建立会话（若先被 dsh 界面打开，就会由界面持有）。');
+				return;
+			}
+			const strategy = normalizeBusyStrategy(ctx.config.busyStrategy);
+			if (strategy === 'fork') {
+				await ctx.reply(
+					[
+						'ℹ️ 当前策略是 fork：下一条消息会直接从原会话分叉（完整保留上下文），不需要 /reclaim。',
+						'想等界面关掉后原地继续，把「会话被界面占用时」改成 wait；想直接开全新会话，改成 rotate。',
+					].join('\n'),
+				);
+				return;
+			}
+			if (strategy === 'rotate') {
+				await ctx.reply('ℹ️ 当前策略是 rotate：下一条消息会直接开新会话（旧历史保留，上下文清零），不需要 /reclaim。');
 				return;
 			}
 			await ctx.reply(
@@ -166,42 +181,82 @@ export const COMMANDS: Record<string, CommandDef> = {
 		},
 	},
 	memory: {
-		usage: '/memory [distill|reload]',
-		help: '查看本会话的长期记忆（卡片条目与档案规模）；distill = 立即蒸馏这一段对话，reload = 解冻卡片缓存',
+		usage: '/memory [list|search <词>|forget <id>|distill|reload]',
+		help: '查看本会话的长期记忆：list 列条目，search 检索，forget 删除（管理员），distill 立即蒸馏，reload 清画像缓存',
 		async run(ctx) {
 			const memory = ctx.memory;
 			if (memory === undefined || !memory.ready) {
 				await ctx.reply('（长期记忆未启用或存储不可用；在 WebUI「设置 → qq-bot 配置 → 长期记忆」里打开，或检查日志里的诊断）');
 				return;
 			}
-			const sub = ctx.arg.trim().toLowerCase();
+			const [sub = '', ...rest] = ctx.arg.trim().split(/\s+/);
+			const tail = rest.join(' ').trim();
+			if (sub === 'list') {
+				const items = memory.listItems(ctx.bridge.key, { limit: 20 });
+				if (items.length === 0) {
+					await ctx.reply('（本会话还没有记忆条目；说「记住…」或发 /memory distill）');
+					return;
+				}
+				const lines = [`【记忆条目】${ctx.bridge.label}（最近 ${items.length} 条）`];
+				for (const item of items) {
+					lines.push(`#${item.id} [${item.kind ?? 'fact'}] ${(item.content ?? item.object).slice(0, 120)}${item.pinned ? ' 📌' : ''}`);
+				}
+				await ctx.reply(lines.join('\n'));
+				return;
+			}
+			if (sub === 'search') {
+				if (tail === '') {
+					await ctx.reply('用法：/memory search <关键词>');
+					return;
+				}
+				const result = memory.recall(ctx.bridge.key, tail, 8);
+				await ctx.reply(result.text);
+				return;
+			}
+			if (sub === 'forget') {
+				if (!ctx.admins.isAdmin(ctx.msg.senderId)) {
+					await ctx.reply('❌ 只有管理员可以删除记忆条目');
+					return;
+				}
+				const id = Number.parseInt(tail, 10);
+				if (!Number.isInteger(id) || id <= 0) {
+					await ctx.reply('用法：/memory forget <id>（先用 /memory list 查 id）');
+					return;
+				}
+				const removed = memory.deleteItem(ctx.bridge.key, id, `admin:${ctx.msg.senderId}`);
+				await ctx.reply(removed ? `✅ 已删除记忆 #${id}` : `没有找到 #${id}`);
+				return;
+			}
 			if (sub === 'distill') {
 				await ctx.reply('⏳ 正在蒸馏这一段对话…');
 				const changed = await memory.distill(ctx.bridge.key, { force: true });
 				if (changed) {
-					await ctx.reply('✅ 长期记忆已更新（卡片会在下一段会话开始时生效）');
+					await ctx.reply('✅ 长期记忆已更新（本轮起生效，画像段下一轮就能看到）');
 					return;
 				}
-				// 失败原因直接回给用户：dsh 自己的 logger 在部分部署里不落盘，
-				// 只丢一句"详见日志"等于让人无从下手。
 				const reason = memory.lastDistillError?.(ctx.bridge.key);
-				await ctx.reply(reason === undefined ? '（没有可蒸馏的新内容）' : `⚠️ 蒸馏失败：${reason}`);
+				if (reason !== undefined) {
+					await ctx.reply(`⚠️ 蒸馏失败：${reason}`);
+					return;
+				}
+				const note = memory.lastDistillNote?.(ctx.bridge.key);
+				await ctx.reply(note === undefined ? '（没有可蒸馏的新内容）' : `ℹ️ ${note}`);
 				return;
 			}
 			if (sub === 'reload') {
 				memory.unfreeze(ctx.bridge.key);
-				await ctx.reply('✅ 已解冻记忆卡片（本轮起系统提示读到最新条目）');
+				await ctx.reply('✅ 已清画像缓存（本轮起系统提示读到最新条目）');
 				return;
 			}
-			const card = memory.cardSection(ctx.bridge.key);
+			const profile = memory.cardSection(ctx.bridge.key);
 			const chat = memory.chatStats(ctx.bridge.key);
 			const stats = memory.stats();
 			const lines = [
 				`【长期记忆】${ctx.bridge.label}`,
-				`卡片：${chat.facts} 条事实；档案：${chat.events} 条消息（全库 ${stats.facts} 条事实 / ${stats.events} 条消息 / ${stats.chats} 个会话）`,
-				card === '' ? '（本会话还没有记忆条目）' : card,
+				`画像：${chat.facts} 条条目；档案：${chat.events} 条消息（全库 ${stats.facts} 条 / ${stats.events} 条 / ${stats.chats} 个会话）`,
+				profile === '' ? '（本会话还没有画像条目）' : profile,
 				'',
-				'用法：/memory distill 立即蒸馏 ｜ /memory reload 解冻卡片 ｜ agent 可用 qq_memorize / qq_recall_memory（默认仅管理员）',
+				'用法：/memory list ｜ /memory search <词> ｜ /memory forget <id>（管理员）｜ /memory distill ｜ /memory reload',
 			];
 			await ctx.reply(lines.join('\n'));
 		},
@@ -215,19 +270,17 @@ export const COMMANDS: Record<string, CommandDef> = {
 	},
 	stop: {
 		usage: '/stop',
-		help: '停止当前会话正在进行的任务（不清历史）',
+		help: '打断当前正在跑的这一轮（不清历史、不换会话；卡住时的应急出口）',
 		async run(ctx) {
-			const agent = await ctx.bridge.ensureAgent().catch(() => undefined);
-			if (agent === undefined) {
-				await ctx.reply('当前没有活动会话');
-				return;
-			}
-			if (agent.status !== 'running') {
-				await ctx.reply('✅ 当前没有正在运行的任务');
-				return;
-			}
-			agent.cancel({ kind: 'user' });
-			await ctx.reply('✅ 已请求停止当前任务');
+			// 刻意不走 ensureAgent()：那是"确保有 agent"（缺就 resume/新建，可能
+			// 等写句柄几分钟）。/stop 是应急出口，必须立刻有反应——最新状态就在
+			// 桥上，句柄为空时也确实没有可打断的活动轮次。
+			const stopped = ctx.bridge.abortTurn();
+			await ctx.reply(
+				stopped
+					? '🛑 已打断这一轮（会话与上下文保留，可以直接发新消息；要清空上下文再发 /reset）'
+					: '当前没有正在跑的轮次',
+			);
 		},
 	},
 	sid: {

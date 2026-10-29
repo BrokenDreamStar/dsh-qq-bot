@@ -1,14 +1,15 @@
 /**
  * WebUI 配置热应用（纯逻辑，便于测试）。
  *
- * dsh 的 settings 服务在配置变更后不会重启插件，只回调 setSource/onChange。
+ * dsh 0.2.1 起 settings 的 volatile 字段以稳定引用热更新（不重启插件），
+ * loader 派发 `loader/volatile-update`；`index.ts` 把最新引用解开后调用本模块。
  * 各服务都在调用时实时读 config 字段，所以把解析后的最新配置原地合并进
  * 运行中的 config 对象即可生效；唯一例外是需要重建 transport 的连接参数
  * 与构造时快照的 RateLimiter 参数，由调用方按返回值/深比较单独处理。
  *
  * 路径迁移（旧 `workspaceRoot` / `sessionGroupRoot` / `adminUsersFile` → 统一的
- * `dataDir`）不在这里：计划与执行见 `paths.ts`，由 `index.ts` 在 apply 开头与
- * settings hooks 里各调用一次。
+ * `dataDir`）不在这里：计划与执行见 `paths.ts`，由 `index.ts` 在 apply 开头解析、
+ * settings 挂载后调用一次 `settings.mutate` 写回。
  */
 import type { DshQQConfig } from './config.ts';
 

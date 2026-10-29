@@ -6,6 +6,7 @@
  * import 具体的 MemoryService 实现，单测里注入假实现也更容易。
  */
 import type { Logger } from '../types.ts';
+import type { MemoryFact } from './types.ts';
 import { MemoryService, type MemoryConfigView } from './service.ts';
 import { openMemoryDatabase } from './store.ts';
 
@@ -32,9 +33,14 @@ export interface MemoryLike {
 	unfreeze(chatKey: string): void;
 	/** 新世代第一轮：产出一次性交接块（无内容时为空串）。 */
 	takeHandoff(chatKey: string, sessionId: string): Promise<string>;
+	/**
+	 * 标记某个 sessionId 已经"交接"过：fork 用完整原文继承了上一段，
+	 * 不能再让 takeHandoff 注入一份摘要（会与 fork 的历史重复）。
+	 */
+	markHanded?(chatKey: string, sessionId: string): void;
 	/** 每轮相关历史预取（零 LLM；不需要时为空串）。 */
 	prefetch(chatKey: string, query: string): string;
-	/** 世代结束（rotate/reset 前）：尽力蒸馏。 */
+	/** 世代结束（/reset 前）：尽力蒸馏。 */
 	onGenerationEnd(chatKey: string, options?: { force?: boolean }): Promise<void>;
 	/** 每轮开始时清空写入失败计数。 */
 	resetTurnWriteFailures(chatKey: string): void;
@@ -42,8 +48,16 @@ export interface MemoryLike {
 	distill(chatKey: string, options?: { force?: boolean }): Promise<boolean>;
 	/** 最近一次蒸馏失败的原因（`/memory distill` 直接回给用户；没失败过返回 undefined）。 */
 	lastDistillError?(chatKey: string): string | undefined;
+	/** 最近一次蒸馏"什么都没改"的说明（成功但零产出 / 没到阈值；失败时以 lastDistillError 为准）。 */
+	lastDistillNote?(chatKey: string): string | undefined;
 	/** 该会话的事实/档案条数（/memory 与诊断用）。 */
 	chatStats(chatKey: string): { facts: number; events: number };
+	/** 列记忆条目（`/memory list` 与 WebUI 用）。 */
+	listItems(chatKey: string, options?: { query?: string; status?: 'active' | 'pending' | 'superseded' | 'archived' | 'deleted' | 'all'; limit?: number }): MemoryFact[];
+	/** 删除一条记忆（软删 + tombstone）。 */
+	deleteItem(chatKey: string, id: number, actor: string): boolean;
+	/** 测试召回：画像段 + 情景段。 */
+	preview(chatKey: string, query: string): { profile: string; episodic: string };
 	/** `qq_recall_memory` 的实现。 */
 	recall(chatKey: string, query: string, count?: number): { text: string; count: number; candidates: number };
 	/** `qq_memorize` 的实现。 */
@@ -52,6 +66,7 @@ export interface MemoryLike {
 		action: 'add' | 'replace' | 'remove';
 		content?: string;
 		oldText?: string;
+		kind?: 'profile' | 'preference' | 'fact' | 'event' | 'plan' | 'rule';
 	}): { ok: true; text: string } | { ok: false; error: string; usage?: { label: string; entries: string[] } };
 	/** 配置热应用（卡片缓存失效 + 按总开关打开/关闭存储）。 */
 	reconfigure(): void;
@@ -92,6 +107,10 @@ export async function createMemoryService(options: CreateMemoryOptions): Promise
 				logger: options.logger,
 				maxEventsPerChat: options.config.memoryMaxEventsPerChat,
 				retentionDays: options.config.memoryRetentionDays,
+				factTtlDays: options.config.memoryFactTtlDays,
+				userPreferenceTtlDays: options.config.memoryUserPreferenceTtlDays,
+				tombstoneDays: options.config.memoryTombstoneDays,
+				sensitiveFilter: options.config.memorySensitiveFilter !== false,
 			}),
 		...(options.onStorageChange !== undefined ? { onStorageChange: options.onStorageChange } : {}),
 		...(options.note !== undefined ? { note: options.note } : {}),
@@ -100,7 +119,8 @@ export async function createMemoryService(options: CreateMemoryOptions): Promise
 		labelOf: options.labelOf,
 		createUserMessage: options.createUserMessage as never,
 		// 空闲兜底蒸馏：默认 10 分钟一次（0 = 不启用）。
-		idleSweepMs: Math.max(0, Math.trunc(options.config.memoryDistillIdleMs)),
+		// 60s 心跳：空闲阈值是热配置，定时器间隔不能在这里快照。
+		idleSweepMs: 60_000,
 	});
 	await service.openIfEnabled();
 	return service;

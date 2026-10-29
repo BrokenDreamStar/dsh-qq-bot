@@ -8,10 +8,10 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { AgentRegistry, AgentHandle, Agent, AgentOptions } from '@deepseek-ai/dsh-agent';
-import type { SessionStore, SessionId } from '@deepseek-ai/dsh-session';
+import type { SessionStore, SessionId, SessionEvent } from '@deepseek-ai/dsh-session';
 import type { Logger } from './types.ts';
 
-export type { AgentRegistry, AgentHandle, Agent, AgentOptions, SessionStore, SessionId };
+export type { AgentRegistry, AgentHandle, Agent, AgentOptions, SessionStore, SessionId, SessionEvent };
 
 /** agentPresets 服务的最小接口（dsh 内核服务，未随 npm 包发布类型）。 */
 export interface AgentPresetsLike {
@@ -56,22 +56,15 @@ export function providerId(entry: LlmProviderEntry): string {
 	return typeof entry === 'string' ? entry : entry.id;
 }
 
-/** settings.onChange / installSection hooks 的最小接口（见 dsh-settings）。 */
-export interface SettingsSectionHooksLike<T> {
-	/** 注册时与每次设置提交后调用：传入返回最新解析配置的 getter。 */
-	setSource(current: () => T): void;
-	/** 注册时与每次该命名空间 committed change 后调用（无参数）。 */
-	onChange(): void;
-}
-
-/** ctx.settings 服务（WebUI 配置节注册；可选，dsh 0.1.2-rc.1 起提供）。 */
+/**
+ * ctx.settings 服务（dsh ≥ 0.2.1）。
+ *
+ * 表单只暴露 schema 上 `.volatile()` 的字段，配置以稳定引用（`{get()}`）更新；
+ * 页面归属通过 `configure({auto:false})` 声明，热应用监听 `loader/volatile-update`。
+ */
 export interface SettingsServiceLike {
-	/**
-	 * 把插件的 schemastery 配置注册为 WebUI 可编辑的 settings 命名空间。
-	 * entry 为当前生效配置（作为 base 层）；用户层写入存 settings.yaml，
-	 * 宿主不会重启插件，热应用靠 hooks。
-	 */
-	installSection<T>(owner: Context, ns: string, schema: unknown, entry: T, hooks: SettingsSectionHooksLike<T>): void;
+	/** 声明本插件是否有自动生成页；`auto:false` = 插件自带页面。 */
+	configure?(presentation: { auto?: boolean }, owner?: unknown): () => void;
 	/**
 	 * 用户层定向写入（`{op:'set'|'unset', path}` 有序应用），仅用户层、不碰 base。
 	 * 用于旧字段的一次性迁移；旧宿主可能没有该方法，调用方必须判空降级。
@@ -167,16 +160,36 @@ export interface HostConnectionLike {
 }
 
 /**
+ * 会话持久化句柄的最小接口。
+ *
+ * `read` 不取写所有权：对方（WebUI / 另一个 dsh 进程）持有 write 时仍可打开，
+ * 用来 fork 旧会话的完整事件前缀（见 bridge/chat.ts 的 readSessionForFork）。
+ * 旧宿主没有 `read` / `header` 时，调用方必须回退到 wait/rotate。
+ */
+export interface SessionPersistenceHandleLike {
+	/** 持久化 header（read 句柄上可用；旧宿主可能没有）。 */
+	readonly header?: {
+		readonly cwd?: string;
+		readonly parentSession?: string;
+		readonly agentPreset?: string;
+	};
+	/** 读一段事件；缺省 = 旧宿主不支持。 */
+	read?(offset?: number, length?: number): Promise<{ events: readonly SessionEvent[] }>;
+	/** 关闭句柄（read 句柄只是释放本地资源）。 */
+	close(): Promise<void>;
+}
+
+/**
  * 会话持久化服务的最小接口（`ctx.sessionPersistence`）。
  *
- * 只用到 `open(id, 'write')`：**只申请写句柄、不注册 agent**，用来探测
- * "界面是否已经释放了这个会话"（见 bridge/chat.ts 的 probeResume）。
- * 真正的 resume 仍然走 `agents.resume`，因为 agent 必须由 dsh-agent-loop
- * 组装；这里只是把"句柄是否空闲"这件事与 agent 注册表解耦。
+ * 用到 `open(id, 'write')` 探测"界面是否已经释放了这个会话"（见
+ * bridge/chat.ts 的 probeResume），以及 `open(id, 'read')` 读取旧会话的
+ * 事件前缀用于 fork。真正的 resume 仍然走 `agents.resume`，因为 agent
+ * 必须由 dsh-agent-loop 组装。
  */
 export interface SessionPersistenceLike {
 	/** 打开句柄；`write` 且句柄已被占用时抛 SessionAlreadyOwnedError。 */
-	open(id: SessionId, access: 'read' | 'write', options?: { signal?: AbortSignal }): Promise<{ close(): Promise<void> }>;
+	open(id: SessionId, access: 'read' | 'write', options?: { signal?: AbortSignal }): Promise<SessionPersistenceHandleLike>;
 }
 
 /** 插件依赖的全部 dsh 服务。 */

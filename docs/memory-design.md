@@ -3,6 +3,29 @@
 > 目标：**同一个 QQ 会话（chatKey）跨会话世代记住东西**，在性能与 token 消耗之间取得可控平衡。
 > 参考实现：NousResearch/hermes-agent 的持久记忆系统（`MEMORY.md` / `USER.md` + `session_search` + background review）。
 > 本文是落地前的完整设计，不含实现代码；所有 dsh API 说法都已在本地 `node_modules` 与宿主源码上核对。
+>
+> **2026-10-29 变更**：写句柄冲突默认改为 **fork**（`buildForkSeed` + `agents.create(seed)`），
+> 从原会话完整事件前缀开新会话，不再走 rotate + 摘要交接。`rotate` 只作 fork 失败的兜底；
+> `/reset` 仍是显式记忆边界。本文中“rotate 触发蒸馏/交接”的描述已过时，仅适用于 `/reset`
+> 与进程重启（fork 继承原文，不蒸馏、不注入摘要）。
+>
+> **市场调研（2026-10-29）**：同类插件、开源记忆层与产品级实现的对比及改造建议见
+> `docs/memory-market-research.md`。该调研指出本文的“L0 会话内冻结”“固定三元组唯一键”
+> 与中文 FTS5 方案需要重审（中文 `unicode61` 实际把整句当一个 token，检索基本不可用）。
+>
+> **2026-10-29 P1 实现变更（已落地）**：本文以下“L0 冻结 / 唯一键 / 纯 FTS5 / 50 条阈值”
+> 的描述是实现前的设计，实际代码已改为：
+> - **画像段（profile）+ 情景段（episodic）**：`cardSection()` 只放 profile/preference/rule/置顶，
+>   按 `store.rev()` 缓存、写入即失效；每轮相关记忆由 `prefetch()` 注入当前 user 消息尾部。
+> - **自然语言条目**：`memory_facts` 新增 `content/kind/provenance/importance/valid_from/valid_to/
+>   expires_at/confirmed_at/status/content_hash`，去掉 `(chat_key,subject,predicate)` 唯一索引；
+>   蒸馏输出 `content/kind/importance`，旧的 `subject/predicate/object` 仍兼容。
+> - **中文检索**：写入/查询都用 `Intl.Segmenter` 分词，FTS 索引 `text_seg`/`content_seg`；
+>   `trigram` 对 2 字查询无效，不能单独用。
+> - **空闲兜底**：60s 心跳实时读 `memoryDistillIdleMs`，到点低于阈值也 `force` 蒸馏；定期 prune。
+> - **安全/运维**：`provenance`、敏感信息过滤、tombstone、审计表；WebUI「记忆库」卡片与
+>   `memory/*` RPC（list/save/delete/preview/distill/stats/audit/candidates）。
+> - 阈值默认 `memoryDistillEvery=10` / `memoryDistillMinChars=800`，`memoryMaxFacts=200`。
 
 ---
 
@@ -11,7 +34,7 @@
 | 维度 | 决策 |
 |---|---|
 | 结构 | **两层**：L0 常驻卡片（硬预算，进 system prompt）+ L1 会话档案（FTS5，按需检索，不进 prefill） |
-| L0 刷新 | **会话内冻结**（保前缀缓存），rotate/reset 时解冻 → Hermes 靠用户 `/new`，我们靠代码保证 |
+| L0 刷新 | **会话内冻结**（保前缀缓存），`/reset` 时解冻（fork 继承同一份记忆，不解冻）→ Hermes 靠用户 `/new`，我们靠代码保证 |
 | L0 写入 | **agent 主动写（工具）+ 空闲批量蒸馏**双通道；满了**报错**而不是截断 |
 | L1 写入 | 主链路零 LLM：dispatcher 里 append 一条索引；正文镜像在有界表里 |
 | 蒸馏 | 走 `ctx.llm.stream()` 一次性请求（不建 agent、不产会话文件）；增量水位线；可指定便宜模型 |
@@ -28,15 +51,17 @@
 
 dsh-qq-bot 里「同一个群」的对话可能被切成多个 **会话世代（session generation）**，记忆必须跨过全部三种断点：
 
-| 断点 | 触发点（代码位置） | 旧行为 |
+| 断点 | 触发点（代码位置） | 行为 |
 |---|---|---|
-| **rotate** | `bridge/chat.ts` `rotateOwnedSession()` —— 写句柄被 WebUI 占用且等待超时 | 换新 sessionId，**旧上下文全丢** |
-| **reset** | `bridge/chat.ts` `reset()`（`/reset` 命令） | 换 `-reset-<ts>` 新 sessionId |
+| **fork（默认）** | `bridge/chat.ts` `forkHeldSession()` —— 写句柄被 WebUI 占用且 `busyStrategy=fork` | 新 sessionId + 完整继承旧事件前缀，**上下文不丢**；不触发蒸馏/交接 |
+| **rotate（仅兜底）** | `rotateOwnedSession()` —— fork 失败，或用户显式选 `rotate` | 换新 sessionId，**旧上下文全丢**；不再蒸馏 |
+| **reset** | `bridge/chat.ts` `reset()`（`/reset` 命令） | 换 `-reset-<ts>` 新 sessionId；蒸馏 + 解冻卡片 |
 | **进程重启 / 换 cwd** | `switchWorkspace()`、插件重启后 `openAgent` | resume 原 id（正常），但若旧 id 不可用则新开 |
 
-> 注意：`sessionIdleTimeoutMs = 0` 时插件会话**永不回收**，所以「世代」不会自己变多；真正的世代来源是 rotate / reset。
+> 注意：`sessionIdleTimeoutMs = 0` 时插件会话**永不回收**，所以「世代」不会自己变多；真正的记忆边界是 reset / 进程重启。
+> fork 是"同一段对话换个写者"，不算记忆边界；rotate 只作 fork 失败的兜底。
 > 这与 Hermes 的网关模型（永远同一个会话，靠用户 `/new` 划边界）**相反**：Hermes 需要劝用户主动划边界，
-> 我们则必须把自己已有的 rotate/reset 钩子变成「记忆的边界」。
+> 我们则必须把自己已有的 reset 钩子变成「记忆的边界」。
 
 ---
 
@@ -72,7 +97,7 @@ dsh-qq-bot 里「同一个群」的对话可能被切成多个 **会话世代（
 | Hermes 机制 | 我们的做法 | 原因 |
 |---|---|---|
 | `MEMORY.md` 2,200 字符 + `USER.md` 1,375 字符，模型无关的**字符**预算 | **照抄**：L0 卡片 `memoryCardMaxChars`（默认 600）+ 每会话作用域 | 字符预算换模型不用重算；QQ 群记忆比个人助手窄，600 够 |
-| 系统提示里冻结快照，会话内不更新 | **照抄**，但解冻时机改为 rotate/reset（我们有自己的边界） | 保前缀缓存；且我们不指望用户 `/new` |
+| 系统提示里冻结快照，会话内不更新 | **照抄**，但解冻时机改为 `/reset`（fork 继承同一份记忆，不解冻） | 保前缀缓存；且我们不指望用户 `/new` |
 | 满了返回**错误 + current_entries + usage**，逼模型同轮整理 | **照抄** | 截断会静默丢信息，报错不会 |
 | `add/replace/remove`，短唯一子串匹配，**无 read** | **照抄** | 卡片已在系统提示里，read 冗余 |
 | 每轮结束 fork agent 做 background review | **改造**：① 轮后只做零 LLM 的索引 append；② LLM 蒸馏按「空闲 + 批量水位线」触发；③ 用 `ctx.llm.stream()` 而非 fork | 我们没有提示缓存复用（每轮换 prompt），fork 的性价比低；一次蒸馏覆盖 N 条更省 |
@@ -194,7 +219,7 @@ private memorySection(): string {
 }
 ```
 
-- **解冻时机**：`rotateOwnedSession()` / `reset()` / `/memory reload` / 桥重建（`rebuild()` 只换人格与模型——**不**解冻，语义上仍是同一世代）；
+- **解冻时机**：`reset()` / `/memory reload` / 桥重建（`rebuild()` 只换人格与模型——**不**解冻，语义上仍是同一世代）；
 - **为什么冻结**：`text` provider 每轮求值（§2.1），不冻结则卡片一变，从该 section 往后的前缀缓存全失效；
 - **代价与缓解**：本世代内新记的事实看不见。缓解靠 §7 的交接块（新世代立刻带上世代末摘要）与工具结果里的 live 状态；
 - **顺序建议（不改动现有 section，只定新值）**：现有 `time` 是每轮都变的（含秒），所以它理应最靠后；新卡片的 `order: 900` 排在它之后，保证卡片本身在会话内是「只在末尾附近变化」的部分，前缀主体（persona/roster/history/search/任务）完全稳定。
@@ -247,7 +272,11 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 | `qq_send` 实际发出后（`bridge.sendText` 的成功路径） | 记一条 `kind:'reply'`（与 Hermes 一样，机器人自己的发言也是记忆的一部分） |
 
 **不采集**：命中信息过滤前缀的消息（在 dispatcher 里已被整条丢弃，保持「这类消息我不想让机器人看到」的语义）、
-访问控制未通过的群消息（群不在白名单时机器人根本看不到）、`/` 开头的命令（P2 可加 `memoryIndexCommands` 开关）。
+访问控制未通过的群消息（群不在白名单时机器人根本看不到）、**已注册的命令**（`dispatcher.recordMemory()` 里用
+`parseCommand()` + `COMMANDS` 判定，见 §12 的 `memoryIndexCommands`；未知的 `/xxx` 会落到 agent，是真实发言，照记）。
+
+> 命令不进记忆是有代价换来的：`/status`、`/memory distill` 这类控制指令如果记进档案，每条命令都会变成"新事件"，
+> 于是手动蒸馏永远看到"有新内容"、每轮自动蒸馏也多烧一次模型调用，还可能被蒸成"事实"。
 
 ### 6.3 检索工具
 
@@ -297,16 +326,18 @@ score = wBm25 * bm25Normalized      // 0.6：FTS5 bm25()（越小越相关，归
 
 ## 7. 核心机制三：世代交接（Hermes 缺的那块）
 
-### 7.1 三次触发，一条统一路径
+### 7.1 触发路径（2026-10-29 起）
+
+> 写句柄冲突默认 fork 后，交接只发生在 **reset / 进程重启 / 宿主换 id**；
+> fork 继承完整原文，**不蒸馏、不注入交接块**；rotate 仅作 fork 失败的兜底，也不再蒸馏。
 
 ```
-① rotateOwnedSession() 前   → await memory.onGenerationEnd({ force: true })    // 最多等 memoryDistillTimeoutMs
-② reset() 前                → memory.onGenerationEnd({ force: false })          // 不阻塞命令
-③ 新 sessionId 的第一次 runTurn 前 → 若 meta.greeted:<chatKey> !== sessionId 则注入交接块并标记
+① reset() 前                → memory.onGenerationEnd({ force: false })          // 不阻塞命令
+② 新 sessionId 的第一次 runTurn 前 → 若 handed:<chatKey> !== sessionId 则注入交接块并标记
 ```
 
-第 ③ 步是关键：它让交接变成**幂等且与触发原因无关**——无论世代是 rotate、reset、进程重启还是宿主换 id 造成的，
-新世代的第一轮都会拿到交接块，且**只拿到一次**（用 meta 表里的 `greeted:<chatKey>` 记录）。
+第 ② 步是关键：它让交接变成**幂等且与触发原因无关**——无论世代是 reset、进程重启还是宿主换 id 造成的，
+新世代的第一轮都会拿到交接块，且**只拿到一次**（用 `handed:<chatKey>` 记录；fork 会提前标记成新 id，跳过交接）。
 
 ### 7.2 交接块内容
 
@@ -353,7 +384,7 @@ const stream = llm.stream({
   provider, model,
   system: DISTILL_SYSTEM_PROMPT,
   messages: [createUserMessage({ content: [{ type: 'text', text: payload }], source: { kind: 'user' } })],
-  maxTokens: config.memoryDistillMaxTokens,
+  maxTokens: budget,                       // 见下：首轮预算 → 空输出时放大重试
   temperature: 0,
   signal: abort.signal,
 })
@@ -362,6 +393,22 @@ for await (const chunk of stream) if (chunk.type === 'text-delta') out += chunk.
 ```
 
 优点：**不产生 dsh 会话文件**、不进 WebUI 左栏、不占写句柄、可独立指定便宜模型、可 `abort`。`llm` 缺失时（TUI/旧宿主）降级为「纯工具通道」（§5.3 仍可用，只少了自动蒸馏）。
+
+**推理模型必须靠预算兜底**（真实事故）：调用前先问 `llm.resolveModelInfo()` 拿该模型的推理档位，能拿到就显式挑**最低**档（`off` > `none` > … > `max`；宿主没声明档位时不传，免得被 `UNSUPPORTED_REASONING_EFFORT` 拒绝）。但手工在 provider 里声明的模型（如 pi-ai 的 `models: [{id: mimo-v2.6-flash}]`）**不声明任何档位**，插件连"你少想点"都提不了，模型默认档就会把整个 `maxTokens` 烧在思考上、一个可见字都不吐（症状：`usage×1 finish×1`、`finish=max-tokens`、0 字）。所以：
+
+- **预算阶梯**（`buildBudgetLadder()`）：首轮 `memoryDistillMaxTokens`，没有可见文本**或** `finish=max-tokens`（被截断，例如 JSON 吐了一半）时按 4 倍递增重试，最后一档落在 `memoryDistillRetryTokens`（默认 16 000，0 = 不重试）上，最多 3 档。例：`800 → 3200 → 16000`、`4000 → 16000`；
+- 重试的超时按预算比例放宽：`min(首轮超时 × 预算比, 首轮超时 × 4, 120s)`；
+- **够用的预算与被吃光的预算都要记住**（服务级，跨会话共用：预算需求是模型的属性）：成功的那一档下次直接起步；被推理吃光的那一档（`finish=max-tokens` 或输出 token 全在推理上）抬高下次的首轮预算——推理模型的思考长度未知，但没必要每次重走阶梯。超时/调用错误不算"吃光"（跟预算无关）。配置一改（`reconfigure()`）就清零重学；
+- 失败原因带上每次尝试的预算 / 可见字数 / `finish` / 输出 token / chunk 类型（`reasoning-delta×N` 能区分"推理没透出"与"推理吐了但没结论"），并说明宿主有没有暴露推理档位——`/memory distill` 会把它原文回给用户。
+
+**"什么都没改"也要说清是哪一种**：`distill()` 返回 `false` 有三种完全不同的含义——没到阈值（没调模型）、
+模型看过但输出空 ops（调了模型、成功）、失败（有 `lastDistillError`）。后两种以前在 `/memory distill` 里都是
+「（没有可蒸馏的新内容）」，用户根本分不清（真实提问："这是正常的吗"）。现在：
+- 没到阈值 → `lastDistillNote()` 说「这条会话在上次蒸馏之后还没有新消息」；
+- 空 ops → 推进水位线（否则每次都重复烧同一批消息）+ 说明「模型看过 N 条新消息…认为没有值得长期记住的内容」，
+  并在消息日志留一条 `memory-distill-noop`；
+- 失败 → `lastDistillError()` 优先（`noteFailure()` 会清掉旧的 note，免得误读成"这次也没内容"）。
+
 
 ### 8.2 蒸馏协议（增量 + 结构化 + 程序化校验）
 
@@ -408,22 +455,29 @@ for await (const chunk of stream) if (chunk.type === 'text-delta') out += chunk.
 
 | 触发 | 条件 | 说明 |
 |---|---|---|
-| **世代结束** | rotate/reset/交接前 | 必须；`force` 时忽略「新事件太少」的判定 |
+| **世代结束** | /reset / 交接前 | 必须；`force` 时忽略「新事件太少」的判定 |
 | **批量阈值** | `newEvents >= memoryDistillEvery`（默认 50）或 `newChars >= memoryDistillMinChars`（默认 2 000） | 摊销的关键：**一次调用覆盖 N 条** |
 | **空闲兜底** | 距上次 ≥ `memoryDistillIdleMs`（默认 10 min）且有新事件 | 用一个 `setInterval`（插件本来常驻） |
 | **手动** | `/memory distill` | 调试与补齐 |
 
 成本估算（活跃群 200 条/天，`memoryDistillEvery = 50`）：约 4 次调用/天，每次输入 2~4k token、输出 ≤ 400 token。
 对比「每轮注入 2k token 摘要」（一天几百轮 → 几十万 token），差 1~2 个数量级。
+推理模型会打破这个估算：首轮预算被思考吃光时会有一次放大预算的重试（默认 16 000 token）、
+且成功过的预算会被记住——所以「换一个非推理模型做蒸馏」不只是便宜，也是稳定性的关键。
 
 ### 8.4 模型选择
 
 ```yaml
 memoryDistillProvider: ''   # 空 = 部署默认（agentDefaultModel.currentSelection()）
 memoryDistillModel: ''      # 留空同上；填了就用它（建议便宜模型）
-memoryDistillMaxTokens: 800
-memoryDistillTimeoutMs: 15000
+memoryDistillMaxTokens: 800     # 首轮输出预算（128..32768）
+memoryDistillRetryTokens: 16000 # 空输出时的重试上限（阶梯按 4 倍递增到这一档；0 = 不重试）
+memoryDistillTimeoutMs: 15000   # 首轮超时；重试按预算比例放宽（≤4 倍、≤120s）
 ```
+
+**蒸馏模型别用推理模型**：能拿到推理档位时插件会挑最低档（deepseek-official 这类适配器声明了 `off`，
+所以部署默认模型没问题）；手工声明、没有档位元数据的模型（如经 pi-ai 接的本地模型）只能靠上面两个预算兜底，
+思考长度超过 `memoryDistillRetryTokens` 就还是拿不到 JSON——这时换一个非推理模型最省事。
 
 WebUI「长期记忆」卡片把这两项合成**一个模型下拉**：清单来自宿主 `models/list`（与「人格与模型」
 卡片、dsh「设置 → 模型」同一份运行时清单），选中的 `provider/model` 一次写入上面两项配置
@@ -440,9 +494,9 @@ WebUI「长期记忆」卡片把这两项合成**一个模型下拉**：清单�
 | 文件 | 改动 |
 |---|---|
 | `src/config.ts` | 新增 §12 的 config 字段 + schema 条目（放在「对话体验」段的「长期记忆」卡片） |
-| `src/index.ts` | 组装 `MemoryStore` / `MemoryRecorder` / `MemoryDistiller` / `MemoryService`；`inject(['llm'])` 惰性捕获；`migrateLegacyDataFiles` **之后**、各 store 读盘**之前**初始化 SQLite；注册两个工具；settings `onChange` 里 `memory.reconfigure()` |
+| `src/index.ts` | 组装 `MemoryStore` / `MemoryRecorder` / `MemoryDistiller` / `MemoryService`；`inject(['llm'])` 惰性捕获；`migrateLegacyDataFiles` **之后**、各 store 读盘**之前**初始化 SQLite；注册两个工具；`applyLatestConfig`（`loader/volatile-update`）里 `memory.reconfigure()` |
 | `src/pipeline/dispatcher.ts` | `handleMessage()` 里 `history.recordMessage(msg)` 旁加 `memory.recordEvent(...)`（**不挪到访问控制之前**） |
-| `src/bridge/chat.ts` | ① `setupAgent()` 加 `dsh-qq-bot:memory` section（order 900）；② `handleMessage/handleScheduledTask` 的 `runTurn` 后把 assistant 文本交给 memory；③ `rotateOwnedSession()` / `reset()` 里调 `onGenerationEnd()`；④ 首次轮次注入交接块（拼在 `renderPrompt()` 结果之前）；⑤ `sendText()` 成功路径记 `kind:'reply'` |
+| `src/bridge/chat.ts` | ① `setupAgent()` 加 `dsh-qq-bot:memory` section（order 900）；② `handleMessage/handleScheduledTask` 的 `runTurn` 后把 assistant 文本交给 memory；③ `reset()` 里调 `onGenerationEnd()`；④ 首次轮次注入交接块（拼在 `renderPrompt()` 结果之前）；⑤ `sendText()` 成功路径记 `kind:'reply'` |
 | `src/tools/memory.ts`（新） | `qq_recall_memory` + `qq_memorize`（`requireBridge` 绑会话） |
 | `src/tools/index.ts` | `registerMemoryTools(...)`；`defineTool` 的 `output.schema` 用逐属性 `required: true` |
 | `src/bridge/toolGuard.ts` | **不改**：记忆工具不进 `CHAT_TOOLS`，权限完全由现有 `restrictTools` / `userTools` / `blockedTools` 决定（§10.3） |
@@ -592,18 +646,19 @@ memoryDistillIdleMs: number            // default 600000
 /** 蒸馏模型（空 = 部署默认；建议填便宜模型） */
 memoryDistillProvider: string          // default ''
 memoryDistillModel: string             // default ''
-memoryDistillMaxTokens: number         // default 800, 128..4000
-memoryDistillTimeoutMs: number         // default 15000
+memoryDistillMaxTokens: number         // default 800, 128..32768（首轮）
+memoryDistillRetryTokens: number       // default 16000, 0..32768（阶梯上限：4 倍递增重试到这一档；0 = 不重试）
+memoryDistillTimeoutMs: number         // default 15000（重试按预算比例放宽：≤4 倍、≤120s）
 
 /** 世代交接：注入的最后几条原话 */
 memoryHandoffTail: number              // default 10, 0..50
-/** 世代结束（rotate/reset）时等待蒸馏的上限（ms，超时用现有卡片 + tail 交接） */
+/** 世代结束（/reset）时等待蒸馏的上限（ms，超时用现有卡片 + tail 交接） */
 memoryHandoffDistillWaitMs: number     // default 8000, 0..30000
 
 /** 正文镜像保留（天）与每会话条数上限 */
 memoryRetentionDays: number            // default 90, 1..3650
 memoryMaxEventsPerChat: number         // default 20000, 100..200000
-/** 是否把 / 命令也记入档案 */
+/** 是否把已注册的 / 命令也记入档案（P2，未实现：当前一律不采集，未知 /xxx 照记） */
 memoryIndexCommands: boolean           // default false
 ```
 
@@ -667,12 +722,12 @@ docs/memory-design.md      # 本文
 ## 15. 明确不做（反模式清单）
 
 - ❌ **每轮调 LLM 摘要**：token 与延迟双输——用「批量 + 水位线」摊销。
-- ❌ **把历史消息重放进新世代**：等于把 rotate 的收益吃掉（O(历史) 的 prefill）。
+- ❌ **把历史消息重放进新世代**：等于把换会话的收益吃掉（O(历史) 的 prefill）。
 - ❌ **卡片做成「会自己长大的摘要」**：它必须是有硬预算、可截断、满了会报错的固定开销。
 - ❌ **默认上向量/embedding**：群聊记忆的查询模式不值得那个成本与延迟。
 - ❌ **让检索工具接受群号/QQ 号参数**：等于给 QQ 入口一个任意群爬取能力。
 - ❌ **复用 `qq_read_history` 的渲染与语义**：一个是「刚才在聊什么」（分钟级），一个是「这个群长期是什么样」（月级），数据面与表头都要分开。
-- ❌ **靠用户 `/reset` 来触发记忆边界**：用户不会；边界必须由 rotate/reset 钩子 + `greeted` 幂等标记保证。
+- ❌ **靠用户 `/reset` 来触发记忆边界**：用户不会；边界必须由 /reset 钩子 + `greeted` 幂等标记保证（fork 不蒸馏）。
 - ❌ **把记忆写进 dsh 会话日志或工作目录**：会话日志归宿主（`$DSH_HOME/sessions`，改动会判 `corrupt session log`），记忆归插件 dataDir（`<dataDir>/memory.db`）。
 - ❌ **给记忆加一套独立权限字段**：`restrictTools` / `userTools` / `blockedTools` 已经够用——记忆工具不进 `CHAT_TOOLS` 即自动变成「默认仅管理员」。
 - ❌ **写第二套存储后端（JSON/NDJSON）做降级**：`node:sqlite` 不可用就明确停用并 warn，别维护两套行为。

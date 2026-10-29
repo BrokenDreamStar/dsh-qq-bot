@@ -10,7 +10,7 @@
  * 策略与 qq_send 一致（CHAT_TOOLS，能对话就能用），会话内滥用由
  * taskMaxPerChat 限制。
  *
- * 时间语义：模型的"现在"来自时间感知 section（宿主机真实时间）；
+ * 时间语义：模型的"现在"来自 dsh 内置 time-context（含真实时间与回退时区）；
  * 工具只接受显式的本地时间字符串，时区换算是模型自己的责任。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';

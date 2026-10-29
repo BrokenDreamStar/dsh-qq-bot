@@ -18,7 +18,7 @@ import { injectCardCss } from './style.ts';
 import type { ClientConnectionLike, ClientCtx, RpcCaller } from './types.ts';
 
 /** 需要的客户端服务（由 manifest dsh.client.inject 列出的包提供）。 */
-export const inject = ['slots', 'locale', 'settingsScope'];
+export const inject = ['slots', 'locale', 'configForms'];
 
 /** 宿主 /dsh-qq-bot RPC 通道名（宿主半 index.ts 注册：logs/*、personas/*、routes/*、models/list）。 */
 export const LOGS_RPC_CHANNEL = '/dsh-qq-bot';
@@ -37,10 +37,10 @@ export function apply(ctx: ClientCtx): void {
 	// shell 对未知 section id 回退齿轮图标，这里把本插件条目的图标换为 QQ。
 	installNavIcon(ctx, [zh.nav, en.nav].filter((label): label is string => typeof label === 'string' && label !== ''));
 
-	// describe 镜像携带宿主注入的工具选项（userTools/blockedTools 选择框）；
-	// 旧宿主没有 describe 时缺省，控件回退文本框。
-	const describe = typeof ctx.settingsScope.describe === 'function' ? ctx.settingsScope.describe() : undefined;
-	const controller = new DshQQCardController(ctx.settingsScope.bind({ namespace: SETTINGS_NS }), describe);
+	// describe 镜像携带宿主注入的工具选项（userTools/blockedTools 选择框）。
+	// dsh ≥ 0.2.1 的 ConfigForms 按 profile entry id 取表单（id 与插件 id 一致）。
+	const describe = ctx.configForms.describe();
+	const controller = new DshQQCardController(ctx.configForms.get<Record<string, unknown>>(SETTINGS_NS), describe);
 	const t = ctx.locale.bind(LOCALE_NS);
 	// 宿主 RPC：消息日志视图 + 人格库 / 人格与模型（均走 /dsh-qq-bot 通道）。
 	// connection 是 web profile 基线服务，但可能晚于本插件就绪，所以每次

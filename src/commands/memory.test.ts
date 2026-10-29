@@ -71,15 +71,15 @@ describe('/memory 命令', () => {
 		await COMMANDS.memory!.run(ctx);
 		const text = captured.replies.join('\n');
 		expect(text).toContain('【长期记忆】群 888');
-		expect(text).toContain('卡片：1 条事实；档案：3 条消息');
-		expect(text).toContain('全库 1 条事实 / 3 条消息 / 1 个会话');
+		expect(text).toContain('画像：1 条条目；档案：3 条消息');
+		expect(text).toContain('全库 1 条 / 3 条 / 1 个会话');
 		expect(text).toContain('本群 偏好 回复简短');
 	});
 
 	it('卡片为空时给出明确文案而不是空白', async () => {
 		const { ctx, captured } = context(fakeMemory({ cardSection: () => '' }));
 		await COMMANDS.memory!.run(ctx);
-		expect(captured.replies.join('\n')).toContain('还没有记忆条目');
+		expect(captured.replies.join('\n')).toContain('还没有画像条目');
 	});
 
 	it('distill 子命令强制蒸馏并回报结果', async () => {
@@ -103,6 +103,20 @@ describe('/memory 命令', () => {
 		ctx.arg = 'distill';
 		await COMMANDS.memory!.run(ctx);
 		expect(captured.replies.join('\n')).toContain('没有可蒸馏的新内容');
+	});
+
+	it('distill 有"零产出/跳过"说明时回说明（区分"没新消息"与"模型认为不值得记"）', async () => {
+		const { ctx, captured } = context(
+			fakeMemory({
+				distill: async () => false,
+				lastDistillNote: () => '模型看过 3 条新消息（覆盖到 seq 12），认为没有值得长期记住的内容',
+			}),
+		);
+		ctx.arg = 'distill';
+		await COMMANDS.memory!.run(ctx);
+		const text = captured.replies.join('\n');
+		expect(text).toContain('认为没有值得长期记住的内容');
+		expect(text).not.toContain('没有可蒸馏的新内容');
 	});
 
 	it('distill 失败时把失败原因回给用户（不让用户去翻看不到的日志）', async () => {
@@ -131,6 +145,6 @@ describe('/memory 命令', () => {
 		ctx.arg = 'reload';
 		await COMMANDS.memory!.run(ctx);
 		expect(unfrozen).toEqual(['g-888']);
-		expect(captured.replies.join('\n')).toContain('解冻');
+		expect(captured.replies.join('\n')).toContain('清画像缓存');
 	});
 });

@@ -51,26 +51,59 @@ export function renderSegmentsText(segments: unknown): string {
 		.join('');
 }
 
+/** 出站目标（写进日志的 chatType/chatId）：WebUI 与 /logs 会渲染成「群 123」/「好友 42」。 */
+export interface ActionTarget {
+	chatType: 'group' | 'private';
+	chatId: string;
+}
+
+/**
+ * 从 action 参数里提炼出站目标。
+ *
+ * 以前出站日志不带 chatId，WebUI 的会话列一律显示「未知会话」——排查"这条回复发到哪了"
+ * 时只能看正文里的前缀。转发/请求处理类 action 由动作本身决定目标；`send_msg` 用
+ * group_id / user_id 判定（delete_msg 这类没有目标的返回 undefined，保持"未知会话"）。
+ */
+export function actionTarget(action: string, params: Record<string, unknown> = {}): ActionTarget | undefined {
+	const groupId = params.group_id !== undefined && params.group_id !== '' ? String(params.group_id) : '';
+	const userId = params.user_id !== undefined && params.user_id !== '' ? String(params.user_id) : '';
+	if (action === 'send_private_forward_msg' || action === 'set_friend_add_request') {
+		return userId === '' ? undefined : { chatType: 'private', chatId: userId };
+	}
+	if (action === 'send_group_forward_msg' || action === 'set_group_add_request') {
+		return groupId === '' ? undefined : { chatType: 'group', chatId: groupId };
+	}
+	if (groupId !== '') return { chatType: 'group', chatId: groupId };
+	if (userId !== '') return { chatType: 'private', chatId: userId };
+	return undefined;
+}
+
 /** 从 action 参数里提炼人话摘要；返回 undefined 表示该 action 无需成功记录。 */
-export function summarizeAction(action: string, params: Record<string, unknown> = {}): { text: string; detail?: string } | undefined {
-	const target = params.group_id !== undefined ? `群 ${String(params.group_id)}` : params.user_id !== undefined ? `用户 ${String(params.user_id)}` : '';
+export function summarizeAction(
+	action: string,
+	params: Record<string, unknown> = {},
+): { text: string; detail?: string; target?: ActionTarget } | undefined {
+	const target = actionTarget(action, params);
+	const withTarget = <T extends { text: string; detail?: string }>(summary: T): T & { target?: ActionTarget } =>
+		target === undefined ? summary : { ...summary, target };
 	switch (action) {
-		case 'send_msg': {
-			const text = renderSegmentsText(params.message);
-			return { text: target === '' ? text : `${target}：${text}` };
-		}
+		case 'send_msg':
+			// 目标（群/好友）走 chatId 字段，不再重复写进正文：WebUI 与 /logs 都会渲染会话列。
+			return withTarget({ text: renderSegmentsText(params.message) });
 		case 'send_group_forward_msg':
 		case 'send_private_forward_msg': {
 			const nodes = Array.isArray(params.messages) ? params.messages : [];
 			const text = nodes.map((node: unknown) => renderSegmentsText((node as { content?: unknown })?.content)).join('\n');
-			return { text: `${target}（合并转发）：${text}` };
+			return withTarget({ text: `[合并转发] ${text}` });
 		}
 		case 'delete_msg':
 			return { text: `撤回消息 ${String(params.message_id ?? '')}` };
 		case 'set_friend_add_request':
-			return { text: `${params.approve === true ? '同意' : '拒绝'}好友请求 ${String(params.user_id ?? '')}` };
+			return withTarget({ text: `${params.approve === true ? '同意' : '拒绝'}好友请求` });
 		case 'set_group_add_request':
-			return { text: `${params.approve === true ? '同意' : '拒绝'}群请求 ${String(params.group_id ?? '')}（${String(params.sub_type ?? '')}）${String(params.user_id ?? '')}` };
+			return withTarget({
+				text: `${params.approve === true ? '同意' : '拒绝'}群请求（${String(params.sub_type ?? '')}）申请人 ${String(params.user_id ?? '')}`,
+			});
 		default:
 			return undefined;
 	}
@@ -96,17 +129,22 @@ export function withActionLogging(inner: OneBotTransport, log: MessageLogService
 						scope: 'onebot',
 						event: 'send',
 						text: summary.text,
+						...(summary.target !== undefined
+							? { chatType: summary.target.chatType, chatId: summary.target.chatId }
+							: {}),
 						detail: messageId !== undefined ? `message_id=${String(messageId)}` : undefined,
 					});
 				}
 				return data;
 			} catch (error) {
 				if (!SILENT_ACTIONS.has(action)) {
+					const target = actionTarget(action, params);
 					log.record({
 						dir: 'out',
 						scope: 'onebot',
 						event: 'action-error',
 						text: `action ${action} 失败`,
+						...(target !== undefined ? { chatType: target.chatType, chatId: target.chatId } : {}),
 						detail: error instanceof Error ? error.message : String(error),
 					});
 				}

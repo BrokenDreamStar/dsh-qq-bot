@@ -40,8 +40,8 @@ function candidate(overrides: { bm25?: number; event?: Partial<MemoryEvent>; sco
 }
 
 describe('tokenizeQuery', () => {
-	it('保留英文词与单个汉字', () => {
-		expect(tokenizeQuery('restic 备份方案')).toEqual(['restic', '备', '份', '方', '案']);
+	it('保留英文词与中文分词', () => {
+		expect(tokenizeQuery('restic 备份方案')).toEqual(['restic', '备份', '方案']);
 	});
 
 	it('小写化并去掉 FTS5 语法字符', () => {
@@ -65,7 +65,7 @@ describe('tokenizeQuery', () => {
 
 describe('buildMatchExpression', () => {
 	it('词元用双引号包成短语并 OR', () => {
-		expect(buildMatchExpression('备份 restic')).toBe('"备" OR "份" OR "restic"');
+		expect(buildMatchExpression('备份 restic')).toBe('"备份" OR "restic"');
 	});
 
 	it('无可用词元时返回 undefined', () => {
@@ -84,8 +84,8 @@ describe('normalizeBm25 / coverageOf', () => {
 	});
 
 	it('覆盖率按命中的不同词元数计算', () => {
-		expect(coverageOf(['备', '份', 'restic'], '备份还是用 restic 吧')).toBe(1);
-		expect(coverageOf(['备', '份', 'restic'], '用 restic')).toBeCloseTo(1 / 3);
+		expect(coverageOf(['备份', 'restic'], '备份还是用 restic 吧')).toBe(1);
+		expect(coverageOf(['备份', 'restic'], '用 restic')).toBeCloseTo(1 / 2);
 		expect(coverageOf(['量子'], '备份还是用 restic 吧')).toBe(0);
 		expect(coverageOf([], '任意')).toBe(0);
 	});

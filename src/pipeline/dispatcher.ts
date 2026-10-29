@@ -14,6 +14,7 @@ import type { ChatBridgeManager } from '../bridge/chat.ts';
 import { chatKeyFor } from '../bridge/chat.ts';
 import type { ChatHistoryService } from '../onebot/history.ts';
 import type { MemoryLike } from '../memory/index.ts';
+import { isMetaCommand } from '../memory/text.ts';
 import type { PersonaStore } from '../persona/store.ts';
 import type { RosterService } from '../onebot/roster.ts';
 import type { DshServices } from '../dsh.ts';
@@ -167,6 +168,15 @@ export class Dispatcher {
 	private recordMemory(msg: InboundMessage): void {
 		const memory = this.deps.memory;
 		if (memory === undefined || !memory.ready) return;
+		// **已注册的命令不进记忆档案**（`/status`、`/memory distill`…）：它们是控制
+		// 指令而不是对话内容，记进去只会白烧蒸馏 token，还可能被蒸成"事实"。
+		// 未知的 `/xxx` 仍照记——那种消息会落到 agent，是真实发言。聊天记录
+		// （history）不受影响：它的语义是"刚才群里在聊什么"，命令也在其中。
+		const command = parseCommand(msg.plainText);
+		if (command !== null && COMMANDS[command.name] !== undefined) return;
+		// 自然语言元指令（"把刚才那条删了"）也不进档案：它们是对机器人说的话，
+		// 不是关于世界的事实，蒸馏进去会变成一条假的"用户偏好"。
+		if (isMetaCommand(msg.plainText)) return;
 		try {
 			const bridge = this.bridgeFor(msg);
 			memory.record({

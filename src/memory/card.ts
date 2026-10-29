@@ -11,6 +11,7 @@
  */
 
 import { sanitizeMemoryText } from './guard.ts';
+import { stripQqNumbers } from './text.ts';
 import { CARD_HEADER, MEMORY_SAFETY_NOTE, type MemoryFact } from './types.ts';
 
 export interface CardRender {
@@ -24,9 +25,27 @@ export interface CardRender {
 	usedChars: number;
 }
 
+/** 条目是否仍应参与注入/容量计算。 */
+export function isActiveFact(fact: MemoryFact, now = Date.now()): boolean {
+	if (fact.status !== undefined && fact.status !== 'active') return false;
+	if (fact.supersededBy !== null) return false;
+	if (fact.expiresAt !== null && fact.expiresAt !== undefined && fact.expiresAt <= now) return false;
+	return true;
+}
+
+/** 条目的自然语言正文（兼容旧结构化条目）。 */
+export function factText(fact: MemoryFact): string {
+	const content = fact.content?.trim();
+	if (content !== undefined && content !== '') return content;
+	return [fact.subject, fact.predicate, fact.object].filter((part) => part.trim() !== '').join(' ');
+}
+
 /** 参与卡片排序的比较函数（导出便于测试）。 */
 export function compareFacts(a: MemoryFact, b: MemoryFact): number {
 	if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+	const ai = a.importance ?? 0.5;
+	const bi = b.importance ?? 0.5;
+	if (bi !== ai) return bi - ai;
 	if (b.confidence !== a.confidence) return b.confidence - a.confidence;
 	if (b.updatedAt !== a.updatedAt) return b.updatedAt - a.updatedAt;
 	return b.id - a.id;
@@ -35,7 +54,7 @@ export function compareFacts(a: MemoryFact, b: MemoryFact): number {
 /** 单条条目的渲染文本（不含序号）。 */
 export function renderFactLine(fact: MemoryFact): string {
 	const pinned = fact.pinned ? '[置顶] ' : '';
-	return `${pinned}${sanitizeMemoryText(fact.subject)} ${fact.predicate} ${sanitizeMemoryText(fact.object)}`;
+	return `${pinned}${sanitizeMemoryText(stripQqNumbers(factText(fact)))}`;
 }
 
 /**
@@ -48,12 +67,18 @@ export function renderFactLine(fact: MemoryFact): string {
  */
 export function renderCard(
 	facts: readonly MemoryFact[],
-	options: { maxChars: number; chatLabel?: string; visibilityThreshold?: number },
+	options: { maxChars: number; chatLabel?: string; visibilityThreshold?: number; now?: number },
 ): CardRender {
 	const threshold = options.visibilityThreshold ?? 0.4;
 	const budget = Math.max(0, Math.trunc(options.maxChars));
+	const now = options.now ?? Date.now();
 	const candidates = facts
-		.filter((fact) => fact.supersededBy === null && fact.confidence >= threshold && sanitizeMemoryText(fact.object) !== '')
+		.filter(
+			(fact) =>
+				isActiveFact(fact, now) &&
+				fact.confidence >= threshold &&
+				sanitizeMemoryText(factText(fact)) !== '',
+		)
 		.sort(compareFacts);
 
 	const lines: string[] = [];
@@ -90,7 +115,7 @@ export function renderCard(
 /** 卡片当前占用的字符数（= 所有活跃条目的渲染长度之和，含序号）。 */
 export function cardUsage(facts: readonly MemoryFact[]): number {
 	return facts
-		.filter((fact) => fact.supersededBy === null)
+		.filter((fact) => isActiveFact(fact))
 		.reduce((total, fact) => total + renderFactLine(fact).length + 2, 0);
 }
 
@@ -107,7 +132,7 @@ export interface CardUsage {
 
 /** 组装使用率信息（Hermes 的 `usage` 字段语义）。 */
 export function describeUsage(facts: readonly MemoryFact[], maxChars: number): CardUsage {
-	const active = facts.filter((fact) => fact.supersededBy === null).sort(compareFacts);
+	const active = facts.filter((fact) => isActiveFact(fact)).sort(compareFacts);
 	const used = cardUsage(facts);
 	const limit = Math.max(0, Math.trunc(maxChars));
 	return {

@@ -33,6 +33,7 @@ function config(overrides: Partial<MemoryConfigView> = {}): MemoryConfigView {
 		memoryDistillProvider: '',
 		memoryDistillModel: '',
 		memoryDistillMaxTokens: 800,
+		memoryDistillRetryTokens: 16000,
 		memoryDistillTimeoutMs: 15000,
 		memoryHandoffTail: 10,
 		memoryHandoffDistillWaitMs: 5000,
@@ -145,9 +146,7 @@ describe('端到端：一个群的三段会话', () => {
 		// ── 世代 2：模型主动记一条新事实（卡片已满时不至于，这里只有 2 条） ──
 		const written = memory.memorize({ chatKey: 'g-888', action: 'add', content: '@张三(12345) 是 运维，负责服务器' });
 		expect(written.ok).toBe(true);
-		// 冻结语义：本世代看不到，下一世代才生效。
-		expect(memory.cardSection('g-888')).toBe(card);
-		memory.unfreeze('g-888');
+		// 写入即生效：不需要 /reset 或下一世代。
 		expect(memory.cardSection('g-888')).toContain('运维');
 	});
 

@@ -9,27 +9,31 @@
  *  2. **dsh 界面（WebUI / TUI）把这个会话打开了**：宿主 sessionController
  *     持有写句柄，且不会自行释放（关标签页、空闲都不会）。
  *
- * 老行为对两种情况一视同仁：重试 1.4s 后直接**换新 session id**（同 /reset），
- * 代价是静默丢掉对话上下文。新行为把第 2 种变成"等 + 提示"：只要用户关掉
- * 那个界面，下一条消息就原地恢复原会话。等不到（`busyWaitMs` 超时）才轮换。
+ * 现在默认不再轮换：先尝试从原会话 **fork** 一个新会话（完整继承事件前缀，
+ * 见 bridge/chat.ts 的 forkHeldSession），既保留上下文，又不用抢对方的写句柄。
+ * `wait` 仍保留给"我就想等界面关掉、继续原会话"的场景；`rotate` 只作为 fork
+ * 失败后的最后兜底（或用户明确要求"重新开始"）。
  *
- * 本模块只做决策与轮询，不碰 dsh API；真正的 resume 在 ChatBridge.openAgent。
+ * 本模块只做决策与轮询，不碰 dsh API；真正的 resume/fork 在 ChatBridge.openAgent。
  */
 
-/** 占用时的策略：wait = 等对方释放（默认）；rotate = 立即换新会话（旧行为）。 */
-export type BusyStrategy = 'wait' | 'rotate';
+/** 占用时的策略：fork = 从原会话分叉（默认）；wait = 等对方释放；rotate = 立即换新会话。 */
+export type BusyStrategy = 'fork' | 'wait' | 'rotate';
 
 /** 策略取值（Web UI 下拉与 schema 共用）。 */
-export const BUSY_STRATEGIES = ['wait', 'rotate'] as const;
+export const BUSY_STRATEGIES = ['fork', 'wait', 'rotate'] as const;
 
-export const DEFAULT_BUSY_STRATEGY: BusyStrategy = 'wait';
+export const DEFAULT_BUSY_STRATEGY: BusyStrategy = 'fork';
 
-/** 默认等待上限（ms）：等不到就轮换，避免无限期押后消息。 */
+/** 默认等待上限（ms）：等不到就走 fork，避免无限期押后消息。 */
 export const DEFAULT_BUSY_WAIT_MS = 300_000;
 
-/** 配置里出现未知值时保守回落到「等待」——等待只损失时延，轮换会丢上下文。 */
+/** 配置里出现未知值时保守回落到「分叉」——分叉保留上下文，不会静默丢对话。 */
 export function normalizeBusyStrategy(value: unknown): BusyStrategy {
-	return value === 'rotate' ? 'rotate' : DEFAULT_BUSY_STRATEGY;
+	if (value === 'rotate') return 'rotate';
+	if (value === 'wait') return 'wait';
+	if (value === 'fork') return 'fork';
+	return DEFAULT_BUSY_STRATEGY;
 }
 
 /**
@@ -73,15 +77,16 @@ export function describeDisposition(disposition: HandleDisposition): string {
 		case 'ours':
 			return '本插件持有（其它界面只能复用同一个 agent）';
 		case 'other':
-			return '被其它界面持有（下一条消息会等它释放，超时才换新会话）';
+			return '被其它界面持有（下一条消息按 busyStrategy 分叉/等待/换新会话）';
 		default:
 			return '未打开（下一条消息建立）';
 	}
 }
 
-/** 提示分两段：刚发现被占（用户还有机会去关界面），与真的轮换了（说明原因）。 */
+/** 提示分两段：刚发现被占（用户还有机会去关界面），与真的换/分叉了（说明原因）。 */
 export const HELD_NOTICE = '（这个会话正开在 dsh 界面里，写句柄被它占着；我先等一会儿。关掉那边的会话后重发即可继续，不用新开会话）';
-export const HELD_ROTATED_NOTICE = '（原会话一直被 dsh 界面占用，已开启新会话；旧会话历史保留，可在界面里查看）';
+export const HELD_ROTATED_NOTICE = '（原会话被 dsh 界面占用或无法分叉，已开启新会话；旧会话历史保留，可在界面里查看）';
+export const FORKED_NOTICE = '（这个会话正开在 dsh 界面里，已从当前上下文分叉出新会话继续；旧会话保留，界面里仍可查看）';
 
 /**
  * 轮询等待对方释放写句柄。

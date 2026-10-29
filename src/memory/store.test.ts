@@ -98,9 +98,12 @@ describe('事件（会话档案）', () => {
 		const db = await open();
 		db.insertEvent(event({ text: '备份还是用 restic 吧', msgId: '1' }));
 		db.insertEvent(event({ text: '今天天气不错', msgId: '2' }));
-		const hits = db.searchEvents('g-888', '"备" OR "份" OR "restic"', 10);
+		const hits = db.searchEvents('g-888', '"备份" OR "restic"', 10);
 		expect(hits.length).toBeGreaterThan(0);
 		expect(hits[0]?.event.text).toContain('restic');
+		// 纯中文查询也必须命中（旧 unicode61 + 单字切分实际返回 0 行）。
+		const chinese = db.searchEvents('g-888', '"备份"', 10);
+		expect(chinese.map((hit) => hit.event.text)).toContain('备份还是用 restic 吧');
 	});
 
 	it('检索只返回本会话的结果（不跨群）', async () => {
@@ -153,7 +156,7 @@ describe('事件（会话档案）', () => {
 		const db = await open({ retentionDays: 1 });
 		db.insertEvent(event({ text: '幽灵消息', ts: Date.now() - 5 * 86_400_000, msgId: 'old' }));
 		db.prune();
-		expect(db.searchEvents('g-888', '"幽" OR "灵"', 10)).toEqual([]);
+		expect(db.searchEvents('g-888', '"幽灵"', 10)).toEqual([]);
 	});
 });
 
@@ -190,6 +193,14 @@ describe('元数据（水位线 / 世代标记）', () => {
 });
 
 describe('事实（卡片）', () => {
+	it('记忆条目中文检索命中（content_seg）', async () => {
+		const db = await open();
+		db.addFact({ chatKey: 'g-888', content: '张三喜欢备份方案，偏好 restic' });
+		const hits = db.searchItems('g-888', '"备份"', 10);
+		expect(hits).toHaveLength(1);
+		expect(hits[0]?.fact.content).toContain('备份');
+	});
+
 	it('新增并读回，rev 自增', async () => {
 		const db = await open();
 		const before = db.rev('g-888');
@@ -201,16 +212,16 @@ describe('事实（卡片）', () => {
 		expect(facts[0]?.object).toBe('回复简短');
 	});
 
-	it('同 (subject,predicate) 再次新增 = 原地改写（不产生重复条目）', async () => {
+	it('同 (subject,predicate) 再次新增 = 追加而不是覆盖', async () => {
 		const db = await open();
 		db.addFact({ chatKey: 'g-888', subject: '本群', predicate: '偏好', object: '回复简短' });
 		db.addFact({ chatKey: 'g-888', subject: '本群', predicate: '偏好', object: '回复简短、先给结论' });
 		const facts = db.facts('g-888');
-		expect(facts).toHaveLength(1);
-		expect(facts[0]?.object).toBe('回复简短、先给结论');
+		expect(facts).toHaveLength(2);
+		expect(facts.map((fact) => fact.object)).toEqual(['回复简短', '回复简短、先给结论']);
 	});
 
-	it('已被取代的条目再次新增时会被复活（不撞唯一索引）', async () => {
+	it('已被取代的条目再次新增时追加一条新的活跃条目（保留历史）', async () => {
 		const db = await open();
 		const added = db.addFact({ chatKey: 'g-888', subject: '本群', predicate: '偏好', object: '旧内容' });
 		if (!('id' in added)) throw new Error('新增失败');
@@ -219,9 +230,9 @@ describe('事实（卡片）', () => {
 		const again = db.addFact({ chatKey: 'g-888', subject: '本群', predicate: '偏好', object: '新内容' });
 		expect('id' in again).toBe(true);
 		const facts = db.facts('g-888');
-		expect(facts).toHaveLength(1);
-		expect(facts[0]?.object).toBe('新内容');
-		expect(facts[0]?.supersededBy).toBeNull();
+		expect(facts).toHaveLength(2);
+		const newest = facts.find((fact) => fact.object === '新内容');
+		expect(newest?.supersededBy).toBeNull();
 	});
 
 	it('命中安全扫描的条目被拒绝', async () => {
@@ -231,10 +242,11 @@ describe('事实（卡片）', () => {
 		expect(db.facts('g-888')).toHaveLength(0);
 	});
 
-	it('predicate 必须在白名单内', async () => {
+	it('自由文本条目允许不带白名单 predicate', async () => {
 		const db = await open();
-		const result = db.addFact({ chatKey: 'g-888', subject: 'A', predicate: '瞎写', object: 'x' });
-		expect('error' in result).toBe(true);
+		const result = db.addFact({ chatKey: 'g-888', content: '张三最近在折腾 NAS', kind: 'fact' });
+		expect('id' in result).toBe(true);
+		expect(db.facts('g-888')[0]?.content).toBe('张三最近在折腾 NAS');
 	});
 
 	it('updateFact 只改本会话的条目', async () => {
@@ -264,16 +276,16 @@ describe('事实（卡片）', () => {
 		const facts = db.facts('g-888');
 		expect(facts.find((fact) => fact.id === kept.id)?.object).toBe('新偏好');
 		expect(facts.find((fact) => fact.id === gone.id)?.supersededBy).toBe(0);
-		expect(facts.some((fact) => fact.subject === '@李四(67890)')).toBe(true);
+		expect(facts.some((fact) => fact.subject === '@李四')).toBe(true);
 	});
 
-	it('applyOps 的 add 撞上已有 (subject,predicate) 时按 upsert 处理', async () => {
+	it('applyOps 的 add 同内容去重、不同内容追加', async () => {
 		const db = await open();
 		db.addFact({ chatKey: 'g-888', subject: '本群', predicate: '偏好', object: '旧' });
 		expect(db.applyOps('g-888', [{ op: 'add', subject: '本群', predicate: '偏好', object: '新', confidence: 0.9 }], 9)).toBe(true);
 		const facts = db.facts('g-888');
-		expect(facts).toHaveLength(1);
-		expect(facts[0]?.object).toBe('新');
+		expect(facts).toHaveLength(2);
+		expect(facts.map((fact) => fact.object)).toContain('新');
 	});
 
 	it('enforceFactLimit 按「非置顶 → 低置信 → 旧」淘汰', async () => {
@@ -285,6 +297,15 @@ describe('事实（卡片）', () => {
 		expect(removed).toBe(1);
 		const active = db.facts('g-888').filter((fact) => fact.supersededBy === null);
 		expect(active.map((fact) => fact.subject).sort()).toEqual(['置顶', '高置信']);
+	});
+
+	it('删除后 tombstone 阻止后台抽取复活', async () => {
+		const db = await open();
+		const added = db.addFact({ chatKey: 'g-888', content: '张三喜欢简短回复' });
+		if (!('id' in added)) throw new Error('新增失败');
+		expect(db.deleteFact('g-888', added.id, 'user')).toBe(true);
+		const again = db.addFact({ chatKey: 'g-888', content: '张三喜欢简短回复' });
+		expect('error' in again).toBe(true);
 	});
 
 	it('setPinned 影响淘汰优先级', async () => {

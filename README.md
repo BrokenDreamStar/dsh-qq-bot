@@ -8,7 +8,7 @@ DeepSeek Harness（dsh）× QQ 适配插件：以 **OneBot 11** 协议接入 QQ�
 OneBot 11 对接端 ⇄ Transport（正向/反向 WS）⇄ OneBot 协议层 ⇄ Pipeline ⇄ ChatBridge ⇄ dsh agent
 ```
 
-运行环境：Node ≥ 22.19.0，dsh ≥ 0.1.0-rc.6（长期记忆需 Node ≥ 23.4，或 Node 22.x 加 `--experimental-sqlite`）。
+运行环境：Node ≥ 22.19.0，dsh ≥ **0.2.1-rc.2**（长期记忆需 Node ≥ 23.4，或 Node 22.x 加 `--experimental-sqlite`）。
 
 ## 快速开始
 
@@ -16,7 +16,7 @@ OneBot 11 对接端 ⇄ Transport（正向/反向 WS）⇄ OneBot 协议层 ⇄ 
 
 ```bash
 # 从 npm 安装
-npx @deepseek-ai/dsh plugin --profile web add dsh-qq-bot
+npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add dsh-qq-bot
 ```
 
 本地开发（改完重新 build 即生效）：
@@ -26,7 +26,7 @@ npm install --legacy-peer-deps   # dsh 包互为 peer 依赖，插件环境需�
 npm run build && npm test
 
 # 挂进 profile：本地路径务必用 link:，不要用 file:
-npx @deepseek-ai/dsh plugin --profile web add link:/path/to/dsh-qq-bot
+npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add link:/path/to/dsh-qq-bot
 ```
 
 > **本地路径必须用 `link:`。** profile 使用 hoisted 链接器，`file:` 依赖会被复制/硬链接成一份快照，
@@ -67,7 +67,7 @@ npx @deepseek-ai/dsh plugin --profile web add link:/path/to/dsh-qq-bot
 
 ## 功能概览
 
-配置页按 **一张卡 = 一个功能域** 组织，共 17 张，分三段。
+配置页按 **一张卡 = 一个功能域** 组织，共 18 张，分三段（长期记忆拆成「长期记忆」配置卡与「记忆库」管理卡）。
 
 ### 接入与安全
 
@@ -83,12 +83,12 @@ npx @deepseek-ai/dsh plugin --profile web add link:/path/to/dsh-qq-bot
 | 卡片 | 能力 |
 |---|---|
 | 唤醒 | 群聊 @ 触发、唤醒前缀（单行逗号分隔）、私聊免唤醒；信息过滤前缀（命中即整条忽略） |
-| 会话与限速 | 群聊共享/独立会话、按会话滑动窗口限速、排队上限、单轮超时、空闲回收、写句柄占用策略 |
+| 会话与限速 | 群聊共享/独立会话、按会话滑动窗口限速、排队上限、无进展中断、空闲回收、写句柄占用策略 |
 | 回复形态 | 按单条上限切块、超长折叠为合并转发、引用原消息（被 @ 时默认引用）、引用反查上限、回复 @ 触发者 |
 | 群成员识别 | 成员名单（TTL + 落盘 + 单飞刷新，含角色与最近发言人）注入 system prompt；引用还原与 @ 语义化 |
 | 聊天记录 | `qq_read_history`：本地内存缓冲 + 对接端历史接口合并，只能读当前会话 |
 | 提问与回答 | agent 的 `ask_user_question`（含计划确认）转发到 QQ，接受 QQ 回复作为答案；与 dsh 界面两边谁先答用谁 |
-| 长期记忆 | 默认关闭。L0 卡片（会话内冻结）+ L1 会话档案（SQLite + FTS5）+ 世代交接 + 蒸馏 + 每轮预取 |
+| 长期记忆 | 默认关闭。画像段（身份/偏好/规则，写入即生效）+ 情景段（每轮检索后注入 user 尾部）+ SQLite 记忆条目与原始档案 + 中文分词检索 + 世代交接 + 蒸馏（默认每 10 条/800 字/空闲兜底）+ WebUI「记忆库」管理 |
 | 媒体与互动 | 收图落盘到会话媒体目录并把绝对路径交给 agent；戳一戳自动回复 |
 | 定时任务 | 任务总览与手动管理（启停/改期/删除/立即执行/新建）；任务绑定创建会话 |
 | 人格库 | 人格名称与提示词的增删改（`personas.json`） |
@@ -99,13 +99,15 @@ npx @deepseek-ai/dsh plugin --profile web add link:/path/to/dsh-qq-bot
 | 卡片 | 能力 |
 |---|---|
 | 消息日志与诊断 | 对接端收发、发往 QQ 的 action、dsh 的 prompt 与回复原文、管线丢弃原因、搜索与问答记录；卡内嵌 SSE 实时日志视图（断线自动重连/降级轮询，可过滤与清空） |
-| Agent 与工作目录 | Agent 预设、时间感知、工作目录模式（会话目录 / 主目录）、数据目录 |
+| Agent 与工作目录 | Agent 预设、工作目录模式（会话目录 / 主目录）、数据目录；真实时间感知由 dsh 内置 `time-context` 提供 |
 
 **几个值得知道的点**：
 
+- **时间感知复用 dsh 内置能力**：`standard`、`cordis`、`ptc` 预设自带的 `time-context` 会在模型步骤前追加真实时间、时区与距上条消息的经过时长，并持久记录到会话中；本插件不再自行拼接时间或注册重复的 system prompt section。`minimal` 或自定义预设没有挂载时，QQ 桥会直接补挂同一个内置插件。
+- **长任务不设总时长超时，只有"无进展"兜底**：一轮跑多久由 agent 自己决定，跑几小时的长任务不会被按时间腰斩。兜底是「无进展中断」`turnIdleTimeoutMs`（默认 15 分钟，0 = 关）：连续这么久**没有任何会话事件**（模型输出、工具调用）才判定卡死并中断，等用户回答期间不计时。真卡住时发 `/stop` 可手动打断当前这一轮（不清历史、不换会话）。
 - **切块与折叠**：回复一律按单条上限切块；超过阈值可折叠成合并转发消息（QQ 的"聊天记录"）。
 - **群聊里不提 QQ 号**：所有给模型看的文本（发言人标签、@ 提及、成员列表、聊天记录、引用块、记忆检索）只给昵称；号码仅用于插件内部。代价是重名成员无法靠号码区分。
-- **写句柄先占**：dsh 会话是单写者模型，在 dsh WebUI 里打开一个 QQ 会话就会占住写句柄。插件默认 `sessionIdleTimeoutMs: 0`（建立的会话永不回收），并在启动与重建后立刻占住，让界面只能复用同一个 agent；真被界面抢先时按 `busyStrategy: wait` 等待（`busyWaitMs`，默认 5 分钟，且被单轮超时的一半截断），超时才换新会话。`/status` 的「写句柄」行与 `/reclaim` 是配套入口。
+- **写句柄先占 + fork 兜底**：dsh 会话是单写者模型，在 dsh WebUI 里打开一个 QQ 会话就会占住写句柄。插件默认 `sessionIdleTimeoutMs: 0`（建立的会话永不回收），并在启动与重建后立刻占住，让界面只能复用同一个 agent；真被界面抢先时默认 `busyStrategy: fork`——从原会话的完整事件前缀分叉出新会话继续（`forkMaxEvents`，默认 4000 条，超出才回退），旧会话原样留给界面。`wait` 保留给"等界面关掉后继续原会话"的场景（`busyWaitMs`，默认 5 分钟，超时再 fork），`rotate` 只作最后兜底。`/status` 的「写句柄」行与 `/reclaim` 是配套入口。
 - **数据与工作目录同源**：每个聊天对象一个目录，它同时是 agent 默认工作目录、WebUI 左栏工作区与媒体落盘根；上下文隔离由 chatKey → 独立 sessionId 保证，不靠目录。
 - **网页搜索、长期记忆的工具默认只给管理员**（`qq_web_search`、`qq_recall_memory`、`qq_memorize` 不在聊天工具白名单里）；要让普通用户用，把它们加进 `userTools`。
 - **热应用**：绝大多数配置改完即生效、无需重启。需要重启 dsh 的只有 `dataDir` 与「工具是否注册」类开关（`registerSendTools`、`tasksEnabled`、`historyEnabled`、`searchEnabled`）；长期记忆例外——它的总开关连工具一起即时注册/注销。
@@ -153,9 +155,9 @@ QQ 群/私聊是**无认证入口**：任何能给机器人发消息的人都可
 
 | 内容 | 路径 |
 |---|---|
-| 会话流水（对话记录本体） | `$DSH_HOME/sessions/<cwd 编码>--/<sessionId>/session.v3.jsonl.zstd` |
+| 会话流水（对话记录本体） | `$DSH_HOME/sessions/<cwd 编码>--/<sessionId>/session.v4.jsonl.zstd` |
 | 左栏分组与标题缓存 | `$DSH_HOME/storages/workspace.json`、`storages/session_projcache/` |
-| 图片附件 / 设置文档 / profile 树 | `$DSH_HOME/attachments/`、`settings.yaml`、`profiles/` |
+| 图片附件 / profile 树 | `$DSH_HOME/attachments/`、`profiles/`（配置保存在 profile 的 `cordis.patch.yml`；旧版 `settings.yaml` 会被 dsh 一次性导入后改名） |
 
 三点提醒：
 
@@ -166,7 +168,7 @@ QQ 群/私聊是**无认证入口**：任何能给机器人发消息的人都可
 ## 命令与工具
 
 **内置命令**：`/help` `/status` `/reset` `/new` `/stop` `/sid` `/model` `/persona` `/cwd` `/op` `/deop` `/logs` `/tasks` `/memory` `/ping` `/reclaim`
-（`/memory` 支持 `distill` 立即蒸馏、`reload` 解冻卡片；管理类命令需管理员）
+（`/memory` 支持 `list` 列条目、`search <词>` 检索、`forget <id>` 删除（管理员）、`distill` 立即蒸馏、`reload` 清画像缓存）
 
 **Agent 工具**：
 
@@ -181,10 +183,11 @@ QQ 群/私聊是**无认证入口**：任何能给机器人发消息的人都可
 
 ## WebUI 配置界面
 
-dsh WebUI 的**设置**左列有独立的「dsh-qq-bot」入口（需 dsh ≥ 0.1.2-rc.1）。页面与内置卡片同构：
+dsh WebUI 的**设置**左列有独立的「qq-bot 配置」入口（需 dsh ≥ 0.2.1-rc.2）。页面与内置卡片同构：
 
 - 每个折叠卡片**独立暂存与保存**，保存后不收起，展开态写入 sessionStorage（刷新后仍保持）
-- 保存写入 `settings.yaml` 的 user 层（revision fence 防并发覆盖），bundle/patch 默认值继续生效
+- 保存通过 dsh 的 settings/config-editor 写入当前 profile 的 `cordis.patch.yml`（revision fence 防并发覆盖），bundle/patch 默认值继续生效
+- 配置字段在 schema 上标记为 `.volatile()`：dsh 以稳定引用热更新，不重启插件；插件监听 `loader/volatile-update` 原地合并（连接参数变化会自动重建 transport）
 - 只读部署自动禁用；中英双语跟随 WebUI 语言
 - `accessToken` 与各 API Key 为**只写字段**（宿主脱敏、永不回显，留空保存 = 保持不变）
 - 「人格库」「人格与模型」「定时任务」三张卡片的数据走插件自建 RPC（编辑 `personas.json` / `chat-overrides.json` / `tasks.json`），保存后所有会话下一条消息即按新配置重建（历史保留）
@@ -223,7 +226,7 @@ src/
 ├── persona/          # store（人格库 + 会话覆盖）/ routes（friend_/group_ 选择器）/ rpc
 ├── tasks/            # 定时任务：schedule（时间表纯逻辑）/ store / scheduler / rpc
 ├── search/           # 网页搜索：priority（排序列表纯函数）/ providers / chain（顺延）/ service
-├── memory/           # 长期记忆：card / store（SQLite + FTS5）/ rank / distill / handoff / guard / service
+├── memory/           # 长期记忆：card / store（SQLite + FTS5）/ rank / distill / handoff / guard / service / rpc / text
 ├── commands/         # 内置命令
 └── tools/            # qq_* 与 task_* 工具
 ```
@@ -233,6 +236,7 @@ dsh 还在 developer preview，API 可能有破坏性变更。所有 dsh API 调
 ## 相关文档
 
 - `docs/memory-design.md` — 长期记忆的设计与取舍
+- `docs/memory-market-research.md` — 同类插件/记忆层/产品级实现的市场调研与改造建议
 
 ## License
 

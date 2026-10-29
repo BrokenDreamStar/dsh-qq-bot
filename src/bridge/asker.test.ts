@@ -24,7 +24,7 @@ function makeRelay(overrides: Partial<QuestionRelayDeps> = {}) {
 			sent.push(segments);
 			return 900 + sent.length;
 		},
-		options: () => ({ askUserWaitMs: 300_000, maxTurnMs: 600_000, replyMaxChars: 4500 }),
+		options: () => ({ askUserWaitMs: 300_000, replyMaxChars: 4500 }),
 		askerId: () => '1001',
 		logger: { info: () => undefined, warn: (message) => warnings.push(message), error: () => undefined },
 		logs: { record: (entry: LogInput) => logs.push(entry) },
@@ -169,7 +169,7 @@ describe('提问中继', () => {
 	it('长问题按单条上限切块，且所有块 id 都记入引用判定', async () => {
 		const long: AskQuestion = { id: 'plan', question: '批准吗？', detail: 'x'.repeat(200) };
 		const { relay, sent } = makeRelay({
-			options: () => ({ askUserWaitMs: 300_000, maxTurnMs: 600_000, replyMaxChars: 80 }),
+			options: () => ({ askUserWaitMs: 300_000, replyMaxChars: 80 }),
 		});
 		const promise = relay.relay([long]);
 		await flush();
@@ -179,9 +179,9 @@ describe('提问中继', () => {
 		await promise;
 	});
 
-	it('预算夹取依赖单轮上限（maxTurnMs 很短时等待也短）', async () => {
+	it('等待到点即超时，budgetMs 就是配置值（不再被单轮上限截断）', async () => {
 		const { relay, logs } = makeRelay({
-			options: () => ({ askUserWaitMs: 300_000, maxTurnMs: 20_000, replyMaxChars: 4500 }),
+			options: () => ({ askUserWaitMs: 10_000, replyMaxChars: 4500 }),
 		});
 		const promise = relay.relay([twoOptions]);
 		await flush();

@@ -116,3 +116,26 @@ export function normalizeFactText(text: string, maxChars: number): string | unde
 export function describeFindings(findings: readonly ThreatFinding[]): string {
 	return findings.map((finding) => `${finding.kind}(${finding.pattern})`).join(', ');
 }
+
+/** 敏感类别（默认拒绝写入长期记忆）。 */
+const SENSITIVE_PATTERNS: ReadonlyArray<{ kind: string; pattern: RegExp }> = [
+	{ kind: 'phone', pattern: /(?<!\d)1[3-9]\d{9}(?!\d)/ },
+	{ kind: 'id-card', pattern: /(?<!\d)\d{17}[\dXx](?!\d)/ },
+	{ kind: 'bank-card', pattern: /(?<!\d)\d{16,19}(?!\d)/ },
+	{ kind: 'credential', pattern: /(身份证号|银行卡号|信用卡号|密码是|验证码是|家庭住址)/ },
+];
+
+/**
+ * 敏感信息扫描：命中即拒绝写入长期记忆。
+ *
+ * 这是隐私边界而不是提示注入防护：群友的手机号/证件号/住址不应该因为
+ * 一次闲聊就被自动做成跨会话画像。默认开启；管理员可在配置里关闭
+ * （关掉后仍建议不要主动记这类信息）。
+ */
+export function scanSensitive(text: string): { ok: boolean; findings: string[] } {
+	const findings: string[] = [];
+	for (const rule of SENSITIVE_PATTERNS) {
+		if (rule.pattern.test(text)) findings.push(rule.kind);
+	}
+	return { ok: findings.length === 0, findings };
+}

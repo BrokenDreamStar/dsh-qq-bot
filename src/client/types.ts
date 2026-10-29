@@ -3,11 +3,12 @@
  *
  * dsh 的 slots / client-store / client-ui-slots 等平台模块不随 npm 发布
  * 独立类型，这里按实际用法声明结构类型（与宿主侧 "Like" 策略一致）。
- * settingsScope 契约与 dsh-client-ui-settings 的 d.ts 对齐。
+ * configForms 契约与 dsh ≥ 0.2.1 的 dsh-client-ui-settings d.ts 对齐。
  */
 
-/** settings 命名空间的浏览器侧同步快照（dsh-client-ui-settings 契约）。 */
-export interface SettingsScopeSnapshot<T> {
+/** settings 命名空间的浏览器侧同步快照（dsh-client-ui-settings 的 ConfigFormSnapshot）。 */
+export interface ConfigFormSnapshot<T> {
+	/** loading = 尚未收到首个 section；unavailable = 宿主没有暴露该命名空间。 */
 	status: 'loading' | 'ready' | 'unavailable';
 	/** 最后一次接受的 section（schema 解析后；secret 字段已被宿主剥离）。 */
 	value: T | undefined;
@@ -17,7 +18,6 @@ export interface SettingsScopeSnapshot<T> {
 	user: unknown;
 	revision: number | undefined;
 	writable: boolean;
-	mode: 'host' | 'memory';
 }
 
 /** settings 写入操作（dsh-settings wire 格式）。 */
@@ -26,8 +26,8 @@ export type SettingsPathOp =
 	| { op: 'unset'; path: string[] };
 
 /** 一个命名空间的响应式写入口（revision fence 与失败恢复由服务内部处理）。 */
-export interface SettingsScope<T> {
-	getSnapshot(): SettingsScopeSnapshot<T>;
+export interface ConfigForm<T> {
+	getSnapshot(): ConfigFormSnapshot<T>;
 	subscribe(listener: () => void): () => void;
 	mutate(ops: readonly SettingsPathOp[], expectedRevision?: number): Promise<void>;
 	set(field: string, value: unknown): Promise<void>;
@@ -37,7 +37,7 @@ export interface SettingsScope<T> {
 /** settings describe 视图的最小读面（跨命名空间共享镜像，schema 内省用）。 */
 export interface SettingsDescribeFaceLike {
 	getSnapshot(): {
-		status: 'idle' | 'loading' | 'ready' | 'unavailable';
+		status: 'idle' | 'loading' | 'ready';
 		view?: { namespaces: readonly { ns: string; schema: unknown }[]; writable: boolean } | undefined;
 	};
 	subscribe(listener: () => void): () => void;
@@ -108,10 +108,11 @@ export interface ClientCtx {
 		/** 绑定命名空间的翻译函数（调用时读当前语言；同一命名空间返回稳定引用）。 */
 		bind(ns: string): Translate;
 	};
-	settingsScope: {
-		bind<T>(spec: { namespace: string }): SettingsScope<T>;
-		/** 跨命名空间 describe 镜像（旧宿主可能没有，调用前判存在）。 */
-		describe?(): SettingsDescribeFaceLike;
+	configForms: {
+		/** 按 profile entry id（= settings 命名空间）取表单；entry id 必须与插件 id 一致。 */
+		get<T>(entryId: string): ConfigForm<T>;
+		/** 跨命名空间 describe 镜像（读取 schema meta 里的工具选项）。 */
+		describe(): SettingsDescribeFaceLike;
 	};
 	/** 宿主 RPC 通道调用（web profile 基线服务；缺失时日志查看降级隐藏）。 */
 	connection?: ClientConnectionLike;

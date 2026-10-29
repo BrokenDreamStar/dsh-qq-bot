@@ -2,6 +2,7 @@ import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import * as timeContextPlugin from '@deepseek-ai/dsh-time-context';
 import { ChatBridge, ChatBridgeManager, defaultAgentCwd, groupDirNameFor, isSameDir, mediaDirFor, sessionDirFor } from './chat.ts';
 import { ChatSessionStore, legacySessionMarkerPath } from './sessionStore.ts';
 import type { DshQQConfig } from '../config.ts';
@@ -23,6 +24,10 @@ function makeBridge(input: {
 	configDefault?: string;
 	defaultModel?: AgentOptions;
 	agents?: unknown;
+	/** 替换 dsh 的 SessionStore（fork 路径读 live 会话快照用）。 */
+	dshSessions?: unknown;
+	/** 替换 agentPresets（时间感知兜底需要区分"预设已挂载"与"没挂载"）。 */
+	agentPresets?: unknown;
 	/** 会话目录（默认临时目录）；给定时同时决定 groupName 与默认 agentCwd。 */
 	sessionDir?: string;
 	groupName?: string;
@@ -46,6 +51,8 @@ function makeBridge(input: {
 	const services = {
 		agentDefaultModel: { currentSelection: () => input.defaultModel ?? { provider: 'dsh', model: 'base' } },
 		agents: input.agents ?? {},
+		agentPresets: input.agentPresets,
+		sessions: input.dshSessions ?? {},
 	} as unknown as DshServices;
 	const store = {
 		getChatModel: () => input.override,
@@ -170,6 +177,79 @@ describe('写句柄冲突恢复（ensureAgent）', () => {
 			expect(create).toHaveBeenCalledTimes(1);
 			expect(bridge.sessionIdString).toMatch(/-reset-\d+$/);
 			expect(bridge.sessionIdString).not.toBe(before);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('持续被占用：从 live 会话 fork，保留完整上下文', async () => {
+		vi.useFakeTimers();
+		try {
+			const live = {
+				header: { cwd: '/tmp/fork' },
+				snapshotEvents: () => [
+					{ type: 'turn/start', seq: 0, time: 1, data: {} },
+					{ type: 'turn/end', seq: 1, time: 2, data: { reason: { kind: 'completed' } } },
+				],
+			};
+			const handle = {
+				agent: { id: 'forked', session: { header: { cwd: '/tmp/fork', parentSession: 'qq-group-123456' } } },
+				dispose: async () => {},
+			};
+			const create = vi.fn().mockResolvedValue(handle);
+			const bridge = makeBridge({
+				agents: { resume: vi.fn().mockRejectedValue(ownedError()), create, get: () => ({ id: 'live' }) },
+				dshSessions: { get: () => live },
+				config: { busyStrategy: 'fork', busyWaitMs: 0, forkMaxEvents: 100 },
+			});
+			const before = bridge.sessionIdString;
+			const pending = bridge.ensureAgent();
+			await vi.advanceTimersByTimeAsync(5000);
+			const agent = await pending;
+			expect(agent).toBe(handle.agent);
+			expect(create).toHaveBeenCalledTimes(1);
+			const options = create.mock.calls[0]![0] as {
+				sessionId: string;
+				seed: Array<{ type: string }>;
+				inheritedEventCount: number;
+				meta: { parentSession?: string; isSeeded?: boolean; cwd?: string };
+			};
+			expect(options.sessionId).toMatch(/-fork-\d+$/);
+			expect(options.meta.parentSession).toBe(before);
+			expect(options.meta.isSeeded).toBe(true);
+			expect(options.meta.cwd).toBe('/tmp/fork');
+			expect(options.inheritedEventCount).toBe(2);
+			expect(options.seed.map((event) => event.type)).toContain('session/end-seed');
+			expect(bridge.sessionIdString).toMatch(/-fork-\d+$/);
+			expect(bridge.sessionIdString).not.toBe(before);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('wait 超时后从 live 会话 fork（不再 rotate）', async () => {
+		vi.useFakeTimers();
+		try {
+			const live = {
+				header: { cwd: '/tmp/fork' },
+				snapshotEvents: () => [
+					{ type: 'turn/start', seq: 0, time: 1, data: {} },
+					{ type: 'turn/end', seq: 1, time: 2, data: { reason: { kind: 'completed' } } },
+				],
+			};
+			const handle = { agent: { id: 'waited-fork', session: { header: { cwd: '/tmp/fork' } } }, dispose: async () => {} };
+			const create = vi.fn().mockResolvedValue(handle);
+			const bridge = makeBridge({
+				agents: { resume: vi.fn().mockRejectedValue(ownedError()), create, get: () => ({ id: 'live' }) },
+				dshSessions: { get: () => live },
+				config: { busyStrategy: 'wait', busyWaitMs: 1000, forkMaxEvents: 100 },
+			});
+			const pending = bridge.ensureAgent();
+			await vi.advanceTimersByTimeAsync(10000);
+			await pending;
+			expect(create).toHaveBeenCalledTimes(1);
+			expect(bridge.sessionIdString).toMatch(/-fork-\d+$/);
+			expect(bridge.sessionIdString).not.toMatch(/-reset-\d+$/);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -306,6 +386,73 @@ describe('会话身份（sessionStore 接线）', () => {
 	});
 });
 
+describe('abortTurn（/stop 的桥侧动作）', () => {
+	const question = { id: 'q', question: '继续吗？', options: [{ label: '继续' }] };
+	const askConfig: Partial<DshQQConfig> = { askUserEnabled: true, askUserWaitMs: 300_000, replyMaxChars: 4500 };
+
+	it('空闲时返回 false（不建 agent、不发消息）', () => {
+		const bridge = makeBridge({});
+		expect(bridge.busy).toBe(false);
+		expect(bridge.abortTurn()).toBe(false);
+	});
+
+	it('有在跑的轮次时打断，并把正在等的提问一起撤掉', async () => {
+		const bridge = makeBridge({ config: askConfig, api: { sendSegments: async () => 1 } });
+		// 下游永不作答：撤销必须由 abortTurn 主动完成，不能靠等。
+		const pendingAsk = bridge.askFromQQ({ questions: [question] }, () => new Promise(() => {}));
+		let release: (() => void) | undefined;
+		expect(bridge.enqueue(() => new Promise<void>((resolve) => {
+			release = resolve;
+		}))).toBe(true);
+		expect(bridge.busy).toBe(true);
+		// 句柄为空也不抛（桥还没拿到 agent 的窗口里 /stop 仍要有回应）。
+		expect(bridge.abortTurn()).toBe(true);
+		await expect(pendingAsk).rejects.toMatchObject({ code: 'ASK_ABORTED' });
+		release?.();
+	});
+});
+
+describe('内置时间感知（time-context）', () => {
+	/** 捕获 setupAgent 的 setup 回调，模拟预设是否已挂载 time-context。 */
+	async function setupFor(presetHasTime: boolean): Promise<{ setup: (ctx: unknown) => Promise<void>; plugin: ReturnType<typeof vi.fn>; mount: ReturnType<typeof vi.fn> }> {
+		let setup: ((ctx: unknown) => Promise<void>) | undefined;
+		const mount = vi.fn(async () => {});
+		const plugin = vi.fn(async () => {});
+		const handle = { agent: { id: 'time' }, dispose: async () => {} };
+		const bridge = makeBridge({
+			agentPresets: { mount },
+			agents: {
+				resume: vi.fn(async (options: unknown) => {
+					setup = (options as { setup?: (ctx: unknown) => Promise<void> }).setup;
+					return handle;
+				}),
+				create: vi.fn(),
+				get: () => undefined,
+			},
+		});
+		await bridge.ensureAgent();
+		expect(setup).toBeTypeOf('function');
+		const ctx = {
+			registry: { has: () => presetHasTime },
+			plugin,
+			systemPrompt: { section: vi.fn() },
+		};
+		await setup!(ctx);
+		return { setup: setup!, plugin, mount };
+	}
+
+	it('预设已挂载时不重复挂载（standard / cordis / ptc）', async () => {
+		const { plugin, mount } = await setupFor(true);
+		expect(mount).toHaveBeenCalled();
+		expect(plugin).not.toHaveBeenCalled();
+	});
+
+	it('预设没挂载时直接补挂 dsh 内置 time-context（minimal / 自定义预设）', async () => {
+		const { plugin } = await setupFor(false);
+		expect(plugin).toHaveBeenCalledWith(timeContextPlugin, {});
+	});
+});
+
 describe('isSameDir', () => {
 	it('字符串不同但指向同一目录（符号链接）时视为一致', () => {
 		const real = mkdtempSync(join(tmpdir(), 'dshqq-real-'));
@@ -327,7 +474,6 @@ describe('提问中继（user-questions 缝的 QQ 侧应答器）', () => {
 	const askConfig: Partial<DshQQConfig> = {
 		askUserEnabled: true,
 		askUserWaitMs: 300_000,
-		maxTurnMs: 600_000,
 		replyMaxChars: 4500,
 	};
 	/** 记下发出去的 QQ 消息的假 api。 */

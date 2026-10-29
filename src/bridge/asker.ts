@@ -6,9 +6,9 @@
  *   → `parseAskAnswer` 解析 → 凑齐 `{ answers }` 返回给缝（`ask.ts` 里是纯逻辑）。
  *
  * 三个边界：
- *  - **等待有预算**（`askWaitBudget`，不超过单轮上限的一半）：超时就不再等，
+ *  - **等待有预算**（`askWaitBudget` = `askUserWaitMs`，保底 5s）：超时就不再等，
  *    由调用方（ChatBridge.askFromQQ）决定是让给 dsh 界面还是给模型一个超时错误；
- *  - **取消立刻生效**：`request.signal` 中止（本轮超时/`/reset`/桥销毁）即返回
+ *  - **取消立刻生效**：`request.signal` 中止（本轮取消/`/reset`/桥销毁）即返回
  *    `aborted`，绝不让工具调用挂在那里；
  *  - **一条都没发出去 = 不可投递**：transport 断开时 send 会返回 null，这时
  *    立刻返回 `undeliverable`，不去空等一个永远不会来的回复。
@@ -53,7 +53,7 @@ export interface QuestionRelayDeps {
 	/** 发一段 QQ 消息；返回 message_id（失败/断开为 null）。 */
 	send(segments: OBSegment[]): Promise<number | null>;
 	/** 实时读运行参数（等待上限与开关都是热应用的）。 */
-	options(): { askUserWaitMs: number; maxTurnMs: number; replyMaxChars: number };
+	options(): { askUserWaitMs: number; replyMaxChars: number };
 	/** 本轮的提问触发者（群聊应答判定与 @ 用）。 */
 	askerId(): string;
 	logger: Logger;
@@ -95,7 +95,7 @@ export class QuestionRelay {
 		this.canceled = false;
 		const config = this.deps.options();
 		const now = this.deps.now ?? Date.now;
-		const budget = askWaitBudget({ askUserWaitMs: config.askUserWaitMs, maxTurnMs: config.maxTurnMs });
+		const budget = askWaitBudget(config.askUserWaitMs);
 		const deadline = now() + budget;
 		const answers: AskAnswerItem[] = [];
 		let answered = false;

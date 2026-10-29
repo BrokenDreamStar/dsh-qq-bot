@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	BUSY_STRATEGIES,
 	DEFAULT_BUSY_STRATEGY,
+	FORKED_NOTICE,
 	HELD_NOTICE,
 	HELD_ROTATED_NOTICE,
 	describeDisposition,
@@ -12,18 +13,20 @@ import {
 } from './reclaim.ts';
 
 describe('busy 策略', () => {
-	it('默认是等待（等待只损失时延，轮换会丢上下文）', () => {
-		expect(DEFAULT_BUSY_STRATEGY).toBe('wait');
+	it('默认是分叉（分叉保留完整上下文，不抢写句柄）', () => {
+		expect(DEFAULT_BUSY_STRATEGY).toBe('fork');
+		expect(BUSY_STRATEGIES).toContain('fork');
 		expect(BUSY_STRATEGIES).toContain('wait');
 		expect(BUSY_STRATEGIES).toContain('rotate');
 	});
 
-	it('未知取值回落到等待', () => {
+	it('未知取值回落到分叉', () => {
 		expect(normalizeBusyStrategy('rotate')).toBe('rotate');
 		expect(normalizeBusyStrategy('wait')).toBe('wait');
-		expect(normalizeBusyStrategy(undefined)).toBe('wait');
-		expect(normalizeBusyStrategy('')).toBe('wait');
-		expect(normalizeBusyStrategy(true)).toBe('wait');
+		expect(normalizeBusyStrategy('fork')).toBe('fork');
+		expect(normalizeBusyStrategy(undefined)).toBe('fork');
+		expect(normalizeBusyStrategy('')).toBe('fork');
+		expect(normalizeBusyStrategy(true)).toBe('fork');
 	});
 
 	it('sessionIdleTimeoutMs=0 → 插件会话永不回收', () => {
@@ -32,10 +35,12 @@ describe('busy 策略', () => {
 		expect(shouldEvictIdleSessions(1_800_000)).toBe(true);
 	});
 
-	it('提示文案区分「正在等」与「已经换新会话」', () => {
+	it('提示文案区分「正在等」「已经换新会话」「已经分叉」', () => {
 		expect(HELD_NOTICE).toContain('等');
 		expect(HELD_ROTATED_NOTICE).toContain('新会话');
+		expect(FORKED_NOTICE).toContain('分叉');
 		expect(HELD_NOTICE).not.toBe(HELD_ROTATED_NOTICE);
+		expect(FORKED_NOTICE).not.toBe(HELD_ROTATED_NOTICE);
 	});
 });
 

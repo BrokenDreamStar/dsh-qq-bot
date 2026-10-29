@@ -1135,6 +1135,240 @@ function useTaskData(getRpc: (() => RpcCaller | undefined) | undefined, active: 
 	};
 }
 
+/** WebUI 记忆条目视图（宿主 `memory/list` 的返回）。 */
+interface MemoryItemView {
+	id: number;
+	content: string;
+	kind: string;
+	status: string;
+	importance: number;
+	pinned: boolean;
+	updatedAt: number;
+}
+
+function parseMemoryItems(value: unknown): MemoryItemView[] {
+	const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+	const raw = Array.isArray(record.items) ? record.items : [];
+	const items: MemoryItemView[] = [];
+	for (const entry of raw) {
+		if (entry === null || typeof entry !== 'object') continue;
+		const row = entry as Record<string, unknown>;
+		if (typeof row.id !== 'number' || typeof row.content !== 'string') continue;
+		items.push({
+			id: row.id,
+			content: row.content,
+			kind: typeof row.kind === 'string' ? row.kind : 'fact',
+			status: typeof row.status === 'string' ? row.status : 'active',
+			importance: typeof row.importance === 'number' ? row.importance : 0.5,
+			pinned: row.pinned === true,
+			updatedAt: typeof row.updatedAt === 'number' ? row.updatedAt : 0,
+		});
+	}
+	return items;
+}
+
+/**
+ * 记忆库面板（卡片展开体）：输入 chatKey 后查看/搜索/编辑/删除/置顶，
+ * 以及「测试召回」「立即蒸馏」。配置项仍在上一张「长期记忆」卡。
+ */
+function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined) | undefined; disabled: boolean }): ReactNode {
+	const { t, getRpc, disabled } = props;
+	const [chatKey, setChatKey] = useState('');
+	const [query, setQuery] = useState('');
+	const [items, setItems] = useState<MemoryItemView[]>([]);
+	const [status, setStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+	const [failed, setFailed] = useState<string | null>(null);
+	const [preview, setPreview] = useState<{ profile: string; episodic: string } | null>(null);
+	const [editing, setEditing] = useState<{ id: number; content: string } | null>(null);
+	const [candidates, setCandidates] = useState(false);
+	const [busy, setBusy] = useState(false);
+
+	const call = useCallback(
+		async (endpoint: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
+			const rpc = getRpc?.();
+			if (rpc === undefined) {
+				setFailed(t('memoryRpcUnavailable'));
+				return null;
+			}
+			const answer = await rpc(endpoint, payload);
+			if (!answer.ok) {
+				setFailed(answer.error?.message ?? 'error');
+				return null;
+			}
+			setFailed(null);
+			return answer.value !== null && typeof answer.value === 'object' ? (answer.value as Record<string, unknown>) : {};
+		},
+		[getRpc, t],
+	);
+
+	const load = useCallback(async (): Promise<void> => {
+		if (chatKey.trim() === '') {
+			setFailed(t('memoryChatRequired'));
+			return;
+		}
+		setStatus('loading');
+		const value = await call(candidates ? 'memory/candidates' : 'memory/list', {
+			chatKey: chatKey.trim(),
+			...(query.trim() !== '' ? { query: query.trim() } : {}),
+		});
+		if (value === null) {
+			setStatus('error');
+			return;
+		}
+		setItems(parseMemoryItems(value));
+		setStatus('ready');
+	}, [call, candidates, chatKey, query, t]);
+
+	const save = async (): Promise<void> => {
+		if (editing === null || disabled || busy) return;
+		setBusy(true);
+		const value = await call('memory/save', { chatKey: chatKey.trim(), id: editing.id, content: editing.content });
+		setBusy(false);
+		if (value !== null) {
+			setEditing(null);
+			await load();
+		}
+	};
+
+	const remove = async (id: number): Promise<void> => {
+		if (disabled || busy) return;
+		setBusy(true);
+		const value = await call('memory/delete', { chatKey: chatKey.trim(), id });
+		setBusy(false);
+		if (value !== null) await load();
+	};
+
+	const previewRecall = async (): Promise<void> => {
+		if (chatKey.trim() === '') return;
+		setBusy(true);
+		const value = await call('memory/preview', { chatKey: chatKey.trim(), query: query.trim() });
+		setBusy(false);
+		if (value !== null) {
+			setPreview({
+				profile: typeof value.profile === 'string' ? value.profile : '',
+				episodic: typeof value.episodic === 'string' ? value.episodic : '',
+			});
+		}
+	};
+
+	const distill = async (): Promise<void> => {
+		if (chatKey.trim() === '' || disabled || busy) return;
+		setBusy(true);
+		const value = await call('memory/distill', { chatKey: chatKey.trim() });
+		setBusy(false);
+		if (value !== null) {
+			if (typeof value.error === 'string' && value.error !== '') setFailed(value.error);
+			await load();
+		}
+	};
+
+	return (
+		<div className={css.logPanel}>
+			<div className={css.taskHead}>
+				<input
+					className={css.input}
+					type="text"
+					value={chatKey}
+					placeholder={t('memoryChatPlaceholder')}
+					disabled={disabled || busy}
+					onChange={(event) => setChatKey(event.target.value)}
+				/>
+				<input
+					className={css.input}
+					type="text"
+					value={query}
+					placeholder={t('memorySearchPlaceholder')}
+					disabled={disabled || busy}
+					onChange={(event) => setQuery(event.target.value)}
+				/>
+			</div>
+			<div className={css.footer}>
+				<button type="button" className={css.save} disabled={disabled || busy} onClick={() => void load()}>
+					{t('memoryLoad')}
+				</button>
+				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => { setCandidates((prev) => !prev); }}>
+					{candidates ? t('memoryActive') : t('memoryCandidates')}
+				</button>
+				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void previewRecall()}>
+					{t('memoryPreview')}
+				</button>
+				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void distill()}>
+					{t('memoryDistill')}
+				</button>
+			</div>
+			{failed !== null ? (
+				<p className={css.failed} role="status">
+					{failed}
+				</p>
+			) : null}
+			{status === 'loading' || status === 'idle' ? <p className={css.hint}>{t('loading')}</p> : null}
+			{status === 'ready' && items.length === 0 ? <p className={css.hint}>{t('memoryEmpty')}</p> : null}
+			{items.map((item) => (
+				<div key={item.id} className={css.editorItem}>
+					<div className={css.taskHead}>
+						<span className={css.hint}>
+							#{item.id} [{item.kind}] {item.pinned ? '📌 ' : ''}
+							{item.status !== 'active' ? `(${item.status})` : ''} {formatStamp(item.updatedAt)}
+						</span>
+					</div>
+					{editing?.id === item.id ? (
+						<>
+							<textarea
+								className={css.input}
+								value={editing.content}
+								disabled={disabled || busy}
+								onChange={(event) => setEditing({ id: item.id, content: event.target.value })}
+							/>
+							<div className={css.footer}>
+								<button type="button" className={css.save} disabled={disabled || busy} onClick={() => void save()}>
+									{t('memorySave')}
+								</button>
+								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => setEditing(null)}>
+									{t('memoryCancel')}
+								</button>
+							</div>
+						</>
+					) : (
+						<>
+							<p className={css.hint}>{item.content}</p>
+							<div className={css.footer}>
+								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => setEditing({ id: item.id, content: item.content })}>
+									{t('memoryEdit')}
+								</button>
+								<button
+									type="button"
+									className={css.discard}
+									disabled={disabled || busy}
+									onClick={() => {
+										setBusy(true);
+										void call('memory/save', { chatKey: chatKey.trim(), id: item.id, content: item.content, pinned: !item.pinned }).then((value) => {
+											setBusy(false);
+											if (value !== null) void load();
+										});
+									}}
+								>
+									{item.pinned ? t('memoryUnpin') : t('memoryPin')}
+								</button>
+								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void remove(item.id)}>
+									{t('memoryDelete')}
+								</button>
+							</div>
+						</>
+					)}
+				</div>
+			))}
+			{preview !== null ? (
+				<div className={css.logPanel}>
+					<p className={css.hint}>{t('memoryPreviewProfile')}</p>
+					<pre className={css.hint}>{preview.profile === '' ? t('memoryEmpty') : preview.profile}</pre>
+					<p className={css.hint}>{t('memoryPreviewEpisodic')}</p>
+					<pre className={css.hint}>{preview.episodic === '' ? t('memoryEmpty') : preview.episodic}</pre>
+				</div>
+			) : null}
+		</div>
+	);
+}
+
 /** 定时任务的编辑草稿（id 缺省 = 新建）。 */
 interface TaskDraft {
 	id?: string;
@@ -1959,7 +2193,7 @@ function ConnectedBadge(props: { t: Translate }): ReactNode {
 /**
  * 一张分组折叠卡片（对齐内置 PluginCard）：折叠头（标题 + 简介 + 未保存
  * 角标 + 旋转箭头），展开为字段与卡内保存/放弃。暂存跨折叠保留；保存
- * 成功后自动收起。
+ * 成功后**保持展开**（只显示"已保存"回执，用户接着改下一项）。
  *
  * 折叠态由父级持有（open/onOpenChange）：日志卡片的视图状态挂在 section
  * 上，需要知道卡片是否展开来决定是否轮询。
@@ -1983,17 +2217,6 @@ function GroupCard(
 	const { group, state, open, onOpenChange } = props;
 	const custom = group.custom !== undefined;
 	const shell: CardShell = state.cards[group.id] ?? { dirty: false, invalid: false, saving: false, failed: false, saved: false };
-	const saveStarted = useRef(false);
-	useEffect(() => {
-		if (custom) return;
-		if (shell.saving) {
-			saveStarted.current = true;
-			return;
-		}
-		if (!saveStarted.current) return;
-		saveStarted.current = false;
-		if (!shell.dirty && !shell.failed) onOpenChange(group.id, false);
-	}, [custom, onOpenChange, group.id, shell.dirty, shell.failed, shell.saving]);
 	if (!state.available) return null;
 	const disabled = !state.writable || shell.saving;
 	const blocked = !shell.dirty || shell.invalid || shell.saving;
@@ -2194,6 +2417,12 @@ export function DshQQSection(props: CardProps): ReactNode {
 								<TaskPanel t={props.t} data={taskData} disabled={!state.writable} />
 							) : (
 								<p className={css.hint}>{props.t('taskRpcUnavailable')}</p>
+							)
+						) : group.custom === 'memory' ? (
+							rpcAvailable ? (
+								<MemoryPanel t={props.t} getRpc={getRpc} disabled={!state.writable} />
+							) : (
+								<p className={css.hint}>{props.t('memoryRpcUnavailable')}</p>
 							)
 						) : undefined;
 					return (

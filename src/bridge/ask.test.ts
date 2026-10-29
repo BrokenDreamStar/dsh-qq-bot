@@ -148,14 +148,14 @@ describe('哪些消息算"在回答"', () => {
 });
 
 describe('等待预算', () => {
-	it('不超过单轮上限的一半（等待不产生回复，不能让 maxTurnMs 先开火）', () => {
-		expect(askWaitBudget({ askUserWaitMs: 300_000, maxTurnMs: 600_000 })).toBe(300_000);
-		expect(askWaitBudget({ askUserWaitMs: 300_000, maxTurnMs: 120_000 })).toBe(60_000);
+	it('用配置值（轮次超时已删除，等待不再被单轮上限截断）', () => {
+		expect(askWaitBudget(300_000)).toBe(300_000);
+		expect(askWaitBudget(1_200_000)).toBe(1_200_000);
 	});
 
-	it('配置为 0 用默认值；单轮上限极短时保底 MIN_ASK_WAIT_MS', () => {
-		expect(askWaitBudget({ askUserWaitMs: 0, maxTurnMs: 600_000 })).toBe(DEFAULT_ASK_WAIT_MS);
-		expect(askWaitBudget({ askUserWaitMs: 60_000, maxTurnMs: 2_000 })).toBe(MIN_ASK_WAIT_MS);
+	it('配置为 0 用默认值；配置极小时保底 MIN_ASK_WAIT_MS', () => {
+		expect(askWaitBudget(0)).toBe(DEFAULT_ASK_WAIT_MS);
+		expect(askWaitBudget(2_000)).toBe(MIN_ASK_WAIT_MS);
 	});
 });
 

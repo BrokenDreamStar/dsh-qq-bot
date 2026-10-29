@@ -50,11 +50,15 @@ describe('renderSegmentsText', () => {
 });
 
 describe('summarizeAction', () => {
-	it('send_msg 带目标与文本', () => {
+	it('send_msg 的正文只有文本，目标走 chatType/chatId（会话列不再显示"未知会话"）', () => {
 		expect(summarizeAction('send_msg', { group_id: '123', message: [{ type: 'text', data: { text: '嗨' } }] })).toEqual({
-			text: '群 123：嗨',
+			text: '嗨',
+			target: { chatType: 'group', chatId: '123' },
 		});
-		expect(summarizeAction('send_msg', { user_id: '42', message: [{ type: 'text', data: { text: '私聊' } }] })?.text).toBe('用户 42：私聊');
+		expect(summarizeAction('send_msg', { user_id: '42', message: [{ type: 'text', data: { text: '私聊' } }] })).toEqual({
+			text: '私聊',
+			target: { chatType: 'private', chatId: '42' },
+		});
 	});
 
 	it('合并转发拼接各节点', () => {
@@ -62,14 +66,21 @@ describe('summarizeAction', () => {
 			summarizeAction('send_group_forward_msg', {
 				group_id: '9',
 				messages: [{ content: [{ type: 'text', data: { text: '第一段' } }] }, { content: [{ type: 'text', data: { text: '第二段' } }] }],
-			})?.text,
-		).toBe('群 9（合并转发）：第一段\n第二段');
+			}),
+		).toEqual({ text: '[合并转发] 第一段\n第二段', target: { chatType: 'group', chatId: '9' } });
 	});
 
 	it('撤回与请求处理', () => {
-		expect(summarizeAction('delete_msg', { message_id: 7 })?.text).toBe('撤回消息 7');
-		expect(summarizeAction('set_friend_add_request', { user_id: '42', approve: true })?.text).toBe('同意好友请求 42');
-		expect(summarizeAction('set_group_add_request', { group_id: '9', user_id: '1', sub_type: 'add', approve: false })?.text).toContain('拒绝');
+		// delete_msg 参数里只有 message_id：没有目标，会话列仍显示"未知会话"。
+		expect(summarizeAction('delete_msg', { message_id: 7 })).toEqual({ text: '撤回消息 7' });
+		expect(summarizeAction('set_friend_add_request', { user_id: '42', approve: true })).toEqual({
+			text: '同意好友请求',
+			target: { chatType: 'private', chatId: '42' },
+		});
+		expect(summarizeAction('set_group_add_request', { group_id: '9', user_id: '1', sub_type: 'add', approve: false })).toEqual({
+			text: '拒绝群请求（add）申请人 1',
+			target: { chatType: 'group', chatId: '9' },
+		});
 	});
 
 	it('其它 action 返回 undefined（不记成功）', () => {
@@ -86,7 +97,9 @@ describe('withActionLogging', () => {
 		await wrapped.call('send_msg', { user_id: '42', message: [{ type: 'text', data: { text: '答' } }] });
 		const entries = log.recent();
 		expect(entries).toHaveLength(1);
-		expect(entries[0]!.text).toBe('用户 42：答');
+		expect(entries[0]!.text).toBe('答');
+		expect(entries[0]!.chatType).toBe('private');
+		expect(entries[0]!.chatId).toBe('42');
 		expect(entries[0]!.dir).toBe('out');
 		expect(entries[0]!.detail).toBe('message_id=77');
 	});
@@ -101,11 +114,12 @@ describe('withActionLogging', () => {
 		expect(log.recent()[0]!.detail).toContain('boom');
 	});
 
-	it('send_msg 失败同样记录 action-error', async () => {
+	it('send_msg 失败同样记录 action-error（带目标，便于判断"发给谁失败了"）', async () => {
 		const { transport } = fakeTransport(new Map([['send_msg', new Error('retcode 1200')]]));
 		const log = makeLog();
-		await expect(withActionLogging(transport, log).call('send_msg', {})).rejects.toThrow('retcode 1200');
+		await expect(withActionLogging(transport, log).call('send_msg', { group_id: '888' })).rejects.toThrow('retcode 1200');
 		expect(log.recent()[0]!.event).toBe('action-error');
+		expect(log.recent()[0]!.chatId).toBe('888');
 	});
 
 	it('心跳 get_version_info 永不记录', async () => {

@@ -6,25 +6,6 @@ import type { OneBotApi, MsgResult } from '../onebot/api.ts';
 import { parseCQ, segmentsToText, type OBSegment } from '../onebot/segments.ts';
 import type { Logger } from '../types.ts';
 
-const WEEKDAY_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'] as const;
-
-/**
- * 宿主机当前时间的人类可读形态（时间感知 section 用）：
- * `2026-09-13 周六 14:30:05（UTC+08:00）`。手工拼接而非 Intl，保证
- * 各宿主 locale 下格式稳定，也便于模型按同一格式推理"明天9点"这类相对时间。
- */
-export function formatHostTime(now: Date): string {
-	const offsetMinutes = -now.getTimezoneOffset();
-	const sign = offsetMinutes >= 0 ? '+' : '-';
-	const absOffset = Math.abs(offsetMinutes);
-	const offset = `UTC${sign}${String(Math.floor(absOffset / 60)).padStart(2, '0')}:${String(absOffset % 60).padStart(2, '0')}`;
-	const pad = (value: number): string => String(value).padStart(2, '0');
-	return (
-		`${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
-		`${WEEKDAY_NAMES[now.getDay()]} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}（${offset}）`
-	);
-}
-
 export interface QuotedContext {
 	/** 被引用消息发送者号码：**只用于内部逻辑，不要渲染进模型可见文本**。 */
 	senderId: string;

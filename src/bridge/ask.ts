@@ -4,8 +4,8 @@
  *
  * 背景：dsh 的 `ask_user_question`（以及计划确认等走同一条缝的消费者）通过
  * `ctx.userQuestions.ask()` 派发 `user-questions/request` 瀑布，等人给答案；
- * 内置应答器只有 WebUI 的浏览器端，**QQ 用户看不到问题**，于是整轮一直等到
- * 单轮超时。本模块负责把问题改写成 QQ 消息、把 QQ 回复解析回缝隙要求的形状。
+ * 内置应答器只有 WebUI 的浏览器端，**QQ 用户看不到问题**，于是整轮一直等下去。
+ * 本模块负责把问题改写成 QQ 消息、把 QQ 回复解析回缝隙要求的形状。
  *
  * 形状对齐 @deepseek-ai/dsh-user-questions（不引包，按运行时形状声明）：
  *  - 请求：`{ questions: [{ id, question, detail?, header?, options?, multiSelect? }], agent?, signal? }`
@@ -63,17 +63,18 @@ export const ASK_SKIP_WORDS = ['跳过', '跳过本题', '略过', 'skip'] as co
 
 /** 默认等待回答上限（ms）：与配置默认值一致，配置为 0 时兜底。 */
 export const DEFAULT_ASK_WAIT_MS = 300_000;
-/** 等待预算的下限（ms）：单轮上限很短时也至少给这么多，否则用户来不及看。 */
+/** 等待预算的下限（ms）：配置了小值也至少给这么多，否则用户来不及看。 */
 export const MIN_ASK_WAIT_MS = 5_000;
 
 /**
- * 等待回答的预算（ms）：配置值 > 单轮上限的一半时按一半截断——
- * 等待本身不产生回复，绝不能让 maxTurnMs 先开火（与 reclaim 的等待同一考虑）。
+ * 等待回答的预算（ms）：取配置值（0/负数 = 用默认值），保底 {@link MIN_ASK_WAIT_MS}。
+ *
+ * 这里没有"不能超过单轮上限"的夹取了：轮次超时已删除（见 agentRunner.ts），
+ * 等待本身不产生回复，`askUserWaitMs` 就是它自己的上限。
  */
-export function askWaitBudget(input: { askUserWaitMs: number; maxTurnMs: number }): number {
-	const configured = input.askUserWaitMs > 0 ? input.askUserWaitMs : DEFAULT_ASK_WAIT_MS;
-	const halfTurn = Math.max(Math.floor(input.maxTurnMs / 2), MIN_ASK_WAIT_MS);
-	return Math.max(Math.min(configured, halfTurn), MIN_ASK_WAIT_MS);
+export function askWaitBudget(askUserWaitMs: number): number {
+	const configured = askUserWaitMs > 0 ? askUserWaitMs : DEFAULT_ASK_WAIT_MS;
+	return Math.max(configured, MIN_ASK_WAIT_MS);
 }
 
 /** 全角数字/顿号等归一：中文输入法下"１，２"要能当成"1,2"。 */

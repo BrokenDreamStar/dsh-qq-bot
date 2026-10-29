@@ -59,7 +59,7 @@ describe('buildDistillPayload', () => {
 		expect(payload.chat).toBe('群 888');
 		expect(payload.existing).toHaveLength(1);
 		expect(payload.new_events[0]?.text).toBe('备份方案我用 restic 试了');
-		expect(payload.new_events[0]?.who).toBe('李四(67890)');
+		expect(payload.new_events[0]?.who).toBe('李四');
 		expect(payload.limits.max_new_facts).toBe(5);
 	});
 
@@ -82,9 +82,14 @@ describe('parseDistillOutput', () => {
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		expect(result.outcome.watermark).toBe(120);
-		expect(result.outcome.ops).toEqual([
-			{ op: 'add', subject: '@李四(67890)', predicate: '进行中', object: '在试 restic 备份', confidence: 0.9 },
-		]);
+		expect(result.outcome.ops[0]).toMatchObject({
+			op: 'add',
+			subject: '@李四',
+			predicate: '进行中',
+			object: '在试 restic 备份',
+			content: '@李四 进行中 在试 restic 备份',
+			confidence: 0.9,
+		});
 	});
 
 	it('剥掉 markdown 围栏', () => {
@@ -109,7 +114,7 @@ describe('parseDistillOutput', () => {
 		const result = parseDistillOutput(raw, input(), 5);
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
-		expect(result.outcome.ops).toEqual([{ op: 'update', id: 3, object: '回复要短' }]);
+		expect(result.outcome.ops[0]).toMatchObject({ op: 'update', id: 3, content: '本群 偏好 回复要短' });
 	});
 
 	it('内容与现有条目完全相同时不产生任何操作', () => {

@@ -28,16 +28,36 @@ export interface MemoryEvent {
 	msgId?: string;
 }
 
-/** 一条长期事实（卡片的最小单元）。 */
+/** 一条长期事实（卡片/记忆条目的最小单元）。 */
 export interface MemoryFact {
 	id: number;
 	chatKey: string;
-	/** 主体：`@张三(12345)` / `本群` / 项目名。 */
+	/** 主体：`@张三` / `本群` / 项目名（旧结构化条目的兼容字段，自由文本条目为空串）。 */
 	subject: string;
-	/** 关系：`是` / `偏好` / `进行中` / `禁忌` …（受 PREDICATES 约束）。 */
+	/** 关系：`是` / `偏好` / `进行中` / `禁忌` …（旧结构化条目的兼容字段，自由文本条目为空串）。 */
 	predicate: string;
-	/** 客体：一句陈述，≤ MAX_FACT_OBJECT_CHARS 字。 */
+	/** 客体：旧结构化条目的短陈述；新条目与 `content` 相同。 */
 	object: string;
+	/** 自然语言正文（新条目的规范字段；旧条目由 subject/predicate/object 拼出）。 */
+	content?: string;
+	/** 记忆类型：画像 / 偏好 / 一般事实 / 事件 / 计划 / 规则。 */
+	kind?: MemoryKind;
+	/** 来源分级：owner/agent 可进画像；untrusted 只进候选/档案。 */
+	provenance?: MemoryProvenance;
+	/** 重要度（0~1，蒸馏时顺手给，零额外调用）。 */
+	importance?: number;
+	/** 事实开始为真的时间（epoch ms；null = 未知）。 */
+	validFrom?: number | null;
+	/** 事实失效时间（epoch ms；null = 仍然有效）。 */
+	validTo?: number | null;
+	/** 过期时间（epoch ms；null = 不过期）。 */
+	expiresAt?: number | null;
+	/** 最后一次被用户/管理员确认的时间（续期用）。 */
+	confirmedAt?: number | null;
+	/** 记忆状态（active / pending / superseded / archived / deleted）。 */
+	status?: MemoryStatus;
+	/** 内容规范化 hash（去重 + tombstone）。 */
+	contentHash?: string;
 	/** 蒸馏模型给的置信度（0~1）；低于阈值不注入卡片。 */
 	confidence: number;
 	/** 来源事件 seq 区间（可回溯「这条记忆是从哪句话来的」）。 */
@@ -51,6 +71,17 @@ export interface MemoryFact {
 	/** 被哪条事实取代（不物理删除，便于审计与回滚）。 */
 	supersededBy: number | null;
 }
+
+/** 记忆类型（展示/预算分配用，不限制自然语言表达）。 */
+export const MEMORY_KINDS = ['profile', 'preference', 'fact', 'event', 'plan', 'rule'] as const;
+export type MemoryKind = (typeof MEMORY_KINDS)[number];
+
+/** 来源分级：只有 owner/agent 能自动晋升为画像；untrusted 只进档案/候选。 */
+export const MEMORY_PROVENANCES = ['owner', 'agent', 'untrusted', 'system'] as const;
+export type MemoryProvenance = (typeof MEMORY_PROVENANCES)[number];
+
+export const MEMORY_STATUSES = ['active', 'pending', 'superseded', 'archived', 'deleted'] as const;
+export type MemoryStatus = (typeof MEMORY_STATUSES)[number];
 
 /** 单条卡片条目的完整信息（内部用，避免每次查库）。 */
 export interface FactEntry {
@@ -93,13 +124,27 @@ export interface DistillInput {
 	limits: {
 		maxNewFacts: number;
 		objectMaxChars: number;
+		/** 自然语言正文上限（新协议；缺省按 240）。 */
+		contentMaxChars?: number;
 	};
 }
 
 /** 蒸馏产出的单个操作（已通过校验）。 */
 export type DistillOp =
-	| { op: 'add'; subject: string; predicate: string; object: string; confidence: number }
-	| { op: 'update'; id: number; object: string }
+	| {
+			op: 'add';
+			/** 旧结构化字段：自由文本条目留空串。 */
+			subject: string;
+			predicate: string;
+			object: string;
+			/** 自然语言正文（新协议主字段；缺省时由 subject/predicate/object 拼出）。 */
+			content?: string;
+			kind?: MemoryKind;
+			importance?: number;
+			status?: MemoryStatus;
+			confidence: number;
+	  }
+	| { op: 'update'; id: number; object: string; content?: string }
 	| { op: 'supersede'; id: number; reason: string };
 
 /** 蒸馏结果（校验后的操作序列 + 覆盖到的事件 seq）。 */

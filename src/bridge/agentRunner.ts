@@ -1,17 +1,23 @@
 /**
  * Agent 轮次驱动：followup → whenIdle → 汇总最后一轮 assistant 文本。
- * 与 headless 模式一致；超时用 agent.cancel({kind:'hook'}) 中断并落稳。
+ * 与 headless 模式一致。
+ *
+ * **没有"总时长超时"**（曾经的 `maxTurnMs` 已按用户要求删除：它会腰斩长任务）。
+ * 兜底改由 {@link createStallGuard} 的**无进展看门狗**承担：只有连续一段时间
+ * 会话事件流一动不动（真卡死）才中断，长任务只要有进展就跑多久都行。
  */
 import type { SessionEvent, TurnEndReason } from '@deepseek-ai/dsh-session';
 import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { Agent } from '../dsh.ts';
 import type { SessionStore } from '../dsh.ts';
+import { createStallGuard } from './stall.ts';
 
 export interface TurnOutcome {
 	/** 最后一轮 assistant 文本（可能为空）。 */
 	text: string;
 	endReason?: TurnEndReason;
-	timedOut: boolean;
+	/** 无进展看门狗判定卡死并中断了这一轮（见 stall.ts；不是总时长超时）。 */
+	stalled: boolean;
 }
 
 /**
@@ -62,9 +68,15 @@ export async function runTurn(options: {
 	sessions: SessionStore;
 	/** 进入 agent 的用户文本（已含发送者上下文与媒体路径）。 */
 	promptText: string;
-	maxTurnMs: number;
+	/**
+	 * 无进展看门狗：连续这么久**没有任何会话事件**（且不在等用户回答）就中断本轮；
+	 * 0/缺省 = 不监视。**不是总时长超时**——长任务只要有进展就不会被打断。
+	 */
+	idleTimeoutMs?: number;
+	/** 是否正在等用户回答（豁免无进展计时）：传会话桥的 `asker.busy`。 */
+	waitingForAnswer?: () => boolean;
 }): Promise<TurnOutcome> {
-	const { agent, sessions, promptText, maxTurnMs } = options;
+	const { agent, sessions, promptText } = options;
 	const firstSeq = agent.session.seq;
 	agent.followup(
 		createUserMessage({
@@ -73,22 +85,21 @@ export async function runTurn(options: {
 		}),
 	);
 
-	let timedOut = false;
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const guard = new Promise<void>((resolve) => {
-		timer = setTimeout(() => {
-			timedOut = true;
-			resolve();
-		}, maxTurnMs);
+	const guard = createStallGuard({
+		idleMs: options.idleTimeoutMs ?? 0,
+		// session.seq = "下一个事件的序号"（= 日志长度），每次事件追加都 +1：
+		// 模型逐 chunk 输出、tool/call 与 tool/result、step 边界都算进展。
+		progress: () => agent.session.seq,
+		waiting: options.waitingForAnswer,
 	});
 	try {
-		await Promise.race([agent.whenIdle(), guard]);
+		await Promise.race([agent.whenIdle(), guard.stalled]);
 	} finally {
-		if (timer !== undefined) clearTimeout(timer);
+		guard.stop();
 	}
-
-	if (timedOut) {
-		agent.cancel({ kind: 'hook', reason: 'dsh-qq-bot turn timeout' });
+	const stalled = guard.isStalled;
+	if (stalled) {
+		agent.cancel({ kind: 'hook', reason: 'dsh-qq-bot stall watchdog' });
 		// 等取消落稳，避免后续消息排在旧驱动后面。
 		await agent.whenIdle().catch(() => {});
 	}
@@ -99,7 +110,7 @@ export async function runTurn(options: {
 		// 落盘失败不阻断回复（下次 flush 会补）。
 	}
 	const { text, endReason } = summarizeTurn(readSessionEvents(agent.session), firstSeq);
-	return { text, endReason, timedOut };
+	return { text, endReason, stalled };
 }
 
 /** 汇总一个会话累计 token 用量（/stats 用）。 */
