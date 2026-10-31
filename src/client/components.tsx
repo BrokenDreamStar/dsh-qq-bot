@@ -10,6 +10,7 @@ import type { ReactNode } from 'react';
 import type { FieldDef, FieldGroup, FieldState, CardShell, CardState } from './form.ts';
 import { FIELD_GROUPS, CONNECTION_CARD_ID } from './form.ts';
 import { fetchTransportConnected } from './connection.ts';
+import { toolLabel } from './locales.ts';
 import { parseChatSelector } from '../persona/routes.ts';
 import { addOrderItem, moveOrderItem, removeOrderItem } from '../search/priority.ts';
 import { describeSchedule, normalizeRunAtInput, normalizeTimeInput, normalizeWeekdaysInput, WEEKDAY_LABELS, type TaskKind, type TaskSchedule } from '../tasks/schedule.ts';
@@ -55,6 +56,8 @@ const css = {
 	select: 'dshqq-select',
 	checkGrid: 'dshqq-checkGrid',
 	checkItem: 'dshqq-checkItem',
+	checkName: 'dshqq-checkName',
+	checkId: 'dshqq-checkId',
 	chipRow: 'dshqq-chipRow',
 	chipRowLabel: 'dshqq-chipRowLabel',
 	chip: 'dshqq-chip',
@@ -1866,19 +1869,25 @@ function ToolListRow(props: RowProps): ReactNode {
 		<div className={css.field}>
 			<FieldHead {...props} htmlFor={addId} />
 			<div className={css.checkGrid} role="group" aria-label={t(`${def.key}Label`)}>
-				{options.map((option) => (
-					<label key={option} className={css.checkItem}>
-						<input
-							type="checkbox"
-							checked={selected.has(option)}
-							disabled={disabled}
-							onChange={(event) => {
-								toggle(option, event.target.checked);
-							}}
-						/>
-						<span>{option}</span>
-					</label>
-				))}
+				{options.map((option) => {
+					const label = toolLabel(t, option);
+					return (
+						<label key={option} className={css.checkItem}>
+							<input
+								type="checkbox"
+								checked={selected.has(option)}
+								disabled={disabled}
+								onChange={(event) => {
+									toggle(option, event.target.checked);
+								}}
+							/>
+							{/* 中文显示名 + 工具 id：写进配置的是 id，灰字只是让用户能对上文档/手改配置。
+							    没有词条的工具（新装的 dsh 插件）只显示 id，不重复渲染。 */}
+							<span className={css.checkName}>{label}</span>
+							{label !== option ? <span className={css.checkId}>{option}</span> : null}
+						</label>
+					);
+				})}
 			</div>
 			{extras.length > 0 ? (
 				<div className={css.chipRow}>

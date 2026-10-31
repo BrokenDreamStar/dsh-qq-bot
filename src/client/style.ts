@@ -62,6 +62,9 @@ export const CARD_CSS = `
 .dshqq-checkItem input{accent-color:var(--dsw-alias-brand-primary);flex:none;margin:0;cursor:pointer}
 .dshqq-checkItem input:disabled{cursor:default}
 .dshqq-checkItem span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 工具勾选框：中文显示名在前、工具 id 灰字在后（写入配置的仍是 id）。 */
+.dshqq-checkName{min-width:0;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshqq-checkId{flex:none;color:var(--dsw-alias-label-tertiary);font-family:var(--dsw-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:11px;line-height:1.5}
 .dshqq-chipRow{flex-wrap:wrap;align-items:center;gap:6px;margin:2px 0;display:flex}
 .dshqq-chipRowLabel{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.5}
 .dshqq-chip{corner-shape:round;white-space:nowrap;align-items:center;gap:2px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 4px 1px 8px;font-size:11px;font-weight:500;line-height:17px;display:inline-flex}

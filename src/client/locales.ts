@@ -2,7 +2,20 @@
  * 卡片文案：zh 与 en 字典，key 与字段定义一一对应
  * （`${key}Label` / `${key}Hint` / enum 用 `${key}.${value}`）。
  */
-export const LOCALE_NS = 'dsh-qq-bot'
+import type { Translate } from './types.ts';
+
+export const LOCALE_NS = 'dsh-qq-bot';
+
+/**
+ * 工具显示名：字典里有 `tool.<工具 id>` 就用它，否则原样返回工具 id
+ * （新装的 dsh 插件、用户手填的通配条目都走这条回退）。**只是界面文案**：
+ * 配置里保存的、模型调用的、CHAT_TOOLS 匹配的永远是工具 id。
+ */
+export function toolLabel(t: Translate, name: string): string {
+	const key = `tool.${name}`;
+	const label = t(key);
+	return label === key ? name : label;
+}
 
 const RESTART = '重启 dsh 后生效。'
 const RESTART_EN = 'Takes effect after restarting dsh.'
@@ -292,6 +305,32 @@ export const zh: Record<string, string> = {
 	userToolsHint: '勾选普通用户（非管理员）可用的工具；全不勾 = 纯对话。条目支持尾部 * 通配。',
 	blockedToolsLabel: '全员禁用工具',
 	blockedToolsHint: '勾选全员禁用的工具（含管理员）；优先级最高，支持尾部 * 通配。',
+	// 工具显示名（`tool.<工具 id>`）：勾选框里显示中文名，写入配置的仍是工具 id。
+	// 这里没收录的工具（新装的 dsh 插件）回退显示工具 id 本身。
+	'tool.ask_user_question': '向用户提问',
+	'tool.qq_send': '发送 QQ 消息',
+	'tool.qq_send_image': '发送图片',
+	'tool.qq_recall': '撤回消息',
+	'tool.qq_read_history': '读取聊天记录',
+	'tool.qq_web_search': '网页搜索',
+	'tool.qq_recall_memory': '检索长期记忆',
+	'tool.qq_memorize': '写入长期记忆',
+	'tool.task_schedule': '新建定时任务',
+	'tool.task_list': '查看定时任务',
+	'tool.task_cancel': '取消定时任务',
+	'tool.working_directory': '切换工作目录',
+	'tool.bash': '执行命令',
+	'tool.read': '读取文件',
+	'tool.read_image': '查看图片',
+	'tool.write': '写入文件',
+	'tool.edit': '编辑文件',
+	'tool.glob': '查找文件',
+	'tool.grep': '搜索文件内容',
+	'tool.web_search': '网页搜索（内置）',
+	'tool.web_fetch': '抓取网页',
+	'tool.todo_write': '更新待办',
+	'tool.skill': '加载技能',
+	'tool.present': '交付文件',
 	searchEnabledLabel: '启用网页搜索工具',
 	searchEnabledHint:
 		'注册 qq_web_search 工具，让 agent 能联网查资料（重启 dsh 后生效）。该工具默认只对管理员开放：要让普通用户也能用，请把它加进上面的「普通用户可用工具」。',
@@ -753,6 +792,31 @@ export const en: Record<string, string> = {
 	blockedToolsLabel: 'Blocked tools',
 	blockedToolsHint:
 		'Check the tools disabled for everyone including admins; highest priority, trailing * wildcards allowed.',
+	// Tool display names (`tool.<tool id>`): the grid shows these, the config keeps the id.
+	'tool.ask_user_question': 'Ask the user',
+	'tool.qq_send': 'Send QQ message',
+	'tool.qq_send_image': 'Send image',
+	'tool.qq_recall': 'Recall message',
+	'tool.qq_read_history': 'Read chat history',
+	'tool.qq_web_search': 'Web search',
+	'tool.qq_recall_memory': 'Recall memory',
+	'tool.qq_memorize': 'Save to memory',
+	'tool.task_schedule': 'Schedule a task',
+	'tool.task_list': 'List scheduled tasks',
+	'tool.task_cancel': 'Cancel a task',
+	'tool.working_directory': 'Change working directory',
+	'tool.bash': 'Run command',
+	'tool.read': 'Read file',
+	'tool.read_image': 'View image',
+	'tool.write': 'Write file',
+	'tool.edit': 'Edit file',
+	'tool.glob': 'Find files',
+	'tool.grep': 'Search file contents',
+	'tool.web_search': 'Web search (built-in)',
+	'tool.web_fetch': 'Fetch web page',
+	'tool.todo_write': 'Update todo list',
+	'tool.skill': 'Load skill',
+	'tool.present': 'Present files',
 	searchEnabledLabel: 'Enable the web search tool',
 	searchEnabledHint:
 		'Registers qq_web_search so the agent can look things up online (takes effect after restarting dsh). The tool is admin-only by default: add it to "User tools" above to let regular users search too.',
