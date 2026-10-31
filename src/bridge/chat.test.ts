@@ -11,6 +11,7 @@ import type { PersonaStore } from '../persona/store.ts';
 import type { AgentOptions } from '../dsh.ts';
 import type { InboundMessage } from '../onebot/events.ts';
 import type { OBSegment } from '../onebot/segments.ts';
+import type { ScheduledTask } from '../tasks/store.ts';
 import type { Logger } from '../types.ts';
 
 const logger: Logger = { info: () => {}, warn: () => {}, error: () => {} };
@@ -633,5 +634,37 @@ describe('启动预热与重建后重占（ChatBridgeManager）', () => {
 		expect(resume).toHaveBeenCalledTimes(1);
 		await manager.rebuildAll();
 		await vi.waitFor(() => expect(resume).toHaveBeenCalledTimes(2));
+	});
+});
+
+describe('定时任务直接推送（delivery=direct）', () => {
+	it('不创建 agent，按触发时刻渲染模板后原样发出', async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(new Date(2026, 9, 31, 12, 0, 0));
+			const sent: string[] = [];
+			const api = {
+				sendText: async (_target: unknown, text: string) => {
+					sent.push(text);
+					return 1;
+				},
+			};
+			const bridge = makeBridge({ api, config: { replyMaxChars: 4500 } });
+			const task: ScheduledTask = {
+				id: 't-direct',
+				chatKey: 'g-123456',
+				chatType: 'group',
+				chatId: '123456',
+				prompt: '{date} {weekday}：今天是原神开服第{daysSince:2020-09-15}天',
+				delivery: 'direct',
+				schedule: { kind: 'daily', time: '12:00' },
+				enabled: true,
+				createdAt: 0,
+			};
+			await bridge.handleScheduledTask(task);
+			expect(sent).toEqual(['2026-10-31 星期六：今天是原神开服第2238天']);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

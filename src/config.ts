@@ -352,7 +352,7 @@ export const ConfigSchema = Schema.object({
 	userTools: Schema.array(Schema.string()).default([]).description('普通用户可用工具白名单，如 ["web_search", "read*"]；空 = 纯对话。支持尾部 * 前缀通配'),
 	blockedTools: Schema.array(Schema.string()).default([]).description('全员禁用的工具（含管理员），如 ["shell", "run_code"]；支持尾部 * 前缀通配'),
 	registerSendTools: Schema.boolean().default(true).description('注册 qq_send / qq_send_image / qq_recall 工具'),
-	tasksEnabled: Schema.boolean().default(true).description('启用定时任务（未来任务）：agent 可用 task_schedule / task_list / task_cancel 工具把"每天9点叫我起床"这类话术落成任务，到期主动给该会话发消息。工具注册需重启 dsh；触发器的启停即时生效'),
+	tasksEnabled: Schema.boolean().default(true).description('启用定时任务（未来任务）：agent 可用 task_schedule / task_list / task_cancel 工具把"每天9点叫我起床"这类话术落成任务。任务可选「直接推送」（到点渲染模板原样发出，不调模型、零 token）或「agent 执行」（到期唤醒模型）。工具注册需重启 dsh；触发器的启停即时生效'),
 	taskMaxPerChat: Schema.number().step(1).min(1).max(100).default(20).description('单个会话最多可创建的定时任务数（防刷）'),
 
 	searchEnabled: Schema.boolean().default(true).description('注册 qq_web_search 工具（网页搜索，需重启 dsh 生效）；搜索后端优先级链、API Key 与超时都是即时生效。该工具默认只对管理员开放，普通用户需在「工具权限」卡片把 qq_web_search 加进 userTools'),

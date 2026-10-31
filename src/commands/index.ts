@@ -441,7 +441,7 @@ export const COMMANDS: Record<string, CommandDef> = {
 	},
 	tasks: {
 		usage: '/tasks [del|run|on|off <id前缀>] | clear',
-		help: '查看/管理本会话的定时任务（到期机器人主动发消息；说"每天9点叫我起床"即可由 agent 代建）',
+		help: '查看/管理本会话的定时任务（「直接推送」到点原样发出、不调模型；「agent 执行」到期唤醒模型）',
 		async run(ctx) {
 			const all = ctx.tasks.listByChat(ctx.bridge.key);
 			const body = ctx.arg.trim();
@@ -459,6 +459,7 @@ export const COMMANDS: Record<string, CommandDef> = {
 				const next = nextRunForTask(task);
 				return [
 					`[${task.id}] ${describeSchedule(task.schedule)}`,
+					task.delivery === 'direct' ? '· 直接推送（不调模型）' : '· agent 执行',
 					task.enabled ? (next !== null ? `下次 ${clock(next)}` : '（已到期）') : '已停用',
 					task.note !== undefined ? ` · ${task.note}` : '',
 				].join(' ');

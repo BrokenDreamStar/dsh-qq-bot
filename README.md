@@ -90,7 +90,7 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add link:/path/to/dsh-qq-bo
 | 提问与回答 | agent 的 `ask_user_question`（含计划确认）转发到 QQ，接受 QQ 回复作为答案；与 dsh 界面两边谁先答用谁 |
 | 长期记忆 | 默认关闭。画像段（身份/偏好/规则，写入即生效）+ 情景段（每轮检索后注入 user 尾部）+ SQLite 记忆条目与原始档案 + 中文分词检索 + 世代交接 + 蒸馏（默认每 10 条/800 字/空闲兜底）+ WebUI「记忆库」管理 |
 | 媒体与互动 | 收图落盘到会话媒体目录并把绝对路径交给 agent；戳一戳自动回复 |
-| 定时任务 | 任务总览与手动管理（启停/改期/删除/立即执行/新建）；任务绑定创建会话 |
+| 定时任务 | 任务总览与手动管理（启停/改期/删除/立即执行/新建）；任务绑定创建会话；每个任务可选「直接推送」（不调模型）或「agent 执行」 |
 | 人格库 | 人格名称与提示词的增删改（`personas.json`） |
 | 人格与模型 | 首行「默认会话」，下方按 `friend_QQ号` / `group_群号` 逐行指定人格与模型 |
 
@@ -106,6 +106,7 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add link:/path/to/dsh-qq-bo
 - **时间感知复用 dsh 内置能力**：`standard`、`cordis`、`ptc` 预设自带的 `time-context` 会在模型步骤前追加真实时间、时区与距上条消息的经过时长，并持久记录到会话中；本插件不再自行拼接时间或注册重复的 system prompt section。`minimal` 或自定义预设没有挂载时，QQ 桥会直接补挂同一个内置插件。
 - **长任务不设总时长超时，只有"无进展"兜底**：一轮跑多久由 agent 自己决定，跑几小时的长任务不会被按时间腰斩。兜底是「无进展中断」`turnIdleTimeoutMs`（默认 15 分钟，0 = 关）：连续这么久**没有任何会话事件**（模型输出、工具调用）才判定卡死并中断，等用户回答期间不计时。真卡住时发 `/stop` 可手动打断当前这一轮（不清历史、不换会话）。
 - **切块与折叠**：回复一律按单条上限切块；超过阈值可折叠成合并转发消息（QQ 的"聊天记录"）。
+- **定时任务分两种投递方式**：`direct`（直接推送）到点只渲染模板并发送，**不创建/不唤醒 agent、不消耗 token，也不占会话队列**——固定提醒、每日播报、"开服第 N 天"都用它。模板占位符：`{date}`、`{time}`、`{weekday}`、`{daysSince:YYYY-MM-DD}`（起始日算第 1 天），例如 `今天是原神开服第{daysSince:2020-09-15}天`。`agent` 模式才在到期时唤醒模型执行（需要查天气、查资料、调工具时）。旧任务没有 `delivery` 字段，按 `agent` 兼容；WebUI 任务卡片和 `task_schedule` 的 `delivery` 参数都能选。
 - **群聊里不提 QQ 号**：所有给模型看的文本（发言人标签、@ 提及、成员列表、聊天记录、引用块、记忆检索）只给昵称；号码仅用于插件内部。代价是重名成员无法靠号码区分。
 - **写句柄先占 + fork 兜底**：dsh 会话是单写者模型，在 dsh WebUI 里打开一个 QQ 会话就会占住写句柄。插件默认 `sessionIdleTimeoutMs: 0`（建立的会话永不回收），并在启动与重建后立刻占住，让界面只能复用同一个 agent；真被界面抢先时默认 `busyStrategy: fork`——从原会话的完整事件前缀分叉出新会话继续（`forkMaxEvents`，默认 4000 条，超出才回退），旧会话原样留给界面。`wait` 保留给"等界面关掉后继续原会话"的场景（`busyWaitMs`，默认 5 分钟，超时再 fork），`rotate` 只作最后兜底。`/status` 的「写句柄」行与 `/reclaim` 是配套入口。
 - **数据与工作目录同源**：每个聊天对象一个目录，它同时是 agent 默认工作目录、WebUI 左栏工作区与媒体落盘根；上下文隔离由 chatKey → 独立 sessionId 保证，不靠目录。
@@ -126,6 +127,7 @@ QQ 群/私聊是**无认证入口**：任何能给机器人发消息的人都可
 
 - `restrictTools: true` 时，非管理员触发的轮次里，不在 `userTools` 白名单的工具会被拦截，模型收到权限解释并转告用户
 - `userTools: []`（默认）= 普通用户纯对话；可按需开放安全工具，如 `['web_search', 'read*']`（支持尾部 `*` 通配）
+- **搜索 ≠ 抓网页**：`qq_web_search` 只负责搜索；要让它打开用户给的具体网址，还得放行 dsh 内置的 `web_fetch`（per-agent 工具，不在勾选网格时用「其他条目」手填）。`web_fetch` 能访问任意 URL（含内网地址），只给可信用户开
 - `blockedTools` 全员禁用（含管理员），用于整体下线某类能力，如 `['shell', 'run_code']`
 - 机器人自己的聊天工具（`qq_send` / `qq_send_image` / `qq_recall` / `qq_read_history`）与定时任务工具
   （`task_schedule` / `task_list` / `task_cancel`）对所有能对话的用户放行：任务只能发回创建它的会话，
@@ -177,7 +179,7 @@ QQ 群/私聊是**无认证入口**：任何能给机器人发消息的人都可
 | `qq_send` / `qq_send_image` / `qq_recall` | 主动发消息 / 发图 / 撤回 |
 | `qq_read_history` | 读取当前会话最近的聊天记录 |
 | `qq_web_search` | 按配置顺序联网搜索（默认仅管理员） |
-| `task_schedule` / `task_list` / `task_cancel` | 定时任务的登记 / 查询 / 取消 |
+| `task_schedule` / `task_list` / `task_cancel` | 定时任务的登记 / 查询 / 取消（`delivery: direct` 为零 token 直接推送，`agent` 为到期唤醒模型） |
 | `qq_recall_memory` / `qq_memorize` | 长期记忆的检索与写入（默认仅管理员） |
 | `ask_user_question`（dsh 内置） | 需要用户拍板时提问，问题与答案经 QQ 往返 |
 
@@ -256,7 +258,7 @@ src/
 ├── media/            # inbound（收图落盘）
 ├── logs/             # 消息日志（环形缓冲 + 订阅 + NDJSON + SSE 实时流 + 出站 action 包装 + /logs 渲染）
 ├── persona/          # store（人格库 + 会话覆盖）/ routes（friend_/group_ 选择器）/ rpc
-├── tasks/            # 定时任务：schedule（时间表纯逻辑）/ store / scheduler / rpc
+├── tasks/            # 定时任务：schedule（时间表纯逻辑）/ template（direct 模板）/ store / scheduler / rpc
 ├── search/           # 网页搜索：priority（排序列表纯函数）/ providers / chain（顺延）/ service
 ├── memory/           # 长期记忆：card / store（SQLite + FTS5）/ rank / distill / handoff / guard / service / rpc / text
 ├── commands/         # 内置命令

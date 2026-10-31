@@ -8,8 +8,8 @@
  *  - 断电/停机补账：锚点 = lastRunAt ?? createdAt。重启后若某任务的
  *    计划点已过且在宽限期内（默认 30 分钟），立即补发一次；超过宽限期
  *    视为过期提醒，跳过（一次性任务顺手停用），避免深夜补发"早上叫你起床"；
- *  - fire 是长操作（一轮 agent 对话）：先把 lastRunAt 落盘再触发，
- *    期间 refresh/tick 重入也不会重复触发。
+ *  - fire 可能是长操作（agent 轮次，direct 推送则很快）：先把 lastRunAt
+ *    落盘再触发，期间 refresh/tick 重入也不会重复触发。
  */
 import type { Logger } from '../types.ts';
 import { nextRunAt, nextRunForTask, describeSchedule } from './schedule.ts';

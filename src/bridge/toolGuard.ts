@@ -59,7 +59,7 @@ export function decideTool(options: {
 	if (userTools.some((pattern) => matchToolPattern(pattern, name))) return { allowed: true };
 	return {
 		allowed: false,
-		reason: `权限不足：工具 ${name} 仅管理员可用。请告知用户，想用这个功能得让管理员来发起对话。`,
+		reason: `权限不足：工具 ${name} 仅管理员可用。请告知用户：要么让管理员来发起对话，要么由管理员在 WebUI「qq-bot 配置 → 工具权限 → 普通用户可用工具」把它加进白名单（勾选网格里没有的工具，可在「其他条目」输入 ${name} 后点「添加」，再点卡片底部「保存」）。`,
 	};
 }
 

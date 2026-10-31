@@ -1,9 +1,10 @@
 /**
  * 定时任务库：<dataDir>/tasks.json 持久化（重启后任务继续生效）。
  *
- * 每个任务绑定创建它的那个 QQ 会话（chatKey），到期由 TaskScheduler 触发、
- * 经对应会话桥把 agent 的执行结果主动发回该会话——任务不能指定任意目标，
- * 主动消息只能落在发起会话里，这是刻意的安全边界。
+ * 每个任务绑定创建它的那个 QQ 会话（chatKey），到期由 TaskScheduler 触发。
+ * `delivery=direct` 直接把模板发回该会话（不调模型）；`agent` 则驱动一轮
+ * 对话——两种方式都不能指定任意目标，主动消息只能落在发起会话里，
+ * 这是刻意的安全边界。
  *
  * 写入来源共用同一份数据：
  *  - agent 工具 task_schedule / task_cancel（会话内自然语言创建/取消）；
@@ -17,6 +18,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { Logger } from '../types.ts';
 import { normalizeTaskSchedule, type TaskSchedule } from './schedule.ts';
+import { normalizeTaskDelivery, taskTemplateError, type TaskDelivery } from './template.ts';
 
 export const MAX_TASKS = 200;
 export const MAX_TASK_PROMPT_CHARS = 2000;
@@ -29,8 +31,13 @@ export interface ScheduledTask {
 	chatType: 'private' | 'group';
 	/** 群号或对方 QQ 号。 */
 	chatId: string;
-	/** 到期时交给 agent 的指令（写给未来的自己）。 */
+	/** 到期时交给 agent 的指令（写给未来的自己）；delivery=direct 时是直接推送的模板。 */
 	prompt: string;
+	/**
+	 * 到期处理方式：`agent` = 唤醒模型执行（默认，兼容旧任务）；
+	 * `direct` = 不调模型，渲染模板后直接发到会话（固定提醒/每日播报）。
+	 */
+	delivery: TaskDelivery;
 	/** 任务备注（任务列表展示用）。 */
 	note?: string;
 	schedule: TaskSchedule;
@@ -47,6 +54,8 @@ export interface TaskInput {
 	chatType: 'private' | 'group';
 	chatId: string;
 	prompt: string;
+	/** 缺省 = agent（旧调用方等价行为）。 */
+	delivery?: TaskDelivery;
 	schedule: TaskSchedule;
 	note?: string;
 	createdBy?: string;
@@ -65,12 +74,13 @@ export function validateTaskInput(input: {
 	chatType?: unknown;
 	chatId?: unknown;
 	prompt?: unknown;
+	delivery?: unknown;
 	note?: unknown;
 	kind?: unknown;
 	time?: unknown;
 	weekdays?: unknown;
 	runAt?: unknown;
-}): { chatKey: string; chatType: 'private' | 'group'; chatId: string; prompt: string; note?: string; schedule: TaskSchedule } | { error: string } {
+}): { chatKey: string; chatType: 'private' | 'group'; chatId: string; prompt: string; delivery: TaskDelivery; note?: string; schedule: TaskSchedule } | { error: string } {
 	const chatKey = typeof input.chatKey === 'string' ? input.chatKey.trim() : '';
 	if (chatKey === '' || chatKey.length > 64) return { error: '会话键（chatKey）缺失或非法' };
 	const chatType = input.chatType === 'group' ? 'group' : input.chatType === 'private' ? 'private' : undefined;
@@ -80,6 +90,13 @@ export function validateTaskInput(input: {
 	const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
 	if (prompt === '') return { error: '任务内容（prompt）不能为空' };
 	if (prompt.length > MAX_TASK_PROMPT_CHARS) return { error: `任务内容不能超过 ${MAX_TASK_PROMPT_CHARS} 字` };
+	const delivery = normalizeTaskDelivery(input.delivery);
+	// 直接推送不经过模型：内容就是发出去的正文，占位符写错在创建时就拒绝，
+	// 免得到点把 `{n}` 之类的原文发到群里。
+	if (delivery === 'direct') {
+		const templateError = taskTemplateError(prompt);
+		if (templateError !== null) return { error: templateError };
+	}
 	let note: string | undefined;
 	if (input.note !== undefined && input.note !== null) {
 		const trimmed = typeof input.note === 'string' ? input.note.trim() : '';
@@ -90,7 +107,7 @@ export function validateTaskInput(input: {
 	}
 	const schedule = normalizeTaskSchedule(input);
 	if ('error' in schedule) return schedule;
-	return { chatKey, chatType, chatId, prompt, note, schedule: schedule.schedule };
+	return { chatKey, chatType, chatId, prompt, delivery, note, schedule: schedule.schedule };
 }
 
 export class TaskStore {
@@ -169,6 +186,7 @@ export class TaskStore {
 			chatType: input.chatType,
 			chatId: input.chatId,
 			prompt: input.prompt,
+			delivery: normalizeTaskDelivery(input.delivery),
 			schedule: input.schedule,
 			enabled: true,
 			createdAt: Date.now(),
@@ -183,7 +201,7 @@ export class TaskStore {
 	/** 更新任务内容（WebUI 编辑；chatKey 变更 = 换绑会话）。 */
 	update(
 		id: string,
-		patch: Partial<Pick<ScheduledTask, 'chatKey' | 'chatType' | 'chatId' | 'prompt' | 'note' | 'schedule'>>,
+		patch: Partial<Pick<ScheduledTask, 'chatKey' | 'chatType' | 'chatId' | 'prompt' | 'delivery' | 'note' | 'schedule'>>,
 	): ScheduledTask | undefined {
 		const task = this.get(id);
 		if (task === undefined) return undefined;
@@ -191,6 +209,7 @@ export class TaskStore {
 		if (patch.chatType !== undefined) task.chatType = patch.chatType;
 		if (patch.chatId !== undefined) task.chatId = patch.chatId;
 		if (patch.prompt !== undefined) task.prompt = patch.prompt;
+		if (patch.delivery !== undefined) task.delivery = normalizeTaskDelivery(patch.delivery);
 		if (patch.note !== undefined) {
 			if (patch.note === '') delete task.note;
 			else task.note = patch.note;
@@ -248,6 +267,7 @@ function reviveTask(raw: unknown): ScheduledTask | undefined {
 		chatType,
 		chatId,
 		prompt,
+		delivery: normalizeTaskDelivery(record.delivery),
 		schedule: schedule.schedule,
 		enabled: record.enabled !== false,
 		createdAt,

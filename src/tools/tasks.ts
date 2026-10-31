@@ -20,6 +20,7 @@ import type { DshQQConfig } from '../config.ts';
 import type { ChatBridgeManager } from '../bridge/chat.ts';
 import { nextRunAt, describeSchedule } from '../tasks/schedule.ts';
 import { MAX_TASKS, validateTaskInput, type ScheduledTask, type TaskStore } from '../tasks/store.ts';
+import { TASK_TEMPLATE_HELP } from '../tasks/template.ts';
 
 interface ToolRegistryLike {
 	register(definition: unknown): void;
@@ -49,12 +50,22 @@ export function registerTaskTools(
 		defineTool({
 			name: 'task_schedule',
 			description:
-				'Create a scheduled task (future task) bound to the CURRENT QQ conversation. When it is due, you are re-invoked with `prompt` and your reply is proactively sent to this chat — use it whenever the user asks for things like "remind me at 9 every day", "wake me up at 7 on weekdays", or "in 20 minutes tell me ...". The current host time is provided in the system prompt; all times are host-local.',
+				'Create a scheduled task (future task) bound to the CURRENT QQ conversation. When it is due, its message is proactively sent to this chat. Pick `delivery` per task: `direct` = send a fixed message via template, with NO model call and zero token cost (use it for reminders, fixed announcements and daily counters); `agent` = wake you up at fire time (only when the content must be looked up, computed or generated then). The current host time is provided in the system prompt; all times are host-local.',
 			parameters: {
 				prompt: {
 					type: 'string',
 					required: true,
-					description: 'What to do when the task fires, written to your future self. Include enough context to act without this conversation.',
+					description:
+						'delivery=direct: the exact message to send, verbatim, with optional placeholders ' +
+						`(${TASK_TEMPLATE_HELP}). Do NOT put instructions here. ` +
+						'delivery=agent: what to do when the task fires, written to your future self, with enough context to act without this conversation.',
+				},
+				delivery: {
+					type: 'string',
+					required: true,
+					enum: ['direct', 'agent'],
+					description:
+						"'direct' for a fixed reminder/announcement that needs no model or live data (default choice for reminders); 'agent' ONLY when the message must be generated/checked at fire time (weather, live info, tool use).",
 				},
 				note: { type: 'string', description: 'Short label for the task list, e.g. 叫我起床.' },
 				kind: {
@@ -78,13 +89,14 @@ export function registerTaskTools(
 					properties: {
 						id: { type: 'string', required: true },
 						schedule: { type: 'string', required: true },
+						delivery: { type: 'string', required: true },
 						nextRunAt: { type: 'string' },
 					},
 				},
 				render: (_args, value) => [
 					{
 						type: 'text',
-						text: value.nextRunAt !== undefined ? `已创建定时任务（${value.schedule}），下次触发 ${value.nextRunAt}` : `已创建定时任务（${value.schedule}）`,
+						text: `${value.delivery === 'direct' ? '已创建定时任务（直接推送，不调用模型）' : '已创建定时任务（到期由模型执行）'}${value.nextRunAt !== undefined ? `（${value.schedule}），下次触发 ${value.nextRunAt}` : `（${value.schedule}）`}`,
 					},
 				],
 			},
@@ -99,6 +111,7 @@ export function registerTaskTools(
 					chatType: bridge.scope,
 					chatId: bridge.chatId,
 					prompt: args.prompt,
+					delivery: args.delivery,
 					note: args.note,
 					kind: args.kind,
 					time: args.time,
@@ -112,6 +125,7 @@ export function registerTaskTools(
 						chatType: validated.chatType,
 						chatId: validated.chatId,
 						prompt: validated.prompt,
+						delivery: validated.delivery,
 						schedule: validated.schedule,
 						note: validated.note,
 						createdBy: bridge.turnSenderId || undefined,
@@ -123,6 +137,7 @@ export function registerTaskTools(
 				return {
 					id: added.task.id,
 					schedule: describeSchedule(added.task.schedule),
+					delivery: added.task.delivery,
 					...(next !== null ? { nextRunAt: new Date(next).toISOString() } : {}),
 				};
 			},
@@ -150,6 +165,7 @@ export function registerTaskTools(
 									id: { type: 'string', required: true },
 									note: { type: 'string' },
 									prompt: { type: 'string', required: true },
+									delivery: { type: 'string', required: true },
 									schedule: { type: 'string', required: true },
 									enabled: { type: 'boolean', required: true },
 									nextRunAt: { type: 'string' },
@@ -167,7 +183,7 @@ export function registerTaskTools(
 								list.length === 0
 									? '当前会话没有定时任务'
 									: list
-											.map((task) => `${task.enabled ? '' : '（已停用）'}[${task.id}] ${task.schedule}${task.note !== '' ? ` · ${task.note}` : ''}${task.nextRunAt !== undefined ? ` · 下次 ${task.nextRunAt}` : ''}`)
+											.map((task) => `${task.enabled ? '' : '（已停用）'}[${task.id}] ${task.schedule}${task.delivery === 'direct' ? ' · 直接推送' : ' · 模型执行'}${task.note !== '' ? ` · ${task.note}` : ''}${task.nextRunAt !== undefined ? ` · 下次 ${task.nextRunAt}` : ''}`)
 											.join('\n'),
 						},
 					];
@@ -186,6 +202,7 @@ export function registerTaskTools(
 							id: task.id,
 							note: task.note ?? '',
 							prompt: task.prompt,
+							delivery: task.delivery,
 							schedule: describeSchedule(task.schedule),
 							enabled: task.enabled,
 							...(next !== null ? { nextRunAt: new Date(next).toISOString() } : {}),

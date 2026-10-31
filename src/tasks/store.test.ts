@@ -36,6 +36,21 @@ describe('validateTaskInput', () => {
 		expect(validateTaskInput({ ...baseInput, kind: 'daily', time: 'xx' })).toHaveProperty('error');
 		expect(validateTaskInput({ ...baseInput, kind: 'daily', time: '09:00', note: 'x'.repeat(201) })).toHaveProperty('error');
 	});
+
+	it('delivery 缺省 agent；direct 校验模板占位符', () => {
+		const legacy = validateTaskInput({ ...baseInput, kind: 'daily', time: '09:00' });
+		if ('error' in legacy) throw new Error('不应失败');
+		expect(legacy.delivery).toBe('agent');
+
+		const direct = validateTaskInput({ ...baseInput, prompt: '今天是开服第{daysSince:2020-09-15}天', delivery: 'direct', kind: 'daily', time: '12:00' });
+		if ('error' in direct) throw new Error('不应失败');
+		expect(direct.delivery).toBe('direct');
+
+		const bad = validateTaskInput({ ...baseInput, prompt: '今天是第{n}天', delivery: 'direct', kind: 'daily', time: '12:00' });
+		expect(bad).toHaveProperty('error');
+		// agent 模式不校验模板（prompt 是给模型的自然语言指令）。
+		expect(validateTaskInput({ ...baseInput, prompt: '今天是第{n}天', delivery: 'agent', kind: 'daily', time: '12:00' })).not.toHaveProperty('error');
+	});
 });
 
 describe('TaskStore', () => {
@@ -54,6 +69,20 @@ describe('TaskStore', () => {
 		expect(reloaded.list().length).toBe(1);
 		expect(reloaded.list()[0]?.id).toBe(added.task.id);
 		expect(reloaded.list()[0]?.schedule).toEqual({ kind: 'daily', time: '09:00' });
+		// 旧任务没有 delivery 字段：读回按 agent（兼容）。
+		expect(reloaded.list()[0]?.delivery).toBe('agent');
+	});
+
+	it('direct 任务落盘并读回 delivery 与模板', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'dshqq-tasks-'));
+		const store = new TaskStore(dir, logger);
+		store.init();
+		const added = store.add({ ...baseInput, prompt: '今天是第{daysSince:2020-09-15}天', delivery: 'direct' }, { total: 10, perChat: 5 });
+		if ('error' in added) throw new Error('add 不应失败');
+		const reloaded = new TaskStore(dir, logger);
+		reloaded.init();
+		expect(reloaded.list()[0]?.delivery).toBe('direct');
+		expect(reloaded.list()[0]?.prompt).toBe('今天是第{daysSince:2020-09-15}天');
 	});
 
 	it('单会话与全库上限', () => {

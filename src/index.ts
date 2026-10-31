@@ -313,6 +313,16 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 			logger.warn(`dsh-qq-bot: 定时任务 ${task.id} 的会话键 ${task.chatKey} 无法识别，跳过触发`);
 			return;
 		}
+		// 直接推送不经过模型，也不进会话队列：固定提醒不该被 agent 的长任务
+		// 或写句柄占用拖住（队列满时更不能丢）。失败只记日志。
+		if (task.delivery === 'direct') {
+			try {
+				await bridge.handleScheduledTask(task);
+			} catch (error) {
+				logger.error(`dsh-qq-bot: 定时任务 ${task.id}「${task.note ?? task.prompt.slice(0, 30)}」直接推送失败: ${error instanceof Error ? error.message : String(error)}`);
+			}
+			return;
+		}
 		if (!bridge.enqueue(() => bridge.handleScheduledTask(task))) {
 			logger.warn(`dsh-qq-bot: 定时任务 ${task.id} 触发时 ${bridge.label} 队列已满，本轮跳过`);
 		}
@@ -400,12 +410,27 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 	// 工具清单 → 配置 schema 元数据：WebUI 里 userTools/blockedTools 据此渲染
 	// 成选择框。装载完成后枚举一次，之后随 tools/change 刷新；describe 每次
 	// 读活 schema，浏览器下次拉取即拿到最新清单。
+	//
+	// 全局 `schemas()` 只含全局注册的工具（qq_* / task_* / ask_user_question /
+	// working_directory）；bash、read、web_fetch 这些是**每个 agent 作用域**注册的，
+	// 必须带 agent 才能看到。否则用户想在 userTools 里放行 web_fetch 时，勾选
+	// 网格里根本没有它（只能手填，实际事故：以为开了"网页搜索"就能抓网址）。
+	// QQ 会话共用同一个 preset，所以取第一个可用的 agent 就够；warmup 之后
+	// agent 才存在，所以下面 warmup 完成后再刷新一次。
 	const toolsList = (ctx as unknown as { tools?: ToolRegistryListLike }).tools;
 	function refreshToolOptions(): void {
 		if (typeof toolsList?.schemas !== 'function') return;
 		try {
 			const names = new Set<string>(CHAT_TOOLS);
 			for (const schema of toolsList.schemas()) names.add(schema.name);
+			for (const agent of manager.activeAgents()) {
+				try {
+					for (const schema of toolsList.schemas(agent)) names.add(schema.name);
+					break;
+				} catch (error) {
+					logger.warn(`dsh-qq-bot: 工具清单枚举失败（agent 作用域）: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
 			attachToolOptions([...names]);
 		} catch (error) {
 			logger.warn(`dsh-qq-bot: 工具清单枚举失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -419,9 +444,12 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 	manager.startEvictor();
 	// 抢在浏览器之前占住写句柄（见 ChatBridgeManager.warmup）：dsh 界面 promote
 	// 一个会话后就再也不释放，插件重启/热重载后这段空窗是它唯一能输的时刻。
-	void manager.warmup().catch((error: unknown) => {
-		logger.warn(`dsh-qq-bot: 启动预热异常：${error instanceof Error ? error.message : String(error)}`);
-	});
+	void manager
+		.warmup()
+		.then(refreshToolOptions)
+		.catch((error: unknown) => {
+			logger.warn(`dsh-qq-bot: 启动预热异常：${error instanceof Error ? error.message : String(error)}`);
+		});
 	logger.info(`dsh-qq-bot: 已启动（transport=${config.transport}，白名单模式 ${config.privateMode}/${config.groupMode}）`);
 
 	// agent 提问（ask_user_question / 计划确认等走 `ctx.userQuestions` 缝的工具）：

@@ -14,6 +14,7 @@ import { toolLabel } from './locales.ts';
 import { parseChatSelector } from '../persona/routes.ts';
 import { addOrderItem, moveOrderItem, removeOrderItem } from '../search/priority.ts';
 import { describeSchedule, normalizeRunAtInput, normalizeTimeInput, normalizeWeekdaysInput, WEEKDAY_LABELS, type TaskKind, type TaskSchedule } from '../tasks/schedule.ts';
+import { normalizeTaskDelivery, taskTemplateError, type TaskDelivery } from '../tasks/template.ts';
 import type { RpcCaller, Translate } from './types.ts';
 
 const css = {
@@ -1008,6 +1009,7 @@ export interface TaskRecordView {
 	chatType: 'private' | 'group';
 	chatId: string;
 	prompt: string;
+	delivery: TaskDelivery;
 	note: string;
 	kind: TaskKind;
 	time: string;
@@ -1039,6 +1041,7 @@ function parseTaskViews(value: unknown): TaskRecordView[] {
 			chatType: entry.chatType === 'group' ? 'group' as const : 'private' as const,
 			chatId: asString(entry.chatId),
 			prompt: asString(entry.prompt),
+			delivery: normalizeTaskDelivery(entry.delivery),
 			note: asString(entry.note),
 			kind: entry.kind === 'once' ? ('once' as const) : entry.kind === 'weekly' ? ('weekly' as const) : ('daily' as const),
 			time: asString(entry.time),
@@ -1381,11 +1384,22 @@ interface TaskDraft {
 	weekdays: number[];
 	runAt: string;
 	prompt: string;
+	delivery: TaskDelivery;
 	note: string;
 }
 
 function draftOf(view: TaskRecordView): TaskDraft {
-	return { id: view.id, chat: view.chat, kind: view.kind, time: view.time, weekdays: view.weekdays, runAt: view.runAt, prompt: view.prompt, note: view.note };
+	return {
+		id: view.id,
+		chat: view.chat,
+		kind: view.kind,
+		time: view.time,
+		weekdays: view.weekdays,
+		runAt: view.runAt,
+		prompt: view.prompt,
+		delivery: view.delivery,
+		note: view.note,
+	};
 }
 
 /** epoch ms → 本地 `MM-DD HH:mm`（任务列表展示用）。 */
@@ -1426,6 +1440,10 @@ function TaskPanel(props: { t: Translate; data: TaskData; disabled: boolean }): 
 	const validate = (draft: TaskDraft): string | null => {
 		if (parseChatSelector(draft.chat) === null) return t('taskInvalidChat');
 		if (draft.prompt.trim() === '') return t('taskPromptRequired');
+		if (draft.delivery === 'direct') {
+			const detail = taskTemplateError(draft.prompt);
+			if (detail !== null) return t('taskTemplateInvalid').replace('{detail}', detail);
+		}
 		if (draft.kind === 'once') {
 			if (normalizeRunAtInput(draft.runAt) === null) return t('taskRunAtRequired');
 		} else if (normalizeTimeInput(draft.time) === null) return t('taskTimeRequired');
@@ -1446,6 +1464,7 @@ function TaskPanel(props: { t: Translate; data: TaskData; disabled: boolean }): 
 			...(editing.id !== undefined ? { id: editing.id } : {}),
 			chat: editing.chat.trim(),
 			prompt: editing.prompt.trim(),
+			delivery: editing.delivery,
 			note: editing.note.trim(),
 			kind: editing.kind,
 			...(editing.kind === 'once' ? { runAt: editing.runAt.trim().replace('T', ' ') } : { time: editing.time.trim() }),
@@ -1529,10 +1548,24 @@ function TaskPanel(props: { t: Translate; data: TaskData; disabled: boolean }): 
 					) : null}
 				</>
 			)}
+			<select
+				className={cls(css.input, css.select)}
+				aria-label={t('taskDeliveryLabel')}
+				value={draft.delivery}
+				disabled={disabled || saving}
+				onChange={(event) => {
+					const delivery = normalizeTaskDelivery(event.target.value);
+					setEditing((prev) => (prev === null ? prev : { ...prev, delivery }));
+				}}
+			>
+				<option value="direct">{t('taskDeliveryDirect')}</option>
+				<option value="agent">{t('taskDeliveryAgent')}</option>
+			</select>
+			<p className={css.hint}>{t(draft.delivery === 'direct' ? 'taskDeliveryHintDirect' : 'taskDeliveryHintAgent')}</p>
 			<textarea
 				className={cls(css.input, css.textarea)}
 				value={draft.prompt}
-				placeholder={t('taskPromptPlaceholder')}
+				placeholder={t(draft.delivery === 'direct' ? 'taskPromptPlaceholderDirect' : 'taskPromptPlaceholder')}
 				disabled={disabled || saving}
 				onChange={(event) => {
 					setEditing((prev) => (prev === null ? prev : { ...prev, prompt: event.target.value }));
@@ -1583,7 +1616,7 @@ function TaskPanel(props: { t: Translate; data: TaskData; disabled: boolean }): 
 						disabled={disabled}
 						onClick={() => {
 							setFailed(null);
-							setEditing({ chat: '', kind: 'daily', time: '', weekdays: [1, 2, 3, 4, 5], runAt: '', prompt: '', note: '' });
+							setEditing({ chat: '', kind: 'daily', time: '', weekdays: [1, 2, 3, 4, 5], runAt: '', prompt: '', delivery: 'direct', note: '' });
 						}}
 					>
 						{t('taskAdd')}
@@ -1597,7 +1630,9 @@ function TaskPanel(props: { t: Translate; data: TaskData; disabled: boolean }): 
 					<div className={css.editorItem} key={task.id}>
 						<div className={css.taskHead}>
 							<span className={css.taskChat}>{task.chat}</span>
-							<span className={css.taskSchedule}>{describeSchedule(scheduleOf(task))}</span>
+							<span className={css.taskSchedule}>
+								{describeSchedule(scheduleOf(task))} · {t(task.delivery === 'direct' ? 'taskDeliveryDirectShort' : 'taskDeliveryAgentShort')}
+							</span>
 							<button
 								type="button"
 								role="switch"

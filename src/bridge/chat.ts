@@ -60,6 +60,7 @@ import type { PersonaStore } from '../persona/store.ts';
 import type { MemoryLike } from '../memory/index.ts';
 import type { MessageLogService } from '../logs/store.ts';
 import { describeSchedule } from '../tasks/schedule.ts';
+import { renderTaskTemplate } from '../tasks/template.ts';
 import type { ScheduledTask } from '../tasks/store.ts';
 import {
 	FORKED_NOTICE,
@@ -85,7 +86,9 @@ const BUSY_POLL_MS = 5_000;
 /** 定时任务能力提示（system prompt section；工具注册且开关开启时才注入）。 */
 const TASK_HINT_SECTION = [
 	'你可以为当前会话创建定时任务：task_schedule 登记，task_list / task_cancel 查看/取消。',
-	'当用户提出"每天X点叫我…""X分钟后提醒我…"这类未来要做的事时，用 task_schedule 落成任务；到期你会被重新唤醒，把结果直接发到本会话。',
+	'当用户提出"每天X点叫我…""X分钟后提醒我…"这类未来要做的事时，用 task_schedule 落成任务；到期消息会直接发到本会话。',
+	'固定提醒、每日播报这类内容用 delivery="direct"（零 token：到点把 prompt 原样发出，不唤醒模型），prompt 就是发出去的正文，可用占位符 {date} {time} {weekday} {daysSince:YYYY-MM-DD}（起始日算第 1 天，适合"开服第 N 天"）。',
+	'只有内容必须到点再查询/计算/调工具时（天气、新闻、按情况决定说什么）才用 delivery="agent"——它会在到期时唤醒你执行 prompt。',
 	'时间一律以 dsh 内置 time-context 提供的真实时间为基准；只口头答应而不落成任务，用户是收不到提醒的。',
 ].join('\n');
 /** 聊天记录能力提示（group 会话 + 工具已注册时才注入）。 */
@@ -507,6 +510,14 @@ export class ChatBridge {
 	/** 当前是否有 agent 提问在等回答（/status 与调度判定用）。 */
 	hasPendingQuestion(): boolean {
 		return this.asker.busy;
+	}
+
+	/**
+	 * 已持有的 agent（undefined = 还没有 handle）。
+	 * **不触发 resume/创建**：只给"枚举这个 agent 可见工具"这类只读场景用。
+	 */
+	activeAgent(): Agent | undefined {
+		return this.handle?.agent;
 	}
 
 	// ── Agent 生命周期 ──
@@ -1279,6 +1290,30 @@ export class ChatBridge {
 	}
 
 	/**
+	 * 直接推送任务：按触发时刻渲染模板并原样发出。
+	 *
+	 * 只走 OneBot 出站 API，不 ensureAgent、不吃模型/工具权限、不写会话队列——
+	 * 即使当前会话没有 agent、界面占着写句柄、或 agent 正卡在一轮长任务里，
+	 * 固定提醒也能照常到点发出。
+	 */
+	private async pushScheduledText(task: ScheduledTask): Promise<void> {
+		const text = renderTaskTemplate(task.prompt, new Date()).trim();
+		if (text === '') return;
+		this.options.logs?.record({
+			dir: 'out',
+			scope: 'dsh',
+			event: 'reply',
+			chatType: this.scope,
+			chatId: this.chatId,
+			senderId: task.createdBy ?? '',
+			senderName: '定时任务',
+			text,
+			detail: `task=${task.id} delivery=direct`,
+		});
+		await this.sendText(text);
+	}
+
+	/**
 	 * 定时任务触发：以"未来的自己"身份驱动一轮对话，回复走常规出站管线
 	 * （切块/折叠/装饰）。与 handleMessage 的差异：没有唤醒/限速/媒体/引用
 	 * 前置（触发源自任务系统而非用户消息），工具权限按任务创建者判定，
@@ -1291,6 +1326,12 @@ export class ChatBridge {
 		this.replyMessageId = undefined;
 		this.replySenderId = '';
 		this.replyTrigger = 'other';
+		// 直接推送任务不经过模型：渲染模板后原样发出。连 agent 都不创建，
+		// 所以固定提醒/每日播报是真正的零 token 路径（也不占会话队列）。
+		if (task.delivery === 'direct') {
+			await this.pushScheduledText(task);
+			return;
+		}
 		const title = task.note !== undefined && task.note !== '' ? `定时任务「${task.note}」` : '定时任务';
 		const prompt = `[${title}触发（${describeSchedule(task.schedule)}）]\n${task.prompt}\n（这是你此前替用户登记的定时任务在此时触发，请执行并把结果发给本会话。）`;
 		this.options.logs?.record({
@@ -1664,6 +1705,20 @@ export class ChatBridgeManager {
 
 	list(): ChatBridge[] {
 		return [...this.bridges.values()];
+	}
+
+	/**
+	 * 当前已持有 handle 的 agent（不触发 resume/创建）。
+	 * 配置页的工具清单用它补上 per-agent 工具（bash / read / web_fetch 等
+	 * 只在 agent 作用域注册，全局 `tools.schemas()` 看不到）。
+	 */
+	activeAgents(): Agent[] {
+		const agents: Agent[] = [];
+		for (const bridge of this.bridges.values()) {
+			const agent = bridge.activeAgent();
+			if (agent !== undefined) agents.push(agent);
+		}
+		return agents;
 	}
 
 	/** 取或创建会话桥。 */

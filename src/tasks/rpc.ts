@@ -12,6 +12,7 @@ import type { Logger } from '../types.ts';
 import { formatChatSelector, parseChatSelector } from '../persona/routes.ts';
 import { type TaskSchedule } from './schedule.ts';
 import { MAX_TASKS, validateTaskInput, type ScheduledTask, type TaskStore } from './store.ts';
+import type { TaskDelivery } from './template.ts';
 
 export type TaskRpcResult = ConnectionRpcResultLike;
 
@@ -24,6 +25,8 @@ export interface TaskView {
 	chatType: 'private' | 'group';
 	chatId: string;
 	prompt: string;
+	/** 到期处理方式：direct = 不调模型直接推送。 */
+	delivery: TaskDelivery;
 	note: string;
 	kind: 'once' | 'daily' | 'weekly';
 	time: string;
@@ -63,6 +66,7 @@ function toView(task: ScheduledTask, nextRunOf: (id: string) => number | undefin
 		chatType: task.chatType,
 		chatId: task.chatId,
 		prompt: task.prompt,
+		delivery: task.delivery,
 		note: task.note ?? '',
 		kind: task.schedule.kind,
 		time: task.schedule.kind === 'once' ? '' : task.schedule.time,
@@ -83,7 +87,7 @@ function listViews(deps: TaskRpcDeps): TaskView[] {
 /** 校验 upsert 的会话选择器 + 时间表；非法返回错误文案。 */
 function parseUpsert(
 	payload: Record<string, unknown>,
-): { value: { id?: string; chatKey: string; chatType: 'private' | 'group'; chatId: string; prompt: string; note: string; schedule: TaskSchedule } } | { error: string } {
+): { value: { id?: string; chatKey: string; chatType: 'private' | 'group'; chatId: string; prompt: string; delivery: TaskDelivery; note: string; schedule: TaskSchedule } } | { error: string } {
 	const id = typeof payload.id === 'string' && payload.id.trim() !== '' ? payload.id.trim() : undefined;
 	const chat = typeof payload.chat === 'string' ? payload.chat.trim() : '';
 	// 表格输入与「人格与模型」卡片同一套选择器：friend_/group_（也接受 u-/g- 往返编辑）。
@@ -94,6 +98,7 @@ function parseUpsert(
 		chatType: selector.scope,
 		chatId: selector.chatId,
 		prompt: payload.prompt,
+		delivery: payload.delivery,
 		note: payload.note,
 		kind: payload.kind,
 		time: payload.time,
@@ -101,7 +106,7 @@ function parseUpsert(
 		runAt: payload.runAt,
 	});
 	if ('error' in validated) return validated;
-	return { value: { id, chatKey: validated.chatKey, chatType: validated.chatType, chatId: validated.chatId, prompt: validated.prompt, note: validated.note ?? '', schedule: validated.schedule } };
+	return { value: { id, chatKey: validated.chatKey, chatType: validated.chatType, chatId: validated.chatId, prompt: validated.prompt, delivery: validated.delivery, note: validated.note ?? '', schedule: validated.schedule } };
 }
 
 /**
@@ -125,6 +130,7 @@ export async function handleTaskRpc(endpoint: string, payload: unknown, deps: Ta
 					chatType: task.chatType,
 					chatId: task.chatId,
 					prompt: task.prompt,
+					delivery: task.delivery,
 					note: task.note,
 					schedule: task.schedule,
 				});
@@ -137,6 +143,7 @@ export async function handleTaskRpc(endpoint: string, payload: unknown, deps: Ta
 					chatType: task.chatType,
 					chatId: task.chatId,
 					prompt: task.prompt,
+					delivery: task.delivery,
 					schedule: task.schedule,
 					note: task.note === '' ? undefined : task.note,
 					createdBy: undefined,

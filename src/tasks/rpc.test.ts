@@ -42,8 +42,31 @@ describe('handleTaskRpc', () => {
 		if (!list?.ok) return;
 		const tasks = (list.value as { tasks: Array<Record<string, unknown>> }).tasks;
 		expect(tasks.length).toBe(1);
-		expect(tasks[0]).toMatchObject({ chat: 'friend_10001', chatKey: 'u-10001', chatId: '10001', chatType: 'private', kind: 'daily', time: '07:30', note: '起床', enabled: true });
+		expect(tasks[0]).toMatchObject({ chat: 'friend_10001', chatKey: 'u-10001', chatId: '10001', chatType: 'private', kind: 'daily', time: '07:30', note: '起床', enabled: true, delivery: 'agent' });
 		expect(tasks[0]?.id).toMatch(/^t-/);
+	});
+
+	it('tasks/upsert 支持 direct 模板；未知占位符拒绝', async () => {
+		const { deps } = makeDeps();
+		const created = await handleTaskRpc(
+			'tasks/upsert',
+			{ ...upsertBody, prompt: '今天是原神开服第{daysSince:2020-09-15}天', delivery: 'direct' },
+			deps,
+		);
+		expect(created?.ok).toBe(true);
+		if (!created?.ok) return;
+		const tasks = (created.value as { tasks: Array<Record<string, unknown>> }).tasks;
+		expect(tasks[0]).toMatchObject({ delivery: 'direct', prompt: '今天是原神开服第{daysSince:2020-09-15}天' });
+
+		const bad = await handleTaskRpc('tasks/upsert', { ...upsertBody, prompt: '今天是第{n}天', delivery: 'direct' }, deps);
+		expect(bad?.ok).toBe(false);
+		if (!bad?.ok) expect(bad.error.code).toBe('invalid');
+
+		// 编辑已有任务也能在两种方式之间切换。
+		const id = tasks[0]?.id as string;
+		const switched = await handleTaskRpc('tasks/upsert', { ...upsertBody, id, delivery: 'agent' }, deps);
+		expect(switched?.ok).toBe(true);
+		expect(deps.store.get(id)?.delivery).toBe('agent');
 	});
 
 	it('tasks/upsert 更新已有任务（换时间、换会话）', async () => {

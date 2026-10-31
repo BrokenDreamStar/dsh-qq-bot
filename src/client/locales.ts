@@ -435,7 +435,7 @@ export const zh: Record<string, string> = {
 	registerSendToolsHint: `向 agent 注册 qq_send / qq_send_image / qq_recall 工具。${RESTART}`,
 	tasksEnabledLabel: '启用定时任务',
 	tasksEnabledHint:
-		'agent 可用 task_schedule / task_list / task_cancel 把"每天9点叫我起床"落成任务，到期主动给该会话发消息。工具注册需重启；触发器启停即时生效。',
+		'agent 可用 task_schedule / task_list / task_cancel 把"每天9点叫我起床"落成任务。每个任务可选「直接推送」（到点原样发出，不调模型、零 token）或「agent 执行」（到期唤醒模型）。工具注册需重启；触发器启停即时生效。',
 	taskMaxPerChatLabel: '单会话任务上限',
 	taskMaxPerChatHint: '单个会话最多可创建的定时任务数（防刷）。任务只能发回创建它的会话。',
 
@@ -475,6 +475,16 @@ export const zh: Record<string, string> = {
 	taskEmpty: '还没有定时任务：在会话里说"每天9点叫我起床"即可由 agent 代建，或点「新建任务」。',
 	taskChatPlaceholder: 'friend_10001 或 group_123456',
 	taskPromptPlaceholder: '到期时让 agent 做什么（写给未来的自己，包含足够上下文）',
+	taskPromptPlaceholderDirect: '到点直接发出去的消息，例如：今天是原神开服第{daysSince:2020-09-15}天',
+	taskDeliveryLabel: '到期处理方式',
+	taskDeliveryDirect: '直接推送（不调用模型）',
+	taskDeliveryAgent: 'agent 执行（消耗 token）',
+	taskDeliveryDirectShort: '直接推送',
+	taskDeliveryAgentShort: 'agent 执行',
+	taskDeliveryHintDirect:
+		'到点把内容原样发出，不调用模型、不消耗 token。可用占位符：{date} {time} {weekday} {daysSince:YYYY-MM-DD}（起始日算第 1 天）。',
+	taskDeliveryHintAgent: '到期时唤醒 agent 执行任务内容并回复，会消耗 token；需要到点查资料/调工具时用。',
+	taskTemplateInvalid: '直接推送内容有误：{detail}',
 	taskNotePlaceholder: '备注（可选，如：叫我起床）',
 	'taskKind.once': '一次性',
 	'taskKind.daily': '每天',
@@ -497,7 +507,7 @@ export const zh: Record<string, string> = {
 	taskCancelNew: '取消新建',
 	taskCancelEdit: '放弃编辑',
 	taskPanelHint:
-		'任务绑定创建它的会话，到期由机器人主动把执行结果发到该会话；一次性任务触发后自动停用。停机错过超过 30 分钟的触发点会被跳过（不补发过期提醒）。',
+		'任务绑定创建它的会话。固定提醒/播报用「直接推送」（不调模型，支持 {date} {time} {weekday} {daysSince:YYYY-MM-DD}），需要到点查询或调工具才用「agent 执行」。一次性任务触发后自动停用；停机错过超过 30 分钟的触发点会被跳过（不补发过期提醒）。',
 	taskRpcUnavailable:
 		'宿主缺少 connection 服务（旧宿主 / 非 web profile），任务列表不可用；会话内 /tasks 命令仍可查看。',
 }
@@ -928,7 +938,7 @@ export const en: Record<string, string> = {
 	registerSendToolsHint: `Registers the qq_send / qq_send_image / qq_recall tools on the agent. ${RESTART_EN}`,
 	tasksEnabledLabel: 'Enable scheduled tasks',
 	tasksEnabledHint:
-		'The agent can use task_schedule / task_list / task_cancel to book requests like "wake me up at 9 every day"; when due, the bot messages the chat proactively. Registering the tools needs a restart; the trigger hot-starts and stops.',
+		'The agent can use task_schedule / task_list / task_cancel to book requests like "wake me up at 9 every day". Each task is either a "direct push" (sent verbatim at fire time, no model, zero tokens) or an "agent run" (wakes the model when due). Registering the tools needs a restart; the trigger hot-starts and stops.',
 	taskMaxPerChatLabel: 'Per-chat task cap',
 	taskMaxPerChatHint:
 		'How many scheduled tasks one chat may hold (anti-spam). Tasks only ever message the chat that created them.',
@@ -970,6 +980,16 @@ export const en: Record<string, string> = {
 	taskChatPlaceholder: 'friend_10001 or group_123456',
 	taskPromptPlaceholder:
 		'What the agent should do when it fires (written to your future self, with enough context)',
+	taskPromptPlaceholderDirect: 'The message to send as-is, e.g. Day {daysSince:2020-09-15} since launch',
+	taskDeliveryLabel: 'On fire',
+	taskDeliveryDirect: 'Push directly (no model)',
+	taskDeliveryAgent: 'Run with agent (uses tokens)',
+	taskDeliveryDirectShort: 'Direct push',
+	taskDeliveryAgentShort: 'Agent',
+	taskDeliveryHintDirect:
+		'Sends the content verbatim without calling any model (zero tokens). Placeholders: {date} {time} {weekday} {daysSince:YYYY-MM-DD} (the start day counts as day 1).',
+	taskDeliveryHintAgent: 'Wakes the agent at fire time to execute the task and reply; uses tokens. Use it when the content needs live data or tools.',
+	taskTemplateInvalid: 'Invalid direct-push content: {detail}',
 	taskNotePlaceholder: 'Label (optional, e.g. wake-up call)',
 	'taskKind.once': 'Once',
 	'taskKind.daily': 'Daily',
@@ -992,7 +1012,7 @@ export const en: Record<string, string> = {
 	taskCancelNew: 'Cancel new task',
 	taskCancelEdit: 'Discard edits',
 	taskPanelHint:
-		'A task is bound to the chat that created it; when due, the bot sends the result there proactively. One-shot tasks pause themselves after firing. Fire points missed by more than 30 minutes of downtime are skipped (no stale reminders).',
+		'The task is bound to the chat that created it. Use "direct push" for fixed reminders/announcements (no model; supports {date} {time} {weekday} {daysSince:YYYY-MM-DD}) and "agent run" only when the content needs live data or tools. One-shot tasks pause after firing; fire points missed by more than 30 minutes are skipped.',
 	taskRpcUnavailable:
 		'The host lacks the connection service (old host / non-web profile), so the task list is unavailable; the in-chat /tasks command still works.',
 }
