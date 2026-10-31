@@ -192,6 +192,37 @@ dsh WebUI 的**设置**左列有独立的「qq-bot 配置」入口（需 dsh ≥
 - `accessToken` 与各 API Key 为**只写字段**（宿主脱敏、永不回显，留空保存 = 保持不变）
 - 「人格库」「人格与模型」「定时任务」三张卡片的数据走插件自建 RPC（编辑 `personas.json` / `chat-overrides.json` / `tasks.json`），保存后所有会话下一条消息即按新配置重建（历史保留）
 
+## 插件间组合（Cordis Service）
+
+本插件提供名为 **`dshQQBot`** 的宿主侧 Service，其他 dsh 插件可以复用同一条 QQ 连接，不必再维护 napcat / WebSocket：
+
+```ts
+export const inject = ['dshQQBot'];
+
+export function apply(ctx: Context) {
+  await ctx.dshQQBot.sendText({ chatType: 'group', groupId: '群号' }, '你好');
+  ctx.effect(() => ctx.dshQQBot.onMessage(async (message) => {
+    if (message.text !== '#我的命令') return false; // false = 交还主管线
+    await ctx.dshQQBot.sendText(
+      message.chatType === 'group'
+        ? { chatType: 'group', groupId: message.chatId }
+        : { chatType: 'private', userId: message.chatId },
+      '收到',
+    );
+    return true; // true = 已消费，不再进入 agent
+  }));
+}
+```
+
+- `sendText(target, text)` 返回 `{ messageId: number | null }`；`null` 表示对接端没有确认，调用方应视为失败。主动发送仍受本插件的渠道准入、白名单与黑名单约束。
+- `onMessage(handler)` 用于轻量 `#命令` 等扩展；处理器位于防环、去重、信息过滤与访问控制之后，**唤醒与 agent 之前**，所以群聊命令无需 @。只公开归一化文本，不公开内部会话桥或任意 OneBot action。
+- 公共类型从包入口导出（`DshQQBotService` / `QQServiceTarget` / `QQServiceMessage` / `QQMessageHandler`）；运行时消费者只需依赖 Cordis 服务名。
+
+实际组合示例：
+
+- [`dsh-deepseek-peak-reminder`](../dsh-deepseek-peak-reminder)：DeepSeek 峰谷时段提醒。
+- [`dsh-deepseek-status-monitor`](../dsh-deepseek-status-monitor)：订阅官方状态 RSS，推送 API 事件。
+
 ## 开发
 
 ```bash
@@ -210,6 +241,7 @@ npx vitest run src/pipeline/access.test.ts    # 跑单个测试文件
 ```
 src/
 ├── index.ts          # 插件入口（name/inject/Config/apply + WebUI settings 注册 + RPC 通道）
+├── service.ts        # 插件间组合面（dshQQBot Cordis Service：受准入约束的主动发送 + 轻量消息处理器）
 ├── config.ts         # schemastery 配置 schema
 ├── paths.ts          # 统一路径解析（唯一的路径设置 dataDir）+ 旧路径/数据文件迁移
 ├── configSync.ts     # WebUI 配置热应用（原地合并 + transport 重建判定）

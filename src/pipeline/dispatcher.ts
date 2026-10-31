@@ -22,6 +22,7 @@ import type { Logger } from '../types.ts';
 import type { PokeNotice } from '../onebot/events.ts';
 import type { MessageLogService } from '../logs/store.ts';
 import type { ScheduledTask, TaskStore } from '../tasks/store.ts';
+import type { DshQQBotService } from '../service.ts';
 
 export interface DispatcherDeps {
 	config: DshQQConfig;
@@ -42,6 +43,8 @@ export interface DispatcherDeps {
 	memory?: MemoryLike;
 	services: DshServices;
 	logs: MessageLogService;
+	/** 插件间组合服务：在唤醒判定前处理扩展插件注册的轻量命令。 */
+	qqService?: DshQQBotService;
 	/** 定时任务库（/tasks 命令用）。 */
 	tasks: TaskStore;
 	/** 立即触发一个定时任务（/tasks run 用；与调度器共用会话桥管线）。 */
@@ -246,6 +249,29 @@ export class Dispatcher {
 		// 发言），agent 被唤醒后可用 qq_read_history 回看"刚才在聊什么"。
 		// 位置在信息过滤之后是有意的：命中过滤前缀的消息连记录都不留。
 		this.deps.history.recordMessage(msg);
+		// 插件间组合：轻量 #命令 不要求唤醒机器人，也不经过 agent。处理器抛错
+		// 只记录日志并放行主管线，不能让一个扩展插件弄断 QQ 适配层。
+		// 位置在聊天记录之后、长期记忆之前：扩展命令属于“刚才群里在聊什么”，
+		// 但不是关于用户的事实，已消费的消息不该进记忆档案。
+		if (this.deps.qqService !== undefined) {
+			try {
+				const handled = await this.deps.qqService.dispatchMessage({
+					chatType: msg.chatType,
+					chatId: msg.chatId,
+					senderId: msg.senderId,
+					senderName: msg.senderName,
+					...(msg.messageId !== undefined ? { messageId: msg.messageId } : {}),
+					text: msg.plainText,
+					mentionMe: msg.mentionMe,
+					...(msg.replyMessageId !== undefined ? { replyMessageId: msg.replyMessageId } : {}),
+					time: msg.time,
+				});
+				if (handled) return;
+			} catch (error) {
+				logger.warn(`dsh-qq-bot: 扩展消息处理器异常，消息放行主管线：${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+
 		// 长期记忆的会话档案：同一位置、同一语义（过滤之后、准入之后）。
 		// 世代 id 取桥上记录的当前 sessionId（rotate/reset 后会变，交接靠它判断）。
 		this.recordMemory(msg);

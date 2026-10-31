@@ -46,6 +46,16 @@ import { SearchService } from './search/service.ts';
 import { MessageLogService } from './logs/store.ts';
 import { LOG_STREAM_PATH, createLogStreamResponse } from './logs/stream.ts';
 import { withActionLogging } from './logs/transportLog.ts';
+import { DshQQBotService } from './service.ts';
+
+export type {
+	DshQQBotServiceOptions,
+	QQMessageHandler,
+	QQSendTextResult,
+	QQServiceMessage,
+	QQServiceTarget,
+} from './service.ts';
+export { DshQQBotService } from './service.ts';
 
 /** 稳定插件名（与 cordis.patch.yml 的插入行 id 一致）。 */
 export const name = 'dsh-qq-bot';
@@ -269,11 +279,15 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 	}
 
 	const access = new AccessControl(config, admins);
+	// 插件间组合面：其他 dsh 插件 inject ['dshQQBot'] 后可复用同一条 QQ 连接。
+	// 只暴露受准入约束的主动文本发送与轻量消息处理器，不公开内部桥或原始 action。
+	const qqService = new DshQQBotService(ctx, { api, access, config });
 	const dispatcher = new Dispatcher({
 		config,
 		logger,
 		api,
 		manager,
+		qqService,
 		admins,
 		access,
 		store,

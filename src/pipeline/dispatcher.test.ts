@@ -65,7 +65,11 @@ function baseConfig(overrides: Partial<DshQQConfig> = {}): DshQQConfig {
 }
 
 /** 只关心"到没到 agent"的假会话桥。 */
-function harness(config: DshQQConfig, pending?: { accept: (text: string, msg: InboundMessage, woke: boolean) => boolean }) {
+function harness(
+	config: DshQQConfig,
+	pending?: { accept: (text: string, msg: InboundMessage, woke: boolean) => boolean },
+	qqService?: { dispatchMessage: (message: { text: string }) => boolean | Promise<boolean> },
+) {
 	const entries: MessageLogEntry[] = [];
 	const enqueued: string[] = [];
 	const sent: string[] = [];
@@ -117,6 +121,7 @@ function harness(config: DshQQConfig, pending?: { accept: (text: string, msg: In
 		memory: { ready: true, record: (event: { text: string }) => memories.push(event.text) } as never,
 		services: {} as never,
 		logs,
+		...(qqService === undefined ? {} : { qqService: qqService as never }),
 		tasks: {} as never,
 		runTask: () => {},
 		getSelfId: () => '10000',
@@ -153,6 +158,37 @@ function mentionEvent(text: string, messageId = 1) {
 		raw_message: `[CQ:at,qq=10000] ${text}`,
 	};
 }
+
+describe('Dispatcher 插件间消息组合', () => {
+	it('扩展处理器在唤醒前消费命令，群里不必 @ 也不会进 agent', async () => {
+		const app = harness(baseConfig({ groupMentionOnly: true }), undefined, {
+			dispatchMessage: async (message) => message.text === '#峰谷时段',
+		});
+		app.dispatcher.handle(messageEvent('#峰谷时段'));
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(app.enqueued).toHaveLength(0);
+		expect(app.recorded.map((msg) => msg.plainText)).toEqual(['#峰谷时段']);
+		// 查询命令是控制指令：进聊天记录，但不进长期记忆档案。
+		expect(app.memories).toEqual([]);
+	});
+
+	it('扩展处理器放行后仍走正常唤醒管线；异常不会弄断主管线', async () => {
+		const app = harness(baseConfig({ groupMentionOnly: false }), undefined, {
+			dispatchMessage: (message) => {
+				if (message.text === '#峰谷时段') throw new Error('测试异常');
+				return false;
+			},
+		});
+		app.dispatcher.handle(messageEvent('#峰谷时段'));
+		app.dispatcher.handle(messageEvent('普通消息', 'group', 2));
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(app.enqueued).toHaveLength(2);
+	});
+});
 
 describe('Dispatcher 长期记忆采集', () => {
 	it('已注册的命令不进记忆档案（控制指令不是对话内容）', async () => {
