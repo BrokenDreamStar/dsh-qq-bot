@@ -87,6 +87,34 @@ describe('memory RPC', () => {
 		if (after?.ok) expect((after.value as { items: unknown[] }).items).toHaveLength(0);
 	});
 
+	it('成员列表 → 画像 → 批准 → 删除', async () => {
+		if (memory === undefined) throw new Error('缺少 service');
+		memory.record({ chatKey: 'g-888', generation: 'g1', senderId: '123', senderName: '张三', text: '你好' });
+		memory.memorize({ chatKey: 'g-888', action: 'add', content: '偏好简洁', kind: 'preference', subjectId: '123', subjectName: '张三', self: true });
+		const list = await handleMemoryRpc('members/list', { chatKey: 'g-888' }, { memory, logger });
+		expect(list?.ok).toBe(true);
+		if (!list?.ok) return;
+		const members = (list.value as { members: Array<{ memberId: string; displayName: string; active: number }> }).members;
+		expect(members).toHaveLength(1);
+		expect(members[0]).toMatchObject({ memberId: '123', displayName: '张三', active: 1 });
+
+		const profile = await handleMemoryRpc('members/profile', { chatKey: 'g-888', memberId: '123' }, { memory, logger });
+		expect(profile?.ok).toBe(true);
+		if (profile?.ok) expect((profile.value as { profile: string }).profile).toContain('偏好简洁');
+
+		memory.memorize({ chatKey: 'g-888', action: 'add', content: '喜欢咖啡', kind: 'preference', subjectId: '123', subjectName: '张三', self: false, isAdmin: false });
+		const pendingList = await handleMemoryRpc('members/profile', { chatKey: 'g-888', memberId: '123' }, { memory, logger });
+		if (!pendingList?.ok) return;
+		const pending = (pendingList.value as { items: Array<{ id: number; status: string }> }).items.filter((item) => item.status === 'pending');
+		expect(pending).toHaveLength(1);
+		const approved = await handleMemoryRpc('members/approve', { chatKey: 'g-888', id: pending[0]!.id }, { memory, logger });
+		expect(approved?.ok).toBe(true);
+
+		const removed = await handleMemoryRpc('members/delete', { chatKey: 'g-888', memberId: '123' }, { memory, logger });
+		expect(removed?.ok).toBe(true);
+		if (removed?.ok) expect((removed.value as { removed: number }).removed).toBe(2);
+	});
+
 	it('缺 chatKey 时给出可操作错误；未知端点返回 undefined', async () => {
 		if (memory === undefined) throw new Error('缺少 service');
 		const bad = await handleMemoryRpc('memory/list', {}, { memory, logger });

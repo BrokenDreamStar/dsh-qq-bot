@@ -54,7 +54,10 @@
 #                  memoryRetentionDays / memoryMaxEventsPerChat（档案保留）、
 #                  memorySensitiveFilter / memoryCrossGroupUserProfile / memoryCandidateReview /
 #                  memoryFactTtlDays / memoryUserPreferenceTtlDays / memoryTombstoneDays /
-#                  memoryInjectLog（隐私与生命周期）。全部可在 WebUI「长期记忆」卡片里配；
+#                  memoryInjectLog（隐私与生命周期）、memoryMemberProfiles /
+#                  memoryMemberProfileMaxChars / memoryMemberAutoActive / memoryMemberMaxFacts
+#                  （群成员画像：自述生效、转述进候选、每人预算与条数上限）、
+#                  memoryDistillMaxNewFacts（单次蒸馏新增上限）。全部可在 WebUI「长期记忆」卡片里配；
 #                  记忆内容本身在「记忆库」卡片里查看/编辑/删除/测试召回
 #   searchEnabled  网页搜索工具（qq_web_search）总开关，默认 true；searchOrder 搜索顺序数组
 #                  （默认 [exa, tavily, dsh]，数组顺序 = 尝试顺序，移出的不参与）、

@@ -11,6 +11,7 @@
  */
 
 import { normalizeFactText, sanitizeMemoryText, scanForThreats, describeFindings } from './guard.ts';
+import { memberRefFor } from './member.ts';
 import { contentHash, stripQqNumbers } from './text.ts';
 import {
 	MAX_FACT_OBJECT_CHARS,
@@ -22,6 +23,8 @@ import {
 	type DistillOutcome,
 	type MemoryFact,
 	type MemoryKind,
+	type MemoryProvenance,
+	type MemoryStatus,
 } from './types.ts';
 
 /** 默认单次蒸馏允许的新增条数（配置项会覆盖）。 */
@@ -46,14 +49,21 @@ export const DISTILL_SYSTEM_PROMPT = [
 	'',
 	'# 输出格式',
 	'只输出一个 JSON 对象，不要解释、不要 markdown 围栏：',
-	'{"add":[{"content":"一句自然语言陈述","kind":"profile","importance":0.5,"confidence":0.9}],',
+	'{"add":[{"about":"m_ab12cd34ef","source_seq":123,"content":"一句自然语言陈述","kind":"profile","importance":0.5,"confidence":0.9}],',
 	' "update":[{"id":3,"content":"改写后的陈述"}],',
 	' "supersede":[{"id":7,"reason":"被哪条取代"}]}',
 	'- kind 只能是：profile（身份/称呼/长期偏好）/ preference（偏好/规矩）/ fact（一般事实）/ event（发生过的事）/ plan（进行中的计划）/ rule（明确规则）。',
+	'- 群级事实的 about 写 "group" 或直接省略；成员事实必须写 new_events 里的 ref，并带 source_seq。',
 	'- content 必须是一句自然语言陈述，不超过 240 字；不要包含 QQ 号、手机号、证件号、银行卡号。',
 	'- importance 是 0~1 的重要度（长期身份/规则 0.8+；一般事实 0.5；一次性事件 0.2）。',
 	'- 没有要改的就输出 {"add":[],"update":[],"supersede":[]}。',
 	'- 同一件事已存在时用 update 改写，不要重复 add；矛盾时用 supersede 标旧条目，不要覆盖。',
+	'',
+	'# 群成员画像（about / source_seq）',
+	'- 如果事实是关于**某一个群成员**的，必须带 `about`：值是该条消息里的 `ref`（m_ 开头），不能写昵称或 QQ 号；群级事实写 `"group"` 或省略。',
+	'- 成员事实还要带 `source_seq`：这条事实来自哪条消息的 seq。程序会用它判断是本人自述还是别人转述。',
+	'- 本人明确说"我是/我叫/我喜欢/记住我…"才是自述；A 说 B 的事属于转述，转述默认只进候选区，不会自动生效。',
+	'- 不要把 A 说的话记到 B 名下；不确定 `about` 是谁就省略（按群级记）或不要记。',
 ].join('\n');
 
 /**
@@ -65,6 +75,8 @@ export const DISTILL_SYSTEM_PROMPT = [
 export function buildDistillPayload(input: DistillInput): string {
 	const existing = input.existing.map((fact) => ({
 		id: fact.id,
+		subject: fact.subjectId !== null && fact.subjectId !== undefined ? memberRefFor(input.chatKey, fact.subjectId) : 'group',
+		subject_name: fact.subjectName ?? '',
 		content: stripQqNumbers(sanitizeMemoryText(fact.content ?? [fact.subject, fact.predicate, fact.object].filter((part) => part !== '').join(' '))),
 		kind: fact.kind ?? 'fact',
 		importance: fact.importance ?? 0.5,
@@ -73,6 +85,7 @@ export function buildDistillPayload(input: DistillInput): string {
 		seq: event.seq ?? 0,
 		time: formatEventTime(event.ts),
 		who: stripQqNumbers(event.senderName) || '群友',
+		ref: memberRefFor(input.chatKey, event.senderId),
 		...(event.self ? { self: true } : {}),
 		text: stripQqNumbers(sanitizeMemoryText(event.text)),
 	}));
@@ -140,11 +153,46 @@ export function parseDistillOutput(raw: string, input: DistillInput, watermark: 
 	const byContent = new Map<string, MemoryFact>();
 	const byId = new Map<number, MemoryFact>();
 	for (const fact of input.existing) {
-		byKey.set(`${sanitizeMemoryText(fact.subject)}\u0000${fact.predicate}`, fact);
+		if (fact.subjectId === null || fact.subjectId === undefined) {
+			byKey.set(`${sanitizeMemoryText(fact.subject)}\u0000${fact.predicate}`, fact);
+		}
 		const text = fact.content ?? [fact.subject, fact.predicate, fact.object].filter((part) => part !== '').join(' ');
-		byContent.set(contentHash(text), fact);
+		byContent.set(`${fact.subjectId ?? ''}\u0000${contentHash(text)}`, fact);
 		byId.set(fact.id, fact);
 	}
+
+	// ref ↔ 成员：优先用 memory_members 的当前昵称，事件与已有事实兜底。
+	const membersByRef = new Map<string, { memberId: string; name: string }>();
+	for (const member of input.members ?? []) {
+		membersByRef.set(member.memberRef, { memberId: member.memberId, name: member.displayName });
+	}
+	for (const event of input.events) {
+		const ref = memberRefFor(input.chatKey, event.senderId);
+		if (!membersByRef.has(ref)) {
+			membersByRef.set(ref, { memberId: event.senderId, name: event.senderName || '群友' });
+		}
+	}
+	for (const fact of input.existing) {
+		if (fact.subjectId === null || fact.subjectId === undefined) continue;
+		const ref = memberRefFor(input.chatKey, fact.subjectId);
+		if (!membersByRef.has(ref)) membersByRef.set(ref, { memberId: fact.subjectId, name: fact.subjectName || '群友' });
+	}
+	const membersByName = new Map<string, Array<{ ref: string; memberId: string; name: string }>>();
+	for (const [ref, member] of membersByRef) {
+		const list = membersByName.get(member.name) ?? [];
+		list.push({ ref, ...member });
+		membersByName.set(member.name, list);
+	}
+	const eventsBySeq = new Map<number, (typeof input.events)[number]>();
+	for (const event of input.events) {
+		if (typeof event.seq === 'number') eventsBySeq.set(event.seq, event);
+	}
+	const resolveMember = (about: string): { ref: string; memberId: string; name: string } | undefined => {
+		const byRef = membersByRef.get(about);
+		if (byRef !== undefined) return { ref: about, ...byRef };
+		const list = membersByName.get(about);
+		return list !== undefined && list.length === 1 ? list[0] : undefined;
+	};
 
 	const ops: DistillOp[] = [];
 	const maxNew = Math.max(0, Math.trunc(input.limits.maxNewFacts));
@@ -156,6 +204,34 @@ export function parseDistillOutput(raw: string, input: DistillInput, watermark: 
 		const entry = asRecord(item);
 		if (entry === undefined) continue;
 		const subject = normalizeFactText(stripQqNumbers(String(entry.subject ?? '')), MAX_FACT_SUBJECT_CHARS) ?? '';
+		const aboutRaw = typeof entry.about === 'string' ? entry.about.trim() : '';
+		let subjectId: string | null = null;
+		let subjectName = '';
+		let sourceMemberId: string | null = null;
+		let sourceSeq: number | null = null;
+		let provenance: MemoryProvenance | undefined;
+		let status: MemoryStatus | undefined;
+		if (aboutRaw !== '' && aboutRaw !== 'group') {
+			if (input.limits.memberProfiles === false) continue;
+			const target = resolveMember(aboutRaw);
+			// 模型给了无法识别的 about：宁可跳过，也不要把别人的事记成群级事实。
+			if (target === undefined) continue;
+			subjectId = target.memberId;
+			subjectName = target.name;
+			const seqRaw = Number(entry.source_seq);
+			const sourceEvent = Number.isInteger(seqRaw) ? eventsBySeq.get(seqRaw) : undefined;
+			if (sourceEvent !== undefined) {
+				sourceSeq = seqRaw;
+				sourceMemberId = sourceEvent.senderId;
+				const self = memberRefFor(input.chatKey, sourceEvent.senderId) === target.ref;
+				provenance = self ? 'owner' : 'untrusted';
+				status = self && input.limits.memberAutoActive !== false ? 'active' : 'pending';
+			} else {
+				// 没有可核对的来源：转述处理，进候选区等管理员确认。
+				provenance = 'untrusted';
+				status = 'pending';
+			}
+		}
 		const rawPredicate = typeof entry.predicate === 'string' ? entry.predicate.trim() : '';
 		const predicate = normalizePredicate(entry.predicate) ?? '';
 		// 显式给了 predicate 但不在白名单：按旧协议视为脏数据跳过（自由文本条目不带 predicate）。
@@ -173,7 +249,7 @@ export function parseDistillOutput(raw: string, input: DistillInput, watermark: 
 		if (!verdict.ok) {
 			return { ok: false, failure: { error: '新增条目命中威胁扫描', findings: describeFindings(verdict.findings) } };
 		}
-		const existing = byContent.get(contentHash(content)) ?? (subject !== '' && predicate !== '' ? byKey.get(`${subject}\u0000${predicate}`) : undefined);
+		const existing = byContent.get(`${subjectId ?? ''}\u0000${contentHash(content)}`) ?? (subjectId === null && subject !== '' && predicate !== '' ? byKey.get(`${subject}\u0000${predicate}`) : undefined);
 		if (existing !== undefined) {
 			// 模型最容易犯的错：重复 add。降级成 update，比整批丢弃更友好。
 			const before = existing.content ?? [existing.subject, existing.predicate, existing.object].filter((part) => part !== '').join(' ');
@@ -182,13 +258,18 @@ export function parseDistillOutput(raw: string, input: DistillInput, watermark: 
 		}
 		ops.push({
 			op: 'add',
-			subject,
-			predicate,
+			subject: subjectId === null ? subject : '',
+			predicate: subjectId === null ? predicate : '',
 			object,
 			content,
 			kind: normalizeKind(entry.kind),
 			importance: normalizeImportance(entry.importance),
 			confidence: normalizeConfidence(entry.confidence),
+			...(subjectId !== null ? { subjectId, subjectName } : {}),
+			...(sourceMemberId !== null ? { sourceMemberId } : {}),
+			...(sourceSeq !== null ? { sourceSeq } : {}),
+			...(provenance !== undefined ? { provenance } : {}),
+			...(status !== undefined ? { status } : {}),
 		});
 	}
 

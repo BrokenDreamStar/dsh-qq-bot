@@ -1,18 +1,22 @@
 /**
- * 人格库 / 人格与模型 / 模型清单的宿主 RPC 端点。
+ * 人格模板 / 会话人格（SOUL.md）/ 人格与模型 / 模型清单的宿主 RPC 端点。
  *
  * 数据不走 dsh settings 文档，而是插件的 dataDir 文件（personas.json /
- * chat-overrides.json）：整表替换、即时热应用（保存后所有会话桥丢弃
- * handle，下一条消息以新人格与模型重建，历史保留）。
+ * chat-overrides.json）与各会话目录的 SOUL.md：保存后所有会话桥丢弃
+ * handle，下一条消息以新人格与模型重建，历史保留。
  *
  * 返回 undefined 表示端点不属于本模块（调用方继续尝试其它端点）。
  */
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Logger } from '../types.ts';
 import type { LlmServiceLike } from '../dsh.ts';
 import { providerId } from '../dsh.ts';
 import { formatChatSelector, parseChatSelector } from './routes.ts';
 import { DEFAULT_MAPPING_KEY } from './store.ts';
 import type { ChatMapping, PersonaRecord, PersonaStore } from './store.ts';
+import { MAX_SOUL_CHARS, inspectSoul, soulPath, writeSoulText } from './soul.ts';
+import { sessionDirFor } from '../bridge/chat.ts';
 
 export type PersonaRpcResult = { ok: true; value: unknown } | { ok: false; error: { code: string; message: string } };
 
@@ -27,6 +31,8 @@ export interface ModelOption {
 
 export interface PersonaRpcDeps {
 	store: PersonaStore;
+	/** 会话目录根（`<dataDir>/sessions`），用于扫描 SOUL.md。 */
+	sessionsRoot: string;
 	/** 惰性取 ctx.llm 服务（可选服务，装载顺序不定，不能构造时快照）。 */
 	getLlm?: () => LlmServiceLike | undefined;
 	/** 部署默认模型（清单里补一项并置顶）。 */
@@ -159,9 +165,68 @@ function parseDefaultMapping(input: unknown): ChatMapping | null {
 	return row.persona === undefined && row.model === undefined ? null : row;
 }
 
+function defaultPersona(store: PersonaStore): PersonaRecord | undefined {
+	const records = store.records();
+	const name = store.defaultPersonaName();
+	return records.find((record) => record.name === name) ?? records[0];
+}
+
+interface SoulTarget {
+	chat: string;
+	key: string;
+	dir: string;
+}
+
+function soulTarget(deps: PersonaRpcDeps, payload: unknown): SoulTarget | { error: string } {
+	const body = asRecord(payload);
+	const chat = typeof body.chat === 'string' ? body.chat.trim() : '';
+	const selector = parseChatSelector(chat);
+	if (selector === null) return { error: 'chat 必须是 friend_QQ号 或 group_群号' };
+	return {
+		chat,
+		key: selector.key,
+		dir: sessionDirFor(deps.sessionsRoot, selector.scope, selector.chatId),
+	};
+}
+
+function listSouls(deps: PersonaRpcDeps): Array<Record<string, unknown>> {
+	let entries: Array<{ name: string; isDirectory: () => boolean }>;
+	try {
+		entries = readdirSync(deps.sessionsRoot, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	const souls: Array<Record<string, unknown>> = [];
+	for (const entry of entries) {
+		if (souls.length >= 200) break;
+		if (typeof entry.isDirectory === 'function' && !entry.isDirectory()) continue;
+		const match = /^(Friend|Group)_(\d+)$/.exec(entry.name);
+		if (match === null) continue;
+		const scope = match[1] === 'Friend' ? 'private' : 'group';
+		const chatId = match[2]!;
+		const key = scope === 'private' ? `u-${chatId}` : `g-${chatId}`;
+		const chat = scope === 'private' ? `friend_${chatId}` : `group_${chatId}`;
+		const dir = join(deps.sessionsRoot, entry.name);
+		const fallback = deps.store.resolve(key).prompt;
+		const info = inspectSoul(dir, fallback);
+		souls.push({
+			chat,
+			path: soulPath(dir),
+			exists: info.exists,
+			source: info.source,
+			chars: info.chars,
+			preview: info.text.slice(0, 80),
+			template: deps.store.resolve(key).name,
+		});
+	}
+	souls.sort((a, b) => String(a.chat).localeCompare(String(b.chat)));
+	return souls;
+}
+
 /**
  * 处理一个端点；不是本模块的端点返回 undefined。
- * 支持的端点：personas/list | personas/save | routes/list | routes/save | models/list。
+ * 支持的端点：personas/list | personas/save | souls/list | souls/read |
+ * souls/save | souls/apply | souls/reset | routes/list | routes/save | models/list。
  */
 export async function handlePersonaRpc(
 	endpoint: string,
@@ -204,6 +269,60 @@ export async function handlePersonaRpc(
 		}
 		if (endpoint === 'models/list') {
 			return ok({ models: await listModelOptions(deps) });
+		}
+		if (endpoint === 'souls/list') {
+			return ok({ souls: listSouls(deps) });
+		}
+		if (endpoint === 'souls/read') {
+			const target = soulTarget(deps, payload);
+			if ('error' in target) return fail('invalid', target.error);
+			const fallback = deps.store.resolve(target.key).prompt;
+			const info = inspectSoul(target.dir, fallback);
+			return ok({
+				chat: target.chat,
+				path: soulPath(target.dir),
+				content: info.text,
+				source: info.source,
+				exists: info.exists,
+				chars: info.chars,
+				error: info.error ?? null,
+				template: deps.store.resolve(target.key).name,
+			});
+		}
+		if (endpoint === 'souls/save') {
+			const target = soulTarget(deps, payload);
+			if ('error' in target) return fail('invalid', target.error);
+			const body = asRecord(payload);
+			const content = typeof body.content === 'string' ? body.content : '';
+			if ([...content].length > MAX_SOUL_CHARS) return fail('invalid', `SOUL.md 不能超过 ${MAX_SOUL_CHARS} 字`);
+			const written = writeSoulText(target.dir, content);
+			if (!written.ok) return fail('internal', written.error);
+			await deps.refreshBridges();
+			return ok({ chat: target.chat, path: written.path, content, source: 'file', exists: true, chars: [...content].length });
+		}
+		if (endpoint === 'souls/reset') {
+			const target = soulTarget(deps, payload);
+			if ('error' in target) return fail('invalid', target.error);
+			const fallback = defaultPersona(deps.store);
+			if (fallback === undefined) return fail('invalid', '人格库为空，无法恢复默认');
+			const written = writeSoulText(target.dir, fallback.prompt);
+			if (!written.ok) return fail('internal', written.error);
+			await deps.refreshBridges();
+			return ok({ chat: target.chat, path: written.path, content: fallback.prompt, source: 'file', exists: true, chars: [...fallback.prompt].length, template: fallback.name });
+		}
+		if (endpoint === 'souls/apply') {
+			const target = soulTarget(deps, payload);
+			if ('error' in target) return fail('invalid', target.error);
+			const body = asRecord(payload);
+			const name = nonEmptyString(body.persona);
+			if (name === undefined) return fail('invalid', '缺少 persona');
+			const record = deps.store.records().find((entry) => entry.name === name);
+			if (record === undefined) return fail('not-found', `没有模板「${name}」`);
+			if ([...record.prompt].length > MAX_SOUL_CHARS) return fail('invalid', `模板「${name}」超过 ${MAX_SOUL_CHARS} 字`);
+			const written = writeSoulText(target.dir, record.prompt);
+			if (!written.ok) return fail('internal', written.error);
+			await deps.refreshBridges();
+			return ok({ chat: target.chat, path: written.path, content: record.prompt, source: 'file', exists: true, chars: [...record.prompt].length, template: record.name });
 		}
 		return undefined;
 	} catch (error) {

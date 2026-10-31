@@ -10,8 +10,10 @@
  *  - `memory_events` + `memory_events_fts`（FTS5，触发器同步）：会话档案正文镜像。
  *    正文在插件侧有界保留（保留期 / 每会话条数上限），因为 dsh 没有"读历史会话日志"
  *    的公开 API（SessionStore 只有 live 会话），所以检索必须依赖这份镜像。
- *  - `memory_facts`：卡片条目。`(chat_key, subject, predicate)` 唯一索引 ——
- *    同主体同关系的新事实**取代**旧的（而不是并存），矛盾消解不需要额外 LLM 调用。
+ *  - `memory_facts`：记忆条目（追加 + 失效，不按 subject/predicate 覆盖）。
+ *    `subject_id` 非空 = 某个群成员的画像；NULL = 群级事实/规则。
+ *    `source_member_id/source_seq` 保留“谁说的、来自哪条消息”，用于区分自述与转述。
+ *  - `memory_members`：群成员身份表（匿名 member_ref ↔ QQ 号 ↔ 最新昵称）。
  *  - `memory_meta`：水位线（`watermark:<chatKey>`）与世代标记（`session:<chatKey>`）。
  *
  * 所有写操作都在事务里，失败只记日志、绝不抛给消息主链路（记忆不是关键路径）。
@@ -22,6 +24,7 @@ import { dirname } from 'node:path';
 import type { Logger } from '../types.ts';
 import { normalizeFactText, sanitizeMemoryText, scanForThreats, scanSensitive, describeFindings } from './guard.ts';
 import { contentHash, segmentText, stripQqNumbers, MAX_ITEM_CONTENT_CHARS } from './text.ts';
+import { memberDisplayName, memberRefFor } from './member.ts';
 import {
 	MAX_EVENT_CHARS,
 	MAX_FACT_SUBJECT_CHARS,
@@ -31,6 +34,7 @@ import {
 	type MemoryEvent,
 	type MemoryFact,
 	type MemoryKind,
+	type MemoryMember,
 	type MemoryProvenance,
 	type MemoryStats,
 	type MemoryStatus,
@@ -113,6 +117,15 @@ interface PreparedFact {
 	expiresAt: number | null;
 	status: MemoryStatus;
 	pinned: boolean;
+	subjectId: string | null;
+	subjectName: string;
+	sourceMemberId: string | null;
+	sourceSeq: number | null;
+}
+
+/** 事实的去重/tombstone 键：成员事实带上 subject，避免两个人同文互相去重。 */
+export function factContentHash(subjectId: string | null | undefined, content: string): string {
+	return contentHash(subjectId !== null && subjectId !== undefined && subjectId !== '' ? `${subjectId}\u0000${content}` : content);
 }
 
 function validKind(value: unknown): MemoryKind {
@@ -157,6 +170,11 @@ function prepareFact(input: {
 	expiresAt?: number | null;
 	status?: MemoryStatus;
 	pinned?: boolean;
+	/** 成员画像主体（QQ 号，内部；null = 群级）。 */
+	subjectId?: string | null;
+	subjectName?: string;
+	sourceMemberId?: string | null;
+	sourceSeq?: number | null;
 }, ttl?: { fact?: number; preference?: number }, sensitiveFilter = true): { fact: PreparedFact } | { error: string } {
 	const rawContent =
 		input.content !== undefined && input.content.trim() !== ''
@@ -170,13 +188,15 @@ function prepareFact(input: {
 	if (!sensitive.ok) return { error: `内容命中敏感信息过滤（${sensitive.findings.join(', ')}），默认不写入长期记忆` };
 	const kind = validKind(input.kind);
 	const now = Date.now();
+	const subjectId = input.subjectId !== null && input.subjectId !== undefined && input.subjectId !== '' ? input.subjectId : null;
+	const subjectName = subjectId === null ? '' : memberDisplayName(input.subjectName, '群友');
 	return {
 		fact: {
 			subject: normalizeFactText(stripQqNumbers(input.subject ?? ''), MAX_FACT_SUBJECT_CHARS) ?? '',
 			predicate: normalizePredicate(input.predicate ?? '') ?? '',
 			object: normalizeFactText(stripQqNumbers(input.object ?? content), MAX_ITEM_CONTENT_CHARS) ?? content,
 			content,
-			contentHash: contentHash(content),
+			contentHash: factContentHash(subjectId, content),
 			kind,
 			provenance: validProvenance(input.provenance),
 			importance: clamp01(input.importance ?? 0.5),
@@ -188,6 +208,10 @@ function prepareFact(input: {
 			expiresAt: input.expiresAt !== undefined ? input.expiresAt : defaultExpiry(kind, now, ttl),
 			status: validStatus(input.status ?? 'active'),
 			pinned: input.pinned === true,
+			subjectId,
+			subjectName,
+			sourceMemberId: input.sourceMemberId ?? null,
+			sourceSeq: input.sourceSeq !== null && input.sourceSeq !== undefined ? Math.trunc(input.sourceSeq) : null,
 		},
 	};
 }
@@ -265,9 +289,23 @@ export async function openMemoryDatabase(options: MemoryStoreOptions): Promise<O
 				access_count INTEGER NOT NULL DEFAULT 0,
 				last_access_at INTEGER NOT NULL DEFAULT 0,
 				pinned INTEGER NOT NULL DEFAULT 0,
-				superseded_by INTEGER
+				superseded_by INTEGER,
+				subject_id TEXT,
+				subject_name TEXT,
+				source_member_id TEXT,
+				source_seq INTEGER
 			);
 			CREATE INDEX IF NOT EXISTS memory_facts_time ON memory_facts(chat_key, updated_at);
+			CREATE TABLE IF NOT EXISTS memory_members (
+				chat_key TEXT NOT NULL,
+				member_ref TEXT NOT NULL,
+				member_id TEXT NOT NULL,
+				display_name TEXT NOT NULL,
+				first_seen INTEGER NOT NULL,
+				last_seen INTEGER NOT NULL,
+				PRIMARY KEY (chat_key, member_ref)
+			);
+			CREATE INDEX IF NOT EXISTS memory_members_id ON memory_members(chat_key, member_id);
 			CREATE TABLE IF NOT EXISTS memory_meta (
 				key TEXT PRIMARY KEY,
 				value TEXT NOT NULL
@@ -310,9 +348,18 @@ export async function openMemoryDatabase(options: MemoryStoreOptions): Promise<O
 		for (const [name, type] of factAdditions) {
 			if (!factColumns.includes(name)) db.exec(`ALTER TABLE memory_facts ADD COLUMN ${name} ${type}`);
 		}
+		// 本插件自用、不做记忆库迁移：旧库缺少成员列时明确失败，让用户删库重建。
+		const requiredMemberColumns = ['subject_id', 'subject_name', 'source_member_id', 'source_seq'];
+		const missingMemberColumns = requiredMemberColumns.filter((name) => !factColumns.includes(name));
+		if (missingMemberColumns.length > 0) {
+			throw new Error(
+				`记忆库 schema 过旧（缺少 ${missingMemberColumns.join(', ')}）。本插件不做迁移，请删除 ${options.filePath} 后重启 dsh。`,
+			);
+		}
 		// 旧的唯一键必须去掉：同一个人的第二条偏好不应该覆盖第一条。
 		db.exec('DROP INDEX IF EXISTS memory_facts_key');
 		db.exec('CREATE INDEX IF NOT EXISTS memory_facts_scope ON memory_facts(chat_key, status)');
+		db.exec('CREATE INDEX IF NOT EXISTS memory_facts_member ON memory_facts(chat_key, subject_id, status)');
 
 		// 旧行补 content / 分词列 / hash。
 		db.exec(
@@ -406,7 +453,7 @@ export async function openMemoryDatabase(options: MemoryStoreOptions): Promise<O
 			// 打不开就已经失败，关闭失败无所谓。
 		}
 		const message = error instanceof Error ? error.message : String(error);
-		return { ok: false, reason: `初始化记忆表失败（FTS5 不可用？）：${message}` };
+		return { ok: false, reason: `初始化记忆表失败：${message}` };
 	}
 	const store = new MemoryStore(db, options);
 	store.prune();
@@ -498,8 +545,14 @@ export class MemoryStore {
 	 * @param match - `buildMatchExpression()` 产出的 MATCH 表达式（已清洗，可安全拼接）。
 	 * @returns 命中事件 + BM25 原始分（SQLite 给负数，越小越相关）。
 	 */
-	searchEvents(chatKey: string, match: string, limit: number): Array<{ event: MemoryEvent; bm25: number }> {
+	searchEvents(
+		chatKey: string,
+		match: string,
+		limit: number,
+		senderId?: string,
+	): Array<{ event: MemoryEvent; bm25: number }> {
 		try {
+			const sender = senderId !== undefined && senderId !== '' ? senderId : null;
 			const rows = this.db
 				.prepare(
 					`SELECT e.seq, e.chat_key, e.generation, e.ts, e.sender_id, e.sender_name, e.self, e.kind, e.text, e.msg_id,
@@ -507,10 +560,11 @@ export class MemoryStore {
 					 FROM memory_events_fts
 					 JOIN memory_events e ON e.seq = memory_events_fts.rowid
 					 WHERE memory_events_fts MATCH ? AND e.chat_key = ?
+					   AND (? IS NULL OR e.sender_id = ?)
 					 ORDER BY score
 					 LIMIT ?`,
 				)
-				.all(match, chatKey, Math.max(1, Math.trunc(limit))) as Array<Record<string, unknown>>;
+				.all(match, chatKey, sender, sender, Math.max(1, Math.trunc(limit))) as Array<Record<string, unknown>>;
 			return rows.map((row) => ({
 				event: rowToEvent(row),
 				bm25: Number(row.score ?? 0),
@@ -526,18 +580,25 @@ export class MemoryStore {
 	 *
 	 * @returns 命中的条目 + BM25 原始分；只返回 active 条目。
 	 */
-	searchItems(chatKey: string, match: string, limit: number): Array<{ fact: MemoryFact; bm25: number }> {
+	searchItems(
+		chatKey: string,
+		match: string,
+		limit: number,
+		subjectId?: string,
+	): Array<{ fact: MemoryFact; bm25: number }> {
 		try {
+			const subject = subjectId !== undefined && subjectId !== '' ? subjectId : null;
 			const rows = this.db
 				.prepare(
 					`SELECT f.*, bm25(memory_facts_fts) AS score
 					 FROM memory_facts_fts
 					 JOIN memory_facts f ON f.id = memory_facts_fts.rowid
 					 WHERE memory_facts_fts MATCH ? AND f.chat_key = ? AND f.status = 'active'
+					   AND (? IS NULL OR f.subject_id = ? OR f.subject_id IS NULL)
 					 ORDER BY score
 					 LIMIT ?`,
 				)
-				.all(match, chatKey, Math.max(1, Math.trunc(limit))) as Array<Record<string, unknown>>;
+				.all(match, chatKey, subject, subject, Math.max(1, Math.trunc(limit))) as Array<Record<string, unknown>>;
 			return rows.map((row) => ({
 				fact: rowToFact(row),
 				bm25: Number(row.score ?? 0),
@@ -549,7 +610,10 @@ export class MemoryStore {
 	}
 
 	/** 列某会话的记忆条目（WebUI / `/memory list` 用；query 走 LIKE，不追求语义）。 */
-	listItems(chatKey: string, options: { query?: string; status?: MemoryStatus | 'all'; limit?: number } = {}): MemoryFact[] {
+	listItems(
+		chatKey: string,
+		options: { query?: string; status?: MemoryStatus | 'all'; limit?: number; subjectId?: string | null } = {},
+	): MemoryFact[] {
 		try {
 			const status = options.status ?? 'active';
 			const limit = Math.max(1, Math.min(500, Math.trunc(options.limit ?? 100)));
@@ -563,6 +627,14 @@ export class MemoryStore {
 			if (query !== undefined && query !== '') {
 				sql += ' AND content LIKE ?';
 				params.push(`%${query}%`);
+			}
+			if (options.subjectId !== undefined) {
+				if (options.subjectId === null) {
+					sql += ' AND subject_id IS NULL';
+				} else {
+					sql += ' AND subject_id = ?';
+					params.push(options.subjectId);
+				}
 			}
 			sql += ' ORDER BY pinned DESC, updated_at DESC, id DESC LIMIT ?';
 			params.push(limit);
@@ -730,6 +802,102 @@ export class MemoryStore {
 		}
 	}
 
+	/** 只取群级事实（成员画像不参与 system prompt 的群卡片）。 */
+	groupFacts(chatKey: string): MemoryFact[] {
+		return this.facts(chatKey).filter((fact) => fact.subjectId === null || fact.subjectId === undefined);
+	}
+
+	/** 某个成员的画像条目（含 pending；调用方按 status 过滤）。 */
+	memberFacts(chatKey: string, memberId: string): MemoryFact[] {
+		try {
+			const rows = this.db
+				.prepare('SELECT * FROM memory_facts WHERE chat_key = ? AND subject_id = ? ORDER BY id')
+				.all(chatKey, memberId) as Array<Record<string, unknown>>;
+			return rows.map(rowToFact);
+		} catch (error) {
+			this.logger.warn(`dsh-qq-bot: 读取成员画像失败: ${error instanceof Error ? error.message : String(error)}`);
+			return [];
+		}
+	}
+
+	/** 记录/更新一个群成员（昵称以最新一次非空发言为准；不覆盖成空）。 */
+	upsertMember(chatKey: string, memberId: string, displayName: string, at = Date.now()): MemoryMember | undefined {
+		const id = memberId.trim();
+		if (id === '') return undefined;
+		const ref = memberRefFor(chatKey, id);
+		const rawName = displayName.trim();
+		const name = rawName === '' ? '' : memberDisplayName(rawName, '群友');
+		const ts = Math.trunc(at);
+		const changed = this.tx('upsertMember', () => {
+			const existing = this.db
+				.prepare('SELECT first_seen, last_seen, display_name FROM memory_members WHERE chat_key = ? AND member_ref = ?')
+				.get(chatKey, ref) as { first_seen?: unknown; last_seen?: unknown; display_name?: unknown } | undefined;
+			if (existing === undefined) {
+				this.db
+					.prepare(
+						`INSERT INTO memory_members (chat_key, member_ref, member_id, display_name, first_seen, last_seen)
+						 VALUES (?, ?, ?, ?, ?, ?)`,
+					)
+					.run(chatKey, ref, id, name === '' ? '群友' : name, ts, ts);
+			} else {
+				const firstSeen = Number(existing.first_seen ?? ts);
+				const lastSeen = Math.max(Number(existing.last_seen ?? firstSeen), ts);
+				const nextName = name === '' ? String(existing.display_name ?? '群友') : name;
+				this.db
+					.prepare(
+						`UPDATE memory_members SET member_id = ?, display_name = ?, first_seen = ?, last_seen = ?
+						 WHERE chat_key = ? AND member_ref = ?`,
+					)
+					.run(id, nextName, Math.min(firstSeen, ts), lastSeen, chatKey, ref);
+			}
+			return true;
+		});
+		if (changed !== true) return undefined;
+		const stored = this.member(chatKey, id);
+		return stored ?? { chatKey, memberRef: ref, memberId: id, displayName: name === '' ? '群友' : name, firstSeen: ts, lastSeen: ts };
+	}
+
+	/** 群成员列表（按最近发言排序）。 */
+	members(chatKey: string): MemoryMember[] {
+		try {
+			const rows = this.db
+				.prepare('SELECT * FROM memory_members WHERE chat_key = ? ORDER BY last_seen DESC, display_name ASC')
+				.all(chatKey) as Array<Record<string, unknown>>;
+			return rows.map(rowToMember);
+		} catch (error) {
+			this.logger.warn(`dsh-qq-bot: 读取群成员失败: ${error instanceof Error ? error.message : String(error)}`);
+			return [];
+		}
+	}
+
+	/** 按内部 QQ 号找成员。 */
+	member(chatKey: string, memberId: string): MemoryMember | undefined {
+		try {
+			const row = this.db
+				.prepare('SELECT * FROM memory_members WHERE chat_key = ? AND member_id = ? LIMIT 1')
+				.get(chatKey, memberId);
+			return row === undefined ? undefined : rowToMember(row as Record<string, unknown>);
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** 删除成员身份行（“忘掉我”后不再出现在列表里；再次发言会重新建立）。 */
+	deleteMember(chatKey: string, memberId: string): boolean {
+		const changed = this.tx('deleteMember', () => {
+			const result = this.db.prepare('DELETE FROM memory_members WHERE chat_key = ? AND member_id = ?').run(chatKey, memberId);
+			return Number(result.changes);
+		});
+		return (changed ?? 0) > 0;
+	}
+
+	/** 按昵称找成员（重名时返回多个，由调用方决定是否要求更精确的称呼）。 */
+	membersByName(chatKey: string, name: string): MemoryMember[] {
+		const wanted = name.trim();
+		if (wanted === '') return [];
+		return this.members(chatKey).filter((member) => member.displayName === wanted);
+	}
+
 	/** 该会话事实条数与事件条数（统计用）。 */
 	chatStats(chatKey: string): { facts: number; events: number } {
 		try {
@@ -782,10 +950,14 @@ export class MemoryStore {
 		status?: MemoryStatus;
 		pinned?: boolean;
 		actor?: string;
+		subjectId?: string | null;
+		subjectName?: string;
+		sourceMemberId?: string | null;
+		sourceSeq?: number | null;
 	}): { id: number } | { error: string } {
 		const prepared = prepareFact(input, { fact: this.options.factTtlDays, preference: this.options.userPreferenceTtlDays }, this.options.sensitiveFilter !== false);
 		if ('error' in prepared) return prepared;
-		if (this.isTombstoned(input.chatKey, prepared.fact.content)) {
+		if (this.isTombstoned(input.chatKey, prepared.fact.content, input.subjectId)) {
 			return { error: '该内容已被用户删除（tombstone），不再写入长期记忆' };
 		}
 		const now = Date.now();
@@ -804,9 +976,10 @@ export class MemoryStore {
 		const now = Date.now();
 		const changed = this.tx('updateFact', () => {
 			const before = this.db
-				.prepare("SELECT content FROM memory_facts WHERE id = ? AND chat_key = ? AND status IN ('active','pending')")
-				.get(id, chatKey) as { content?: unknown } | undefined;
+				.prepare("SELECT content, subject_id FROM memory_facts WHERE id = ? AND chat_key = ? AND status IN ('active','pending')")
+				.get(id, chatKey) as { content?: unknown; subject_id?: unknown } | undefined;
 			if (before === undefined) return 0;
+			const subjectId = typeof before.subject_id === 'string' && before.subject_id !== '' ? before.subject_id : null;
 			const result = this.db
 				.prepare(
 					`UPDATE memory_facts
@@ -814,7 +987,7 @@ export class MemoryStore {
 					     status = 'active'
 					 WHERE id = ? AND chat_key = ? AND status IN ('active','pending')`,
 				)
-				.run(normalized, normalized, segmentText(normalized), contentHash(normalized), now, now, id, chatKey);
+				.run(normalized, normalized, segmentText(normalized), factContentHash(subjectId, normalized), now, now, id, chatKey);
 			if (Number(result.changes) > 0) {
 				this.audit(chatKey, id, 'update', 'agent', String(before.content ?? ''), normalized, now);
 			}
@@ -846,6 +1019,10 @@ export class MemoryStore {
 			if (input.status !== undefined) {
 				sets.push('status = ?');
 				params.push(validStatus(input.status));
+				if (input.status === 'active') {
+					sets.push('confirmed_at = ?');
+					params.push(now);
+				}
 			}
 			params.push(id, chatKey);
 			const result = this.db
@@ -882,8 +1059,8 @@ export class MemoryStore {
 		const now = Date.now();
 		const removed = this.tx('deleteFact', () => {
 			const row = this.db
-				.prepare('SELECT content, content_hash FROM memory_facts WHERE id = ? AND chat_key = ?')
-				.get(id, chatKey) as { content?: unknown; content_hash?: unknown } | undefined;
+				.prepare('SELECT content, content_hash, subject_id FROM memory_facts WHERE id = ? AND chat_key = ?')
+				.get(id, chatKey) as { content?: unknown; content_hash?: unknown; subject_id?: unknown } | undefined;
 			if (row === undefined) return false;
 			const result = this.db
 				.prepare(
@@ -893,7 +1070,8 @@ export class MemoryStore {
 				)
 				.run(now, now, id, chatKey);
 			if (Number(result.changes) === 0) return false;
-			const hash = String(row.content_hash ?? '') || contentHash(String(row.content ?? ''));
+			const subjectId = typeof row.subject_id === 'string' && row.subject_id !== '' ? row.subject_id : null;
+			const hash = String(row.content_hash ?? '') || factContentHash(subjectId, String(row.content ?? ''));
 			this.db
 				.prepare(
 					`INSERT INTO memory_tombstones (content_hash, scope, deleted_at, deleted_by)
@@ -909,9 +1087,9 @@ export class MemoryStore {
 	}
 
 	/** 某内容是否已被删除（抽取时先查 tombstone）。 */
-	isTombstoned(chatKey: string, content: string): boolean {
+	isTombstoned(chatKey: string, content: string, subjectId?: string | null): boolean {
 		try {
-			const hash = contentHash(content);
+			const hash = factContentHash(subjectId, content);
 			const row = this.db
 				.prepare('SELECT 1 AS hit FROM memory_tombstones WHERE content_hash = ? AND (scope = ? OR scope = ?) LIMIT 1')
 				.get(hash, chatKey, '') as { hit?: unknown } | undefined;
@@ -966,23 +1144,32 @@ export class MemoryStore {
 						confidence: op.confidence,
 						importance: op.importance,
 						...(op.status !== undefined ? { status: op.status } : {}),
+						...(op.provenance !== undefined ? { provenance: op.provenance } : {}),
+						...(op.subjectId !== undefined ? { subjectId: op.subjectId } : {}),
+						...(op.subjectName !== undefined ? { subjectName: op.subjectName } : {}),
+						...(op.sourceMemberId !== undefined ? { sourceMemberId: op.sourceMemberId } : {}),
+						...(op.sourceSeq !== undefined ? { sourceSeq: op.sourceSeq } : {}),
 						sourceTo,
 					}, { fact: this.options.factTtlDays, preference: this.options.userPreferenceTtlDays }, this.options.sensitiveFilter !== false);
 					if ('error' in prepared) continue;
-					if (this.isTombstoned(chatKey, prepared.fact.content)) continue;
+					if (this.isTombstoned(chatKey, prepared.fact.content, prepared.fact.subjectId)) continue;
 					this.insertFactRow(chatKey, prepared.fact, now, 'agent');
 					continue;
 				}
 				if (op.op === 'update') {
 					const content = normalizeFactText(stripQqNumbers(op.content ?? op.object), MAX_ITEM_CONTENT_CHARS);
 					if (content === undefined) continue;
+					const target = this.db
+						.prepare('SELECT subject_id FROM memory_facts WHERE id = ? AND chat_key = ?')
+						.get(op.id, chatKey) as { subject_id?: unknown } | undefined;
+					const subjectId = typeof target?.subject_id === 'string' && target.subject_id !== '' ? target.subject_id : null;
 					this.db
 						.prepare(
 							`UPDATE memory_facts
 							 SET object = ?, content = ?, content_seg = ?, content_hash = ?, updated_at = ?, confirmed_at = ?, source_to = ?
 							 WHERE id = ? AND chat_key = ? AND status = 'active'`,
 						)
-						.run(content, content, segmentText(content), contentHash(content), now, now, Math.trunc(sourceTo), op.id, chatKey);
+						.run(content, content, segmentText(content), factContentHash(subjectId, content), now, now, Math.trunc(sourceTo), op.id, chatKey);
 					continue;
 				}
 				this.db
@@ -1004,19 +1191,20 @@ export class MemoryStore {
 	private insertFactRow(chatKey: string, fact: PreparedFact, now: number, actor: string): number {
 		const existing = this.db
 			.prepare(
-				`SELECT id FROM memory_facts
-				 WHERE chat_key = ? AND content_hash = ? AND status = 'active'
+				`SELECT id, status FROM memory_facts
+				 WHERE chat_key = ? AND content_hash = ? AND status IN ('active','pending')
 				 LIMIT 1`,
 			)
-			.get(chatKey, fact.contentHash) as { id?: unknown } | undefined;
+			.get(chatKey, fact.contentHash) as { id?: unknown; status?: unknown } | undefined;
 		if (existing !== undefined && typeof existing.id === 'number') {
+			const nextStatus = fact.status === 'active' ? 'active' : String(existing.status ?? 'pending');
 			this.db
 				.prepare(
 					`UPDATE memory_facts
-					 SET confidence = ?, importance = ?, updated_at = ?, confirmed_at = ?, source_to = ?
+					 SET confidence = ?, importance = ?, updated_at = ?, confirmed_at = ?, source_to = ?, status = ?
 					 WHERE id = ?`,
 				)
-				.run(fact.confidence, fact.importance, now, fact.provenance === 'untrusted' ? null : now, fact.sourceTo, existing.id);
+				.run(fact.confidence, fact.importance, now, fact.provenance === 'untrusted' ? null : now, fact.sourceTo, nextStatus, existing.id);
 			return existing.id;
 		}
 		const result = this.db
@@ -1025,8 +1213,9 @@ export class MemoryStore {
 				 (chat_key, subject, predicate, object, content, content_seg, content_hash,
 				  kind, provenance, importance, confidence, source_from, source_to,
 				  created_at, updated_at, valid_from, valid_to, expires_at, confirmed_at,
-				  status, access_count, last_access_at, pinned, superseded_by)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, NULL)`,
+				  status, access_count, last_access_at, pinned, superseded_by,
+				  subject_id, subject_name, source_member_id, source_seq)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, NULL, ?, ?, ?, ?)`,
 			)
 			.run(
 				chatKey,
@@ -1050,6 +1239,10 @@ export class MemoryStore {
 				fact.provenance === 'untrusted' ? null : now,
 				fact.status,
 				fact.pinned ? 1 : 0,
+				fact.subjectId,
+				fact.subjectName,
+				fact.sourceMemberId,
+				fact.sourceSeq,
 			);
 		const id = Number(result.lastInsertRowid);
 		this.audit(chatKey, id, 'add', actor, null, fact.content, now);
@@ -1067,16 +1260,45 @@ export class MemoryStore {
 		}
 	}
 
+	/** 单个成员画像的条数上限（防止一个活跃成员吃满整库预算）。 */
+	enforceMemberFactLimit(chatKey: string, subjectId: string, maxFacts: number): number {
+		const limit = Math.max(1, Math.trunc(maxFacts));
+		return (
+			this.tx('enforceMemberFactLimit', () => {
+				const ranked = this.db
+					.prepare(
+						`SELECT id FROM memory_facts
+						 WHERE chat_key = ? AND subject_id = ? AND status IN ('active','pending')
+						 ORDER BY pinned ASC, status DESC, importance ASC, confidence ASC, updated_at ASC, id ASC`,
+					)
+					.all(chatKey, subjectId) as Array<{ id?: unknown }>;
+				if (ranked.length <= limit) return 0;
+				const statement = this.db.prepare(
+					`UPDATE memory_facts SET status = 'superseded', superseded_by = 0, valid_to = COALESCE(valid_to, ?), updated_at = ? WHERE id = ?`,
+				);
+				const now = Date.now();
+				let count = 0;
+				for (const row of ranked.slice(0, ranked.length - limit)) {
+					if (typeof row.id !== 'number') continue;
+					statement.run(now, now, row.id);
+					count += 1;
+				}
+				return count;
+			}) ?? 0
+		);
+	}
+
 	/** 超出条数上限时按「非置顶 → 低重要度 → 低置信 → 最久未更新」淘汰（软删除）。 */
-	enforceFactLimit(chatKey: string, maxFacts: number): number {
+	enforceFactLimit(chatKey: string, maxFacts: number, options: { groupOnly?: boolean } = {}): number {
 		const limit = Math.max(1, Math.trunc(maxFacts));
 		return (
 			this.tx('enforceFactLimit', () => {
 				// 按淘汰优先级从"最该淘汰"到"最该保留"排序，删掉前面多余的。
+				// groupOnly = 只按群级事实计数，避免群卡片上限把成员画像挤掉。
 				const ranked = this.db
 					.prepare(
 						`SELECT id FROM memory_facts
-						 WHERE chat_key = ? AND status = 'active'
+						 WHERE chat_key = ? AND status = 'active'${options.groupOnly === true ? ' AND subject_id IS NULL' : ''}
 						 ORDER BY pinned ASC, importance ASC, confidence ASC, updated_at ASC, id ASC`,
 					)
 					.all(chatKey) as Array<{ id?: unknown }>;
@@ -1216,6 +1438,21 @@ function rowToFact(row: Record<string, unknown>): MemoryFact {
 		lastAccessAt: Number(row.last_access_at ?? 0),
 		pinned: Number(row.pinned ?? 0) === 1,
 		supersededBy: supersededBy === null || supersededBy === undefined ? null : Number(supersededBy),
+		subjectId: typeof row.subject_id === 'string' && row.subject_id !== '' ? row.subject_id : null,
+		subjectName: String(row.subject_name ?? ''),
+		sourceMemberId: typeof row.source_member_id === 'string' && row.source_member_id !== '' ? row.source_member_id : null,
+		sourceSeq: nullableNumber(row.source_seq),
+	};
+}
+
+function rowToMember(row: Record<string, unknown>): MemoryMember {
+	return {
+		chatKey: String(row.chat_key ?? ''),
+		memberRef: String(row.member_ref ?? ''),
+		memberId: String(row.member_id ?? ''),
+		displayName: String(row.display_name ?? ''),
+		firstSeen: Number(row.first_seen ?? 0),
+		lastSeen: Number(row.last_seen ?? 0),
 	};
 }
 

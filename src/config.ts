@@ -268,6 +268,16 @@ export interface DshQQConfig {
 	memoryTombstoneDays: number;
 	/** 每轮记录注入明细（id/分数/字符数；默认开启） */
 	memoryInjectLog: boolean;
+	/** 群成员画像（默认开启）：共享群每个成员一份，每轮只注入当前说话人/被引用者 */
+	memoryMemberProfiles: boolean;
+	/** 单个成员画像的字符预算（默认 400） */
+	memoryMemberProfileMaxChars: number;
+	/** 本人自述的成员事实直接生效（默认 true；false = 一律进候选区） */
+	memoryMemberAutoActive: boolean;
+	/** 单个成员的画像条数上限（默认 60） */
+	memoryMemberMaxFacts: number;
+	/** 单次蒸馏最多新增条数（默认 8） */
+	memoryDistillMaxNewFacts: number;
 
 	// 媒体与互动（卡片「媒体与互动」）
 	/** 是否启用收图（下载图片传给 agent） */
@@ -414,7 +424,7 @@ export const ConfigSchema = Schema.object({
 	memoryCardMaxChars: Schema.number().step(50).min(200).max(2000).default(600).description('画像段字符预算：每轮随系统提示注入的稳定记忆上限（身份/偏好/规则/置顶；超出时按分数丢弃尾部，卡片末尾会提示还有多少条可用检索工具查看）'),
 	memoryProfileMaxChars: Schema.number().step(50).min(200).max(2000).default(400).description('画像段独立预算（留空/0 时回落到「记忆卡片字符预算」）：只放稳定身份、偏好与规则，建议 300–600 字'),
 	memoryEpisodicMaxChars: Schema.number().step(100).min(200).max(4000).default(1200).description('每轮情景段预算：把检索到的相关记忆与原始消息注入到当前 user 消息尾部，不污染 system 前缀缓存'),
-	memoryMaxFacts: Schema.number().step(5).min(5).max(1000).default(200).description('单个会话的活跃记忆条数上限（超出按「非置顶 → 低重要度 → 低置信 → 最久未更新」淘汰；旧默认 40 偏小）'),
+	memoryMaxFacts: Schema.number().step(5).min(5).max(1000).default(200).description('群级活跃记忆条数上限（只算 subject_id IS NULL 的群事实；成员画像另由「单个成员画像条数上限」控制。超出按「非置顶 → 低重要度 → 低置信 → 最久未更新」淘汰）'),
 	memoryMaxWriteFailuresPerTurn: Schema.number().step(1).min(0).max(10).default(3).description('每轮允许的记忆整理失败次数：卡片写满时报错让模型自己合并/删除，连续失败超过该值就提示它本轮停止整理（防止反复重试烧 token）'),
 	memoryRecallEnabled: Schema.boolean().default(true).description('注册 qq_recall_memory 检索工具：让 agent 主动查"几周前说过什么"（即时生效；每轮的自动预取不受它影响）'),
 	memoryRecallTopK: Schema.number().step(1).min(1).max(30).default(8).description('单次检索最多返回多少条历史记录'),
@@ -442,6 +452,11 @@ export const ConfigSchema = Schema.object({
 	memoryUserPreferenceTtlDays: Schema.number().step(1).min(1).max(3650).default(180).description('用户偏好的过期天数（默认 180）'),
 	memoryTombstoneDays: Schema.number().step(1).min(1).max(3650).default(30).description('删除后的 tombstone 保留天数（默认 30；防止后台抽取把已删内容重新记回来）'),
 	memoryInjectLog: Schema.boolean().default(true).description('每轮记录注入明细（注入了哪些记忆 id、分数、字符数、是否截断），供 WebUI 诊断与 /memory 排查'),
+	memoryMemberProfiles: Schema.boolean().default(true).description('群成员画像：共享群会话里每个成员一份画像；每轮只把当前说话人（和被引用者）的画像注入本轮上下文，不注入全群，也不进 system prompt'),
+	memoryMemberProfileMaxChars: Schema.number().step(50).min(100).max(2000).default(400).description('单个群成员画像的字符预算（默认 400）；超出时按重要度/更新时间丢弃，不会截断单条句子'),
+	memoryMemberAutoActive: Schema.boolean().default(true).description('本人自述的成员事实直接生效（默认开启）；别人转述的事实始终进候选区等管理员确认。关闭后所有成员事实都先进候选区'),
+	memoryMemberMaxFacts: Schema.number().step(5).min(5).max(500).default(60).description('单个群成员的画像条数上限（默认 60；超出按非置顶→低重要度→最久未更新淘汰）'),
+	memoryDistillMaxNewFacts: Schema.number().step(1).min(1).max(30).default(8).description('单次蒸馏最多新增多少条记忆（默认 8；多人群里比 5 更合适，但别调太大以免一次塞入过多噪声）'),
 
 	mediaEnabled: Schema.boolean().default(true).description('启用收图（下载图片并把本地路径交给 agent）'),
 	mediaMaxMB: Schema.number().step(1).min(1).max(100).default(20).description('单张图片下载上限（MB）'),

@@ -57,6 +57,7 @@ import {
 import { splitText, sleep } from '../outbound/chunk.ts';
 import { renderMediaLines, type MediaRef } from '../media/inbound.ts';
 import type { PersonaStore } from '../persona/store.ts';
+import { ensureSoul } from '../persona/soul.ts';
 import type { MemoryLike } from '../memory/index.ts';
 import type { MessageLogService } from '../logs/store.ts';
 import { describeSchedule } from '../tasks/schedule.ts';
@@ -417,6 +418,11 @@ export class ChatBridge {
 
 	touch(): void {
 		this.lastActivity = Date.now();
+	}
+
+	/** 当前轮次的发起人（工具判定“关于谁”的画像；定时任务为创建者）。 */
+	currentTurn(): { senderId: string; admin: boolean } {
+		return { senderId: this.turnSenderId, admin: this.turnAdmin };
 	}
 
 	/**
@@ -1008,11 +1014,17 @@ export class ChatBridge {
 			}
 		}
 		const persona = this.options.store.resolve(this.routeKeys());
+		const soul = ensureSoul(this.sessionDir, persona.prompt);
+		if (soul.source === 'seeded') {
+			this.logger.info(`dsh-qq-bot: ${this.label} 已生成 SOUL.md（从人格模板「${persona.name}」播种）：${soul.path}`);
+		} else if (soul.error !== undefined) {
+			this.logger.warn(`dsh-qq-bot: ${this.label} SOUL.md 不可用，本轮回退人格模板：${soul.error}`);
+		}
 		try {
 			(agentCtx as unknown as { systemPrompt?: SystemPromptLike }).systemPrompt?.section({
 				name: 'dsh-qq-bot-persona',
 				order: 300,
-				text: persona.prompt,
+				text: soul.text,
 			});
 		} catch (error) {
 			this.logger.warn(`dsh-qq-bot: persona 注入失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -1077,9 +1089,9 @@ export class ChatBridge {
 		} catch (error) {
 			this.logger.warn(`dsh-qq-bot: workspace section 注册失败: ${error instanceof Error ? error.message : String(error)}`);
 		}
-		// 长期记忆：卡片 section（order 900，排在最后 —— 它是唯一"会话内冻结"的
-		// 内容，放在末尾可以让前面的 section 变化不影响它后面的缓存段）+ 能力提示。
-		// `cardSection()` 内部按世代冻结：同一会话内多次求值返回同一份文本。
+		// 长期记忆：群级卡片 section（order 900，只放 subject_id IS NULL 的群级事实）
+		// + 能力提示。群成员画像不走这里——它每轮换人，必须注入 user 尾部
+		// （见 memoryInjection / memberProfileBlocks），放 system 会破坏前缀缓存。
 		try {
 			(agentCtx as unknown as { systemPrompt?: SystemPromptLike }).systemPrompt?.section({
 				name: 'dsh-qq-bot:memory',
@@ -1186,17 +1198,50 @@ export class ChatBridge {
 	 * 交接块来自"上一段对话"，预取来自"更早的历史档案"，同一轮里给两个块既费 token
 	 * 又可能互相矛盾（交接块已经给了上下文），所以二选一。
 	 */
-	private async memoryInjection(query: string): Promise<string> {
+	/**
+	 * 成员画像块：只给当前说话人 + 被引用的人，最多 2 人，群聊才有。
+	 *
+	 * 画像放 user 尾部而不是 system prompt：每轮换人，放前缀会破坏缓存；
+	 * 全群画像更不可能每轮注入（token 与隐私都不允许）。
+	 */
+	private memberProfileBlocks(senderId?: string, quotedSenderId?: string): string {
+		if (this.scope !== 'group') return '';
+		if (this.options.config.memoryMemberProfiles === false) return '';
+		const memory = this.options.memory;
+		if (memory === undefined || !memory.ready || typeof memory.memberProfile !== 'function') return '';
+		const selfId = this.options.getSelfId();
+		const ids: string[] = [];
+		for (const id of [senderId, quotedSenderId]) {
+			if (id === undefined || id === '' || id === selfId || ids.includes(id)) continue;
+			ids.push(id);
+			if (ids.length >= 2) break;
+		}
+		const blocks: string[] = [];
+		for (const id of ids) {
+			try {
+				const block = memory.memberProfile(this.key, id);
+				if (block !== '') blocks.push(block);
+			} catch (error) {
+				this.logger.warn(`dsh-qq-bot: ${this.label} 成员画像注入失败: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		return blocks.join('\n\n');
+	}
+
+	private async memoryInjection(query: string, senderId?: string, quotedSenderId?: string): Promise<string> {
 		const memory = this.options.memory;
 		if (memory === undefined || !memory.ready) return '';
 		try {
+			const profile = this.memberProfileBlocks(senderId, quotedSenderId);
 			const handoff = await memory.takeHandoff(this.key, this.sessionId);
 			if (handoff !== '') {
 				// 换了世代：卡片也要解冻，让新会话看到最新记忆。
 				memory.unfreeze(this.key);
-				return handoff;
+				return profile === '' ? handoff : `${profile}\n\n${handoff}`;
 			}
-			return memory.prefetch(this.key, query);
+			const episodic = memory.prefetch(this.key, query);
+			if (profile === '') return episodic;
+			return episodic === '' ? profile : `${profile}\n\n${episodic}`;
 		} catch (error) {
 			this.logger.warn(`dsh-qq-bot: ${this.label} 记忆注入失败（本轮跳过）: ${error instanceof Error ? error.message : String(error)}`);
 			return '';
@@ -1228,7 +1273,7 @@ export class ChatBridge {
 		const agent = await this.ensureAgent();
 		// 记忆注入放在 ensureAgent 之后：fork/rotate 可能换了 sessionId，
 		// takeHandoff 必须按最终世代判断；否则 fork 后会把旧摘要重复注入一遍。
-		const injection = await this.memoryInjection(prompt);
+		const injection = await this.memoryInjection(prompt, msg.senderId, quoted?.senderId);
 		const turnPrompt = injection === '' ? prompt : `${injection}\n\n${prompt}`;
 		// 占用提示：fork > rotate > 正在等界面释放。
 		const occupancyNotice = this.takeOccupancyNotice();
@@ -1352,7 +1397,7 @@ export class ChatBridge {
 		const agent = await this.ensureAgent();
 		// 与 handleMessage 一样，记忆注入放在 ensureAgent 之后：fork 后
 		// takeHandoff 要按新 sessionId 判断，避免把旧摘要重复注入。
-		const injection = await this.memoryInjection('');
+		const injection = await this.memoryInjection('', task.createdBy);
 		const turnPrompt = injection === '' ? prompt : `${injection}\n\n${prompt}`;
 		const occupancyNotice = this.takeOccupancyNotice();
 		if (occupancyNotice !== undefined) await this.sendNotice(occupancyNotice);

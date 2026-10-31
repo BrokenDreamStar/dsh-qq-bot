@@ -13,6 +13,13 @@
 > `docs/memory-market-research.md`。该调研指出本文的“L0 会话内冻结”“固定三元组唯一键”
 > 与中文 FTS5 方案需要重审（中文 `unicode61` 实际把整句当一个 token，检索基本不可用）。
 >
+> **2026-11-01 群成员画像（已落地）**：共享群会话里新增 `memory_members` 与
+> `memory_facts.subject_id/subject_name/source_member_id/source_seq`。模型可见的只有
+> 匿名 `member_ref`（`m_` + hash）和昵称，QQ 号只留在库里与管理员 WebUI；蒸馏用
+> `about` + `source_seq` 判断“本人自述 / 别人转述”，自述才 active，转述进 pending。
+> 每轮只把当前说话人（和被引用者）的画像注入 user 尾部，群级卡片仍只取
+> `subject_id IS NULL` 的事实；详见 AGENTS.md「群成员画像的边界」。
+>
 > **2026-10-29 P1 实现变更（已落地）**：本文以下“L0 冻结 / 唯一键 / 纯 FTS5 / 50 条阈值”
 > 的描述是实现前的设计，实际代码已改为：
 > - **画像段（profile）+ 情景段（episodic）**：`cardSection()` 只放 profile/preference/rule/置顶，

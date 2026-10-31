@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -13,9 +13,12 @@ function makeDeps(overrides?: Partial<PersonaRpcDeps>): { deps: PersonaRpcDeps; 
 	const dir = mkdtempSync(join(tmpdir(), 'dshqq-rpc-'));
 	const store = new PersonaStore(dir, logger);
 	store.init();
+	const sessionsRoot = join(dir, 'sessions');
+	mkdirSync(sessionsRoot, { recursive: true });
 	const refresh = vi.fn(async () => {});
 	const deps: PersonaRpcDeps = {
 		store,
+		sessionsRoot,
 		refreshBridges: refresh,
 		logger,
 		getDefaultModel: () => ({ provider: 'dsh', model: 'base' }),
@@ -159,5 +162,54 @@ describe('handlePersonaRpc', () => {
 	it('未知端点返回 undefined', async () => {
 		const { deps } = makeDeps();
 		expect(await handlePersonaRpc('logs/recent', undefined, deps)).toBeUndefined();
+	});
+});
+
+describe('SOUL.md RPC', () => {
+	it('list/read/save/apply/reset 都作用于会话目录里的 SOUL.md', async () => {
+		const { deps, store, refresh } = makeDeps();
+		mkdirSync(join(deps.sessionsRoot, 'Group_888'), { recursive: true });
+		store.setLibrary(
+			[
+				{ name: 'default', prompt: '默认人格' },
+				{ name: '冷淡', prompt: '冷淡人格' },
+			],
+			'default',
+		);
+
+		const list = await handlePersonaRpc('souls/list', {}, deps);
+		expect(list?.ok).toBe(true);
+		if (!list?.ok) return;
+		const souls = (list.value as { souls: Array<{ chat: string; exists: boolean; source: string }> }).souls;
+		expect(souls).toHaveLength(1);
+		expect(souls[0]).toMatchObject({ chat: 'group_888', exists: false, source: 'template' });
+
+		const before = await handlePersonaRpc('souls/read', { chat: 'group_888' }, deps);
+		expect(before?.ok).toBe(true);
+		if (before?.ok) expect((before.value as { content: string }).content).toBe('默认人格');
+
+		const saved = await handlePersonaRpc('souls/save', { chat: 'group_888', content: '自定义人格' }, deps);
+		expect(saved?.ok).toBe(true);
+		expect(readFileSync(join(deps.sessionsRoot, 'Group_888', 'SOUL.md'), 'utf8')).toBe('自定义人格');
+		expect(refresh).toHaveBeenCalled();
+
+		const after = await handlePersonaRpc('souls/read', { chat: 'group_888' }, deps);
+		if (after?.ok) expect(after.value).toMatchObject({ content: '自定义人格', source: 'file' });
+
+		const applied = await handlePersonaRpc('souls/apply', { chat: 'group_888', persona: '冷淡' }, deps);
+		expect(applied?.ok).toBe(true);
+		expect(readFileSync(join(deps.sessionsRoot, 'Group_888', 'SOUL.md'), 'utf8')).toBe('冷淡人格');
+
+		const reset = await handlePersonaRpc('souls/reset', { chat: 'group_888' }, deps);
+		expect(reset?.ok).toBe(true);
+		expect(readFileSync(join(deps.sessionsRoot, 'Group_888', 'SOUL.md'), 'utf8')).toBe('默认人格');
+	});
+
+	it('非法 chat 与过长内容被拒绝', async () => {
+		const { deps } = makeDeps();
+		const bad = await handlePersonaRpc('souls/read', { chat: 'wechat_1' }, deps);
+		expect(bad?.ok).toBe(false);
+		const long = await handlePersonaRpc('souls/save', { chat: 'group_888', content: 'x'.repeat(20_001) }, deps);
+		expect(long?.ok).toBe(false);
 	});
 });

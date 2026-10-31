@@ -25,7 +25,7 @@ export interface MemoryLike {
 		text: string;
 		msgId?: string;
 	}): number | undefined;
-	/** 卡片 section 文本（世代内冻结；无卡片时为空串）。 */
+	/** 群级卡片 section 文本（只放群级事实；无卡片时为空串）。 */
 	cardSection(chatKey: string): string;
 	/** 能力提示 section 文本（工具没注册时为空串）。 */
 	guidanceSection(available: boolean): string;
@@ -40,6 +40,21 @@ export interface MemoryLike {
 	markHanded?(chatKey: string, sessionId: string): void;
 	/** 每轮相关历史预取（零 LLM；不需要时为空串）。 */
 	prefetch(chatKey: string, query: string): string;
+	/** 单个群成员的画像（每轮注入 user 尾部；没有画像/未启用时为空串）。 */
+	memberProfile?(chatKey: string, memberId: string): string;
+	/** 群成员列表（WebUI / 命令用）。 */
+	listMembers?(chatKey: string): Array<{
+		memberRef: string;
+		memberId: string;
+		displayName: string;
+		active: number;
+		pending: number;
+		profile: string;
+	}>;
+	/** 按昵称/ref 找成员（工具与命令用）。 */
+	resolveMember?(chatKey: string, nameOrRef: string): { ok: true; member: { memberId: string; displayName: string } } | { ok: false; error: string };
+	/** 删除某个成员的全部记忆（“忘掉我”）。 */
+	forgetMember?(chatKey: string, memberId: string, actor: string): number;
 	/** 世代结束（/reset 前）：尽力蒸馏。 */
 	onGenerationEnd(chatKey: string, options?: { force?: boolean }): Promise<void>;
 	/** 每轮开始时清空写入失败计数。 */
@@ -53,13 +68,22 @@ export interface MemoryLike {
 	/** 该会话的事实/档案条数（/memory 与诊断用）。 */
 	chatStats(chatKey: string): { facts: number; events: number };
 	/** 列记忆条目（`/memory list` 与 WebUI 用）。 */
-	listItems(chatKey: string, options?: { query?: string; status?: 'active' | 'pending' | 'superseded' | 'archived' | 'deleted' | 'all'; limit?: number }): MemoryFact[];
+	listItems(
+		chatKey: string,
+		options?: { query?: string; status?: 'active' | 'pending' | 'superseded' | 'archived' | 'deleted' | 'all'; limit?: number; subjectId?: string | null },
+	): MemoryFact[];
 	/** 删除一条记忆（软删 + tombstone）。 */
 	deleteItem(chatKey: string, id: number, actor: string): boolean;
 	/** 测试召回：画像段 + 情景段。 */
-	preview(chatKey: string, query: string): { profile: string; episodic: string };
+	preview(chatKey: string, query: string, memberId?: string): { profile: string; episodic: string };
 	/** `qq_recall_memory` 的实现。 */
-	recall(chatKey: string, query: string, count?: number): { text: string; count: number; candidates: number };
+	recall(
+		chatKey: string,
+		query: string,
+		count?: number,
+		member?: string,
+		options?: { groupOnly?: boolean },
+	): { text: string; count: number; candidates: number };
 	/** `qq_memorize` 的实现。 */
 	memorize(input: {
 		chatKey: string;
@@ -67,6 +91,10 @@ export interface MemoryLike {
 		content?: string;
 		oldText?: string;
 		kind?: 'profile' | 'preference' | 'fact' | 'event' | 'plan' | 'rule';
+		subjectId?: string | null;
+		subjectName?: string;
+		self?: boolean;
+		isAdmin?: boolean;
 	}): { ok: true; text: string } | { ok: false; error: string; usage?: { label: string; entries: string[] } };
 	/** 配置热应用（卡片缓存失效 + 按总开关打开/关闭存储）。 */
 	reconfigure(): void;

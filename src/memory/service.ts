@@ -15,9 +15,20 @@
  */
 
 import type { Logger } from '../types.ts';
-import { buildCapacityError, canAdd, describeUsage, factText, isActiveFact, renderCard, type CardUsage } from './card.ts';
+import {
+	buildCapacityError,
+	canAdd,
+	describeUsage,
+	factText,
+	isActiveFact,
+	isMemberProfileFact,
+	renderCard,
+	renderMemberProfile,
+	type CardUsage,
+} from './card.ts';
 import { buildDistillPayload, DISTILL_SYSTEM_PROMPT, parseDistillOutput, shouldDistill } from './distill.ts';
 import { describeFindings, scanForThreats } from './guard.ts';
+import { isGroupChatKey, memberDisplayName } from './member.ts';
 import { stripQqNumbers } from './text.ts';
 import { renderHandoff, shouldHandoff } from './handoff.ts';
 import {
@@ -42,6 +53,7 @@ import {
 	type HandoffInput,
 	type MemoryFact,
 	type MemoryKind,
+	type MemoryMember,
 	type MemoryStats,
 	type MemoryStatus,
 	type RecallResult,
@@ -116,6 +128,16 @@ export interface MemoryConfigView {
 	memoryCandidateReview?: boolean;
 	/** 每轮记录注入明细（默认开启）。 */
 	memoryInjectLog?: boolean;
+	/** 群成员画像（默认开启）：共享群里每个成员一份画像，不混进群卡片。 */
+	memoryMemberProfiles?: boolean;
+	/** 单个成员画像的字符预算（默认 400）。 */
+	memoryMemberProfileMaxChars?: number;
+	/** 本人自述的成员事实直接生效（默认 true；false = 一律进候选区）。 */
+	memoryMemberAutoActive?: boolean;
+	/** 单个成员的画像条数上限（默认 60）。 */
+	memoryMemberMaxFacts?: number;
+	/** 单次蒸馏最多新增多少条（默认 8；多人场景比原来的 5 更合适）。 */
+	memoryDistillMaxNewFacts?: number;
 	/** 一般事实/事件过期天数（默认 90）。 */
 	memoryFactTtlDays?: number;
 	/** 用户偏好过期天数（默认 180）。 */
@@ -433,7 +455,10 @@ export class MemoryService {
 	}
 
 	/** 列记忆条目（`/memory list` 与 WebUI 用）。 */
-	listItems(chatKey: string, options: { query?: string; status?: 'active' | 'pending' | 'superseded' | 'archived' | 'deleted' | 'all'; limit?: number } = {}): MemoryFact[] {
+	listItems(
+		chatKey: string,
+		options: { query?: string; status?: 'active' | 'pending' | 'superseded' | 'archived' | 'deleted' | 'all'; limit?: number; subjectId?: string | null } = {},
+	): MemoryFact[] {
 		return this.store?.listItems(chatKey, options) ?? [];
 	}
 
@@ -447,7 +472,16 @@ export class MemoryService {
 	/** WebUI 保存：id 存在则改正文/元数据，否则新增一条（走 qq_memorize 的同一套校验）。 */
 	saveItem(
 		chatKey: string,
-		input: { id?: number; content: string; kind?: MemoryKind; importance?: number; pinned?: boolean; status?: MemoryStatus },
+		input: {
+			id?: number;
+			content: string;
+			kind?: MemoryKind;
+			importance?: number;
+			pinned?: boolean;
+			status?: MemoryStatus;
+			subjectId?: string | null;
+			subjectName?: string;
+		},
 		actor: string,
 	): { ok: true } | { ok: false; error: string } {
 		const store = this.store;
@@ -455,6 +489,12 @@ export class MemoryService {
 		const content = stripQqNumbers(input.content.trim());
 		if (content === '') return { ok: false, error: '内容不能为空' };
 		if (input.id !== undefined) {
+			if (input.subjectId !== undefined) {
+				const existing = store.getItem(chatKey, input.id);
+				if (existing === undefined || (existing.subjectId ?? null) !== (input.subjectId ?? null)) {
+					return { ok: false, error: `没有找到属于该成员的 #${input.id}` };
+				}
+			}
 			const updated = store.updateFact(chatKey, input.id, content);
 			if ('error' in updated) return { ok: false, error: updated.error };
 			store.updateItemMeta(chatKey, input.id, {
@@ -467,8 +507,32 @@ export class MemoryService {
 			this.logger.info(`dsh-qq-bot: 记忆条目 #${input.id} 已由 ${actor} 更新`);
 			return { ok: true };
 		}
-		const added = this.memorize({ chatKey, action: 'add', content, ...(input.kind !== undefined ? { kind: input.kind } : {}) });
+		const added = this.memorize({
+			chatKey,
+			action: 'add',
+			content,
+			...(input.kind !== undefined ? { kind: input.kind } : {}),
+			...(input.subjectId !== undefined ? { subjectId: input.subjectId } : {}),
+			...(input.subjectName !== undefined ? { subjectName: input.subjectName } : {}),
+			// WebUI 管理员编辑：直接生效（不当成转述）。
+			isAdmin: true,
+			self: true,
+		});
 		return added.ok ? { ok: true } : { ok: false, error: added.error };
+	}
+
+	/** 批准一条候选（成员画像 pending → active）。 */
+	approveItem(chatKey: string, id: number): boolean {
+		const store = this.store;
+		if (store === undefined) return false;
+		const fact = store.getItem(chatKey, id);
+		const changed = store.updateItemMeta(chatKey, id, { status: 'active' });
+		if (!changed) return false;
+		if (fact?.subjectId !== null && fact?.subjectId !== undefined) {
+			store.enforceMemberFactLimit(chatKey, fact.subjectId, this.config.memoryMemberMaxFacts ?? 60);
+		}
+		this.unfreeze(chatKey);
+		return true;
 	}
 
 	/** 审计日志（WebUI 用）。 */
@@ -477,8 +541,9 @@ export class MemoryService {
 	}
 
 	/** 测试召回：返回画像段 + 本轮情景段（WebUI「测试召回」用）。 */
-	preview(chatKey: string, query: string): { profile: string; episodic: string } {
-		return { profile: this.cardSection(chatKey), episodic: this.prefetch(chatKey, query) };
+	preview(chatKey: string, query: string, memberId?: string): { profile: string; episodic: string } {
+		const profile = memberId !== undefined && memberId !== '' ? this.memberProfile(chatKey, memberId) : this.cardSection(chatKey);
+		return { profile, episodic: this.prefetch(chatKey, query) };
 	}
 
 	// ── 采集面 ────────────────────────────────────────────────
@@ -510,6 +575,10 @@ export class MemoryService {
 		if (this.store?.lastSessionId(event.chatKey) !== event.generation) {
 			this.store?.setLastSessionId(event.chatKey, event.generation);
 		}
+		// 群成员身份表：只记真人发言（机器人自己不是群成员画像对象）。
+		if (this.config.memoryMemberProfiles !== false && event.self !== true && event.senderId !== '' && isGroupChatKey(event.chatKey)) {
+			this.store?.upsertMember(event.chatKey, event.senderId, event.senderName, event.ts ?? Date.now());
+		}
 		const seq = this.store?.insertEvent({
 			chatKey: event.chatKey,
 			generation: event.generation,
@@ -540,13 +609,79 @@ export class MemoryService {
 		const rev = store.rev(chatKey);
 		const cached = this.profileCache.get(chatKey);
 		if (cached !== undefined && cached.rev === rev) return cached.text;
-		const facts = store.facts(chatKey).filter(isProfileFact);
+		const facts = store.groupFacts(chatKey).filter(isProfileFact);
 		const text = renderCard(facts, {
 			maxChars: this.config.memoryProfileMaxChars ?? this.config.memoryCardMaxChars,
 			chatLabel: this.deps.labelOf(chatKey),
 		}).text;
 		this.profileCache.set(chatKey, { rev, text });
 		return text;
+	}
+
+	/**
+	 * 单个群成员的画像段（每轮注入 user 尾部；不进 system prompt）。
+	 *
+	 * 只收 active、profile/preference/rule/plan 的条目；转述/低置信条目在 pending，
+	 * 不会被注入。没有画像时返回空串。
+	 */
+	memberProfile(chatKey: string, memberId: string): string {
+		if (!this.ready || this.config.memoryMemberProfiles === false) return '';
+		const store = this.store;
+		if (store === undefined || memberId === '' || !isGroupChatKey(chatKey)) return '';
+		const facts = store.memberFacts(chatKey, memberId).filter((fact) => isMemberProfileFact(fact));
+		if (facts.length === 0) return '';
+		const member = store.member(chatKey, memberId);
+		const name = member?.displayName ?? facts[0]?.subjectName ?? '群友';
+		return renderMemberProfile(facts, {
+			name,
+			maxChars: this.config.memoryMemberProfileMaxChars ?? 400,
+		}).text;
+	}
+
+	/** 群成员列表（WebUI / `/memory member` 用；含 active/pending 计数）。 */
+	listMembers(chatKey: string): Array<MemoryMember & { active: number; pending: number; profile: string }> {
+		const store = this.store;
+		if (!this.ready || store === undefined) return [];
+		return store.members(chatKey).map((member) => {
+			const facts = store.memberFacts(chatKey, member.memberId);
+			const active = facts.filter((fact) => fact.status === 'active' && isMemberProfileFact(fact)).length;
+			const pending = facts.filter((fact) => fact.status === 'pending').length;
+			return { ...member, active, pending, profile: this.memberProfile(chatKey, member.memberId) };
+		});
+	}
+
+	/** 按昵称或 ref 找成员；重名时明确要求更精确的称呼（不暴露 QQ 号）。 */
+	resolveMember(chatKey: string, nameOrRef: string): { ok: true; member: MemoryMember } | { ok: false; error: string } {
+		const store = this.store;
+		if (!this.ready || store === undefined) return { ok: false, error: '长期记忆当前不可用' };
+		const wanted = nameOrRef.trim().replace(/^@+/, '');
+		if (wanted === '') return { ok: false, error: '缺少成员昵称或 ref' };
+		if (wanted.startsWith('m_')) {
+			const member = store.members(chatKey).find((item) => item.memberRef === wanted);
+			return member === undefined ? { ok: false, error: `没有找到成员 ${wanted}` } : { ok: true, member };
+		}
+		// WebUI 直接传内部 QQ 号（管理员界面可见）；工具只传昵称/ref。
+		const byId = store.member(chatKey, wanted);
+		if (byId !== undefined) return { ok: true, member: byId };
+		const matches = store.membersByName(chatKey, wanted);
+		if (matches.length === 0) return { ok: false, error: `本群没有找到昵称「${wanted}」的成员` };
+		if (matches.length > 1) return { ok: false, error: `本群有 ${matches.length} 个「${wanted}」，请用更精确的昵称或成员 ref` };
+		return { ok: true, member: matches[0]! };
+	}
+
+	/** 删除某个成员的全部记忆（“忘掉我”）；返回删除条数。 */
+	forgetMember(chatKey: string, memberId: string, actor: string): number {
+		const store = this.store;
+		if (!this.ready || store === undefined) return 0;
+		const facts = store.memberFacts(chatKey, memberId);
+		let removed = 0;
+		for (const fact of facts) {
+			if (store.deleteFact(chatKey, fact.id, actor)) removed += 1;
+		}
+		// 身份行也删掉：否则“忘掉我”之后成员列表里还留着一个 0/0 的人。
+		store.deleteMember(chatKey, memberId);
+		if (removed > 0) this.unfreeze(chatKey);
+		return removed;
 	}
 
 	/** 清画像缓存（写入/世代切换/手动 /memory reload 时调用；无冻结语义）。 */
@@ -558,9 +693,10 @@ export class MemoryService {
 	guidanceSection(available: boolean): string {
 		if (!this.ready || !available) return '';
 		const lines = [
-			`你有一份本会话的长期记忆画像（系统提示里的「${CARD_HEADER}」块），它记录了这个会话里跨天仍然成立的身份、偏好与规则。`,
-			'与本轮问题相关的历史事件会由系统自动召回（不需要你调用工具）；需要深挖更早的细节时用 qq_recall_memory。',
-			'当你了解到值得长期记住的信息（人物身份、群里的偏好与规矩、长期事项与决定、明确禁忌）时，用 qq_memorize 记下来，下一轮起生效；一次性的闲聊不要记。',
+			`你有一份本会话的长期记忆画像（系统提示里的「${CARD_HEADER}」块），它记录了这个会话里跨天仍然成立的群级身份、偏好与规则。`,
+			'群聊里每个成员还有自己的画像：当前说话人（以及被引用的人）的画像会随消息注入到本轮上下文，不在系统提示里。',
+			'与本轮问题相关的历史事件会由系统自动召回（不需要你调用工具）；要查某个群成员的画像或他说过的事，用 qq_recall_memory 的 member 参数（填昵称）。',
+			'当你了解到值得长期记住的信息（人物身份、群里的偏好与规矩、长期事项与决定、明确禁忌）时，用 qq_memorize 记下来：群级事实省略 about，当前说话人的画像用 about="me"，别人的画像用 about="昵称"（默认只进候选区等管理员确认）。一次性的闲聊不要记。',
 			MEMORY_SAFETY_NOTE,
 		];
 		return lines.join('\n');
@@ -572,7 +708,7 @@ export class MemoryService {
 	private recallPacked(
 		chatKey: string,
 		query: string,
-		options: { topK: number; maxChars: number },
+		options: { topK: number; maxChars: number; senderId?: string },
 	): { packed: ReturnType<typeof packRecall>; candidates: number; now: number; match: string | undefined } | undefined {
 		const store = this.store;
 		if (!this.ready || store === undefined) return undefined;
@@ -582,7 +718,7 @@ export class MemoryService {
 		if (match === undefined || tokens.length === 0) {
 			return { packed: { selected: [], dropped: 0 }, candidates: 0, now, match: undefined };
 		}
-		const hits = store.searchEvents(chatKey, match, FTS_CANDIDATE_LIMIT);
+		const hits = store.searchEvents(chatKey, match, FTS_CANDIDATE_LIMIT, options.senderId);
 		// BM25 绝对值只有 1e-6 量级，必须按批归一后才能当"相关度"用（见 rank.ts）。
 		const normalized = normalizeBm25(hits);
 		const candidates = hits.map((hit, index) => {
@@ -613,7 +749,7 @@ export class MemoryService {
 	private recallItemFacts(
 		chatKey: string,
 		query: string,
-		options: { topK: number; maxChars: number },
+		options: { topK: number; maxChars: number; subjectId?: string; groupOnly?: boolean },
 	): { facts: MemoryFact[]; candidates: number; match: string | undefined; now: number; bestScore: number } {
 		const store = this.store;
 		const now = Date.now();
@@ -621,7 +757,9 @@ export class MemoryService {
 		const tokens = tokenizeQuery(query);
 		const match = buildMatchExpression(query);
 		if (match === undefined || tokens.length === 0) return { facts: [], candidates: 0, match: undefined, now, bestScore: 0 };
-		const hits = store.searchItems(chatKey, match, FTS_CANDIDATE_LIMIT);
+		const hits = store
+			.searchItems(chatKey, match, FTS_CANDIDATE_LIMIT, options.subjectId)
+			.filter((hit) => options.groupOnly !== true || hit.fact.subjectId === null || hit.fact.subjectId === undefined);
 		const normalized = normalizeBm25(hits);
 		const scored = hits.map((hit, index) => {
 			const coverage = coverageOf(tokens, factText(hit.fact));
@@ -651,11 +789,31 @@ export class MemoryService {
 		return { facts: selected, candidates: scored.length, match, now, bestScore: scored[0]?.score ?? 0 };
 	}
 
-	/** `qq_recall_memory` 的实现：先查整理后的条目，再补原始消息档案。 */
-	recall(chatKey: string, query: string, count?: number): RecallResult {
+	/** `qq_recall_memory` 的实现：先查整理后的条目，再补原始消息档案；member 限定成员。 */
+	recall(
+		chatKey: string,
+		query: string,
+		count?: number,
+		member?: string,
+		options: { groupOnly?: boolean } = {},
+	): RecallResult {
 		const topK = Math.min(Math.max(1, Math.trunc(count ?? this.config.memoryRecallTopK)), this.config.memoryRecallTopK);
-		const items = this.recallItemFacts(chatKey, query, { topK, maxChars: Math.floor(this.config.memoryRecallMaxChars * 0.6) });
+		let subjectId: string | undefined;
+		let label = this.deps.labelOf(chatKey);
+		if (member !== undefined && member.trim() !== '') {
+			const resolved = this.resolveMember(chatKey, member);
+			if (!resolved.ok) return { text: `（${resolved.error}）`, count: 0, candidates: 0 };
+			subjectId = resolved.member.memberId;
+			label = `${label}·${resolved.member.displayName}`;
+		}
+		const items = this.recallItemFacts(chatKey, query, {
+			topK,
+			maxChars: Math.floor(this.config.memoryRecallMaxChars * 0.6),
+			...(subjectId !== undefined ? { subjectId } : {}),
+			...(options.groupOnly === true ? { groupOnly: true } : {}),
+		});
 		const events = this.recallPacked(chatKey, query, {
+			...(subjectId !== undefined ? { senderId: subjectId } : {}),
 			topK: Math.max(1, topK - items.facts.length),
 			maxChars: Math.max(200, this.config.memoryRecallMaxChars - items.facts.reduce((total, fact) => total + renderItemLine(fact, items.now).length + 1, 0)),
 		});
@@ -668,10 +826,10 @@ export class MemoryService {
 		}
 		if (events === undefined) return { text: '（长期记忆当前不可用）', count: 0, candidates: 0 };
 		const parts: string[] = [];
-		if (items.facts.length > 0) parts.push(renderItemRecall(items.facts, { chatLabel: this.deps.labelOf(chatKey), query, now: items.now }));
-		if (events.packed.selected.length > 0) parts.push(renderRecall(events.packed, { chatLabel: this.deps.labelOf(chatKey), query, now: events.now }));
+		if (items.facts.length > 0) parts.push(renderItemRecall(items.facts, { chatLabel: label, query, now: items.now }));
+		if (events.packed.selected.length > 0) parts.push(renderRecall(events.packed, { chatLabel: label, query, now: events.now }));
 		if (parts.length === 0) {
-			parts.push(`${RECALL_HEADER}在${this.deps.labelOf(chatKey)}的记忆里没有找到与「${query}」相关的记录。可以换个说法再查，或直接问用户。`);
+			parts.push(`${RECALL_HEADER}在${label}的记忆里没有找到与「${query}」相关的记录。可以换个说法再查，或直接问用户。`);
 		}
 		return { text: parts.join('\n\n'), count: items.facts.length + events.packed.selected.length, candidates: items.candidates + events.candidates };
 	}
@@ -719,20 +877,38 @@ export class MemoryService {
 		content?: string;
 		oldText?: string;
 		kind?: MemoryKind;
+		/** 成员画像主体（QQ 号，内部）；缺省 = 群级/当前会话级。 */
+		subjectId?: string | null;
+		subjectName?: string;
+		/** 是否是本人自述（决定 owner/untrusted 与 active/pending）。 */
+		self?: boolean;
+		/** 管理员代写：可以直接 active。 */
+		isAdmin?: boolean;
 	}): { ok: true; text: string } | { ok: false; error: string; usage?: CardUsage } {
 		const store = this.store;
 		if (!this.ready || store === undefined) return { ok: false, error: '长期记忆当前不可用（未启用或存储不可用）' };
-		const facts = store.facts(input.chatKey);
-		const profileBudget = this.config.memoryProfileMaxChars ?? this.config.memoryCardMaxChars;
-		const profileFacts = facts.filter(isProfileFact);
+		const subjectId = input.subjectId !== undefined && input.subjectId !== null && input.subjectId !== '' ? input.subjectId : null;
+		if (subjectId !== null && this.config.memoryMemberProfiles === false) {
+			return { ok: false, error: '群成员画像已在配置里关闭' };
+		}
+		const member = subjectId !== null ? store.member(input.chatKey, subjectId) : undefined;
+		const subjectName = subjectId !== null ? memberDisplayName(input.subjectName ?? member?.displayName, '群友') : '';
+		const forMember = subjectId !== null;
+		const allFacts = forMember ? store.memberFacts(input.chatKey, subjectId) : store.groupFacts(input.chatKey);
+		const profileFacts = allFacts.filter((fact) => (forMember ? isMemberProfileFact(fact) : isProfileFact(fact)));
+		const profileBudget = forMember
+			? (this.config.memoryMemberProfileMaxChars ?? 400)
+			: (this.config.memoryProfileMaxChars ?? this.config.memoryCardMaxChars);
 		const usage = describeUsage(profileFacts, profileBudget);
+		const pending = forMember && input.self !== true && input.isAdmin !== true;
+		const who = forMember ? `「${subjectName}」` : '本会话';
 
 		if (input.action === 'add') {
 			const content = stripQqNumbers(input.content?.trim() ?? '');
 			if (content === '') return { ok: false, error: 'add 需要 content（要记住的内容）' };
 			const verdict = scanForThreats(content);
 			if (!verdict.ok) return { ok: false, error: `内容命中安全扫描（${describeFindings(verdict.findings)}），已拒绝写入` };
-			if (!canAdd(profileFacts, profileBudget, content)) {
+			if (!pending && !canAdd(profileFacts, profileBudget, content)) {
 				if (this.tooManyWriteFailures(input.chatKey)) {
 					return { ok: false, error: '本轮整理记忆的尝试次数已用完，请先继续对话，下一轮再整理。', usage };
 				}
@@ -741,25 +917,43 @@ export class MemoryService {
 			const parsed = splitEntry(content);
 			const added = store.addFact({
 				chatKey: input.chatKey,
-				...(parsed !== undefined ? { subject: parsed.subject, predicate: parsed.predicate, object: parsed.object } : {}),
+				...(forMember
+					? { subjectId, subjectName }
+					: parsed !== undefined
+						? { subject: parsed.subject, predicate: parsed.predicate, object: parsed.object }
+						: {}),
 				content,
-				kind: input.kind ?? kindForEntry(parsed),
-				provenance: 'owner',
-				confidence: 0.95,
-				actor: 'user',
+				kind: input.kind ?? (forMember ? 'profile' : kindForEntry(parsed)),
+				provenance: pending ? 'untrusted' : 'owner',
+				confidence: pending ? 0.6 : 0.95,
+				status: pending ? 'pending' : 'active',
+				...(forMember && input.self === true ? { sourceMemberId: subjectId } : {}),
+				actor: pending ? 'distill' : 'user',
 			});
 			if ('error' in added) return { ok: false, error: added.error, usage };
-			store.enforceFactLimit(input.chatKey, this.config.memoryMaxFacts);
+			if (forMember) store.enforceMemberFactLimit(input.chatKey, subjectId, this.config.memoryMemberMaxFacts ?? 60);
+			else store.enforceFactLimit(input.chatKey, this.config.memoryMaxFacts, { groupOnly: true });
 			this.unfreeze(input.chatKey);
-			const after = describeUsage(store.facts(input.chatKey).filter(isProfileFact), profileBudget);
-			return { ok: true, text: `已记住（本轮起生效）：${content}（画像 ${after.label} 字）` };
+			if (pending) {
+				return { ok: true, text: `已记入${who}的候选画像，等管理员在 WebUI 确认后才会生效：${content}` };
+			}
+			const after = describeUsage(
+				(forMember ? store.memberFacts(input.chatKey, subjectId) : store.groupFacts(input.chatKey)).filter((fact) =>
+					forMember ? isMemberProfileFact(fact) : isProfileFact(fact),
+				),
+				profileBudget,
+			);
+			return { ok: true, text: `已记住${who}（本轮起生效）：${content}（画像 ${after.label} 字）` };
 		}
 
+		if (forMember && input.self !== true && input.isAdmin !== true) {
+			return { ok: false, error: '只有管理员可以改写/删除别人的画像；关于别人的信息只能先记成候选' };
+		}
 		const oldText = stripQqNumbers(input.oldText?.trim() ?? '');
 		if (oldText === '') return { ok: false, error: `${input.action} 需要 old_text（能唯一定位条目的短子串）` };
-		const matches = facts.filter((fact) => isActiveFact(fact) && factText(fact).includes(oldText));
+		const matches = allFacts.filter((fact) => isActiveFact(fact) && factText(fact).includes(oldText));
 		if (matches.length === 0) {
-			return { ok: false, error: `没有条目包含「${oldText}」。当前条目见 usage.current_entries。`, usage };
+			return { ok: false, error: `没有${who}的条目包含「${oldText}」。当前条目见 usage.current_entries。`, usage };
 		}
 		if (matches.length > 1) {
 			return { ok: false, error: `「${oldText}」匹配到 ${matches.length} 条，请换更具体的子串。当前条目见 usage.current_entries。`, usage };
@@ -768,25 +962,32 @@ export class MemoryService {
 		if (input.action === 'remove') {
 			if (!store.deleteFact(input.chatKey, target.id, 'user')) return { ok: false, error: '删除失败（详见日志）', usage };
 			this.unfreeze(input.chatKey);
-			return { ok: true, text: `已删除：「${factText(target)}」（当前 ${describeUsage(store.facts(input.chatKey).filter(isProfileFact), this.config.memoryProfileMaxChars ?? this.config.memoryCardMaxChars).label} 字）。` };
+			return { ok: true, text: `已删除${who}的条目：「${factText(target)}」` };
 		}
 		const content = stripQqNumbers(input.content?.trim() ?? '');
 		if (content === '') return { ok: false, error: 'replace 需要 content（改写后的内容）' };
 		const parsed = splitEntry(content);
 		const added = store.addFact({
 			chatKey: input.chatKey,
-			...(parsed !== undefined ? { subject: parsed.subject, predicate: parsed.predicate, object: parsed.object } : {}),
+			...(forMember
+				? { subjectId, subjectName }
+				: parsed !== undefined
+					? { subject: parsed.subject, predicate: parsed.predicate, object: parsed.object }
+					: {}),
 			content,
-			kind: input.kind ?? target.kind ?? kindForEntry(parsed),
-			provenance: 'owner',
-			confidence: 0.95,
-			actor: 'user',
+			kind: input.kind ?? target.kind ?? (forMember ? 'profile' : kindForEntry(parsed)),
+			provenance: pending ? 'untrusted' : 'owner',
+			confidence: pending ? 0.6 : 0.95,
+			status: pending ? 'pending' : 'active',
+			...(forMember && input.self === true ? { sourceMemberId: subjectId } : {}),
+			actor: pending ? 'distill' : 'user',
 		});
 		if ('error' in added) return { ok: false, error: added.error, usage };
 		if (added.id !== target.id) store.supersedeFact(input.chatKey, target.id, added.id);
-		store.enforceFactLimit(input.chatKey, this.config.memoryMaxFacts);
+		if (forMember) store.enforceMemberFactLimit(input.chatKey, subjectId, this.config.memoryMemberMaxFacts ?? 60);
+		else store.enforceFactLimit(input.chatKey, this.config.memoryMaxFacts, { groupOnly: true });
 		this.unfreeze(input.chatKey);
-		return { ok: true, text: `已更新为：「${content}」（本轮起生效，当前 ${describeUsage(store.facts(input.chatKey).filter(isProfileFact), this.config.memoryProfileMaxChars ?? this.config.memoryCardMaxChars).label} 字）。` };
+		return { ok: true, text: `已更新${who}的画像：「${content}」（本轮起生效）` };
 	}
 
 	/** 每轮开始时清空写入失败计数（bridge 在 handleMessage 里调用）。 */
@@ -987,7 +1188,14 @@ export class MemoryService {
 			chatLabel: this.deps.labelOf(chatKey),
 			existing: facts,
 			events,
-			limits: { maxNewFacts: 5, objectMaxChars: 240, contentMaxChars: 240 },
+			members: store.members(chatKey),
+			limits: {
+				maxNewFacts: Math.max(1, Math.trunc(this.config.memoryDistillMaxNewFacts ?? 8)),
+				objectMaxChars: 240,
+				contentMaxChars: 240,
+				memberProfiles: this.config.memoryMemberProfiles !== false,
+				memberAutoActive: this.config.memoryMemberAutoActive !== false,
+			},
 		};
 		const payload = buildDistillPayload(input);
 		// 推理档位：机械抽取不需要长推理。有的模型默认档会把整个 token 预算
@@ -1096,8 +1304,14 @@ export class MemoryService {
 			);
 			return false;
 		}
+		// 成员的「转述」已经在 parse 里定成 pending，不能被 candidateReview=false 提成 active；
+		// 群级新增仍沿用原来的候选区配置。
 		const ops = this.config.memoryCandidateReview === true
-			? parsed.outcome.ops.map((op) => (op.op === 'add' ? { ...op, status: 'pending' as const } : op))
+			? parsed.outcome.ops.map((op) =>
+					op.op === 'add' && (op.subjectId === undefined || op.subjectId === null)
+						? { ...op, status: 'pending' as const }
+						: op,
+				)
 			: parsed.outcome.ops;
 		const applied = store.applyOps(chatKey, ops, lastSeq);
 		if (!applied) {
@@ -1105,7 +1319,16 @@ export class MemoryService {
 			return false;
 		}
 		store.setWatermark(chatKey, lastSeq);
-		store.enforceFactLimit(chatKey, this.config.memoryMaxFacts);
+		const memberIds = new Set<string>();
+		for (const op of ops) {
+			if (op.op === 'add' && op.subjectId !== undefined && op.subjectId !== null) memberIds.add(op.subjectId);
+		}
+		for (const memberId of memberIds) {
+			store.enforceMemberFactLimit(chatKey, memberId, this.config.memoryMemberMaxFacts ?? 60);
+		}
+		if (ops.some((op) => op.op === 'add' && (op.subjectId === undefined || op.subjectId === null))) {
+			store.enforceFactLimit(chatKey, this.config.memoryMaxFacts, { groupOnly: true });
+		}
 		this.lastDistillAt.set(chatKey, Date.now());
 		this.unfreeze(chatKey);
 		this.failures.delete(chatKey);

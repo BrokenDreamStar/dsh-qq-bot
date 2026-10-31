@@ -71,7 +71,7 @@ describe('/memory 命令', () => {
 		await COMMANDS.memory!.run(ctx);
 		const text = captured.replies.join('\n');
 		expect(text).toContain('【长期记忆】群 888');
-		expect(text).toContain('画像：1 条条目；档案：3 条消息');
+		expect(text).toContain('记忆：1 条条目（含成员画像）；档案：3 条消息');
 		expect(text).toContain('全库 1 条 / 3 条 / 1 个会话');
 		expect(text).toContain('本群 偏好 回复简短');
 	});

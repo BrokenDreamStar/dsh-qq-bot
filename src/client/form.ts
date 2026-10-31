@@ -93,7 +93,7 @@ export interface FieldGroup {
 	 * 自定义交互卡片：不走 settings schema，展开体由 RPC 驱动
 	 * （人格库 / 人格与模型 / 定时任务）。此类卡片没有 fields，保存栏由面板自持。
 	 */
-	custom?: 'personas' | 'routes' | 'tasks' | 'memory';
+	custom?: 'personas' | 'souls' | 'routes' | 'tasks' | 'memory';
 }
 
 function f(key: string, kind: FieldKind, options?: readonly string[]): FieldDef {
@@ -332,6 +332,9 @@ export const FIELD_GROUPS: FieldGroup[] = [
 				f('memoryEpisodicMaxChars', 'number'),
 				f('memoryMaxFacts', 'number'),
 				f('memoryMaxWriteFailuresPerTurn', 'number'),
+				f('memoryMemberProfiles', 'boolean'),
+				f('memoryMemberProfileMaxChars', 'number'),
+				f('memoryMemberMaxFacts', 'number'),
 			]),
 			...withSub('subMemoryRecall', [
 				f('memoryRecallEnabled', 'boolean'),
@@ -347,6 +350,7 @@ export const FIELD_GROUPS: FieldGroup[] = [
 			...withSub('subMemoryDistill', [
 				f('memoryDistillEvery', 'number'),
 				f('memoryDistillMinChars', 'number'),
+				f('memoryDistillMaxNewFacts', 'number'),
 				f('memoryDistillIdleMs', 'number'),
 				// 蒸馏模型：与「人格与模型」卡片的模型列**同一份下拉清单**（宿主
 				// models/list），选中的 `provider/model` 一次写两个配置项，所以
@@ -369,6 +373,7 @@ export const FIELD_GROUPS: FieldGroup[] = [
 				f('memorySensitiveFilter', 'boolean'),
 				f('memoryCrossGroupUserProfile', 'boolean'),
 				f('memoryCandidateReview', 'boolean'),
+				f('memoryMemberAutoActive', 'boolean'),
 				f('memoryFactTtlDays', 'number'),
 				f('memoryUserPreferenceTtlDays', 'number'),
 				f('memoryInjectLog', 'boolean'),
@@ -415,6 +420,14 @@ export const FIELD_GROUPS: FieldGroup[] = [
 		titleKey: 'groupPersonas',
 		descKey: 'groupPersonasDesc',
 		custom: 'personas',
+		fields: [],
+	},
+	{
+		id: 'souls',
+		sectionKey: 'sectionChat',
+		titleKey: 'groupSouls',
+		descKey: 'groupSoulsDesc',
+		custom: 'souls',
 		fields: [],
 	},
 	{

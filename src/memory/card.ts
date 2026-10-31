@@ -12,7 +12,7 @@
 
 import { sanitizeMemoryText } from './guard.ts';
 import { stripQqNumbers } from './text.ts';
-import { CARD_HEADER, MEMORY_SAFETY_NOTE, type MemoryFact } from './types.ts';
+import { CARD_HEADER, MEMBER_PROFILE_HEADER, MEMORY_SAFETY_NOTE, type MemoryFact } from './types.ts';
 
 export interface CardRender {
 	/** 完整卡片文本（含表头与安全声明）；空卡片返回空串。 */
@@ -38,6 +38,12 @@ export function factText(fact: MemoryFact): string {
 	const content = fact.content?.trim();
 	if (content !== undefined && content !== '') return content;
 	return [fact.subject, fact.predicate, fact.object].filter((part) => part.trim() !== '').join(' ');
+}
+
+/** 成员画像只收身份/偏好/规则/长期计划；一次性事件与普通事实不进画像。 */
+export function isMemberProfileFact(fact: MemoryFact): boolean {
+	const kind = fact.kind ?? 'fact';
+	return kind === 'profile' || kind === 'preference' || kind === 'rule' || kind === 'plan';
 }
 
 /** 参与卡片排序的比较函数（导出便于测试）。 */
@@ -106,6 +112,53 @@ export function renderCard(
 	const header = `${CARD_HEADER}${label}（${lines.length}/${candidates.length} 条）`;
 	return {
 		text: `${header}\n${body}${hint}\n${MEMORY_SAFETY_NOTE}`,
+		included: lines.length,
+		omitted,
+		usedChars: used,
+	};
+}
+
+/**
+ * 渲染单个成员的画像（每轮只给当前说话人/被引用者，不进 system prompt）。
+ *
+ * 与群卡片共用预算/排序/安全声明，但表头与筛选不同：只收 profile/preference/rule/plan。
+ */
+export function renderMemberProfile(
+	facts: readonly MemoryFact[],
+	options: { name: string; maxChars: number; visibilityThreshold?: number; now?: number },
+): CardRender {
+	const threshold = options.visibilityThreshold ?? 0.4;
+	const budget = Math.max(0, Math.trunc(options.maxChars));
+	const now = options.now ?? Date.now();
+	const candidates = facts
+		.filter(
+			(fact) =>
+				isActiveFact(fact, now) &&
+				isMemberProfileFact(fact) &&
+				fact.confidence >= threshold &&
+				sanitizeMemoryText(factText(fact)) !== '',
+		)
+		.sort(compareFacts);
+	const lines: string[] = [];
+	let used = 0;
+	let omitted = 0;
+	for (const fact of candidates) {
+		const width = `${lines.length + 1}. `.length;
+		const cost = renderFactLine(fact).length + width;
+		if (lines.length > 0 && used + cost > budget) {
+			omitted += 1;
+			continue;
+		}
+		lines.push(renderFactLine(fact));
+		used += cost;
+	}
+	if (lines.length === 0) return { text: '', included: 0, omitted: candidates.length, usedChars: 0 };
+	const body = lines.map((line, index) => `${index + 1}. ${line}`).join('\n');
+	const hint = omitted > 0 ? `\n（另有 ${omitted} 条未展开，需要时用 qq_recall_memory 检索）` : '';
+	const safeName = stripQqNumbers(sanitizeMemoryText(options.name)).trim();
+	const name = safeName === '' ? '群友' : safeName;
+	return {
+		text: `${MEMBER_PROFILE_HEADER}·${name}（${lines.length}/${candidates.length} 条）\n${body}${hint}\n${MEMORY_SAFETY_NOTE}`,
 		included: lines.length,
 		omitted,
 		usedChars: used,

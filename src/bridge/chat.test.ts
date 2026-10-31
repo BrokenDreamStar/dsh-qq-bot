@@ -1,4 +1,4 @@
-import { mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -45,6 +45,8 @@ function makeBridge(input: {
 	config?: Partial<DshQQConfig>;
 	/** 替换 api（默认空壳；发消息的路径要能记下调用）。 */
 	api?: unknown;
+	/** 人格库 resolve 出的提示词（SOUL.md 播种用）。 */
+	personaPrompt?: string;
 }): ChatBridge {
 	const scope = input.scope ?? 'group';
 	const chatId = input.chatId ?? '123456';
@@ -58,7 +60,7 @@ function makeBridge(input: {
 	const store = {
 		getChatModel: () => input.override,
 		defaultModel: () => input.configDefault,
-		resolve: () => ({ name: 'default', prompt: '' }),
+		resolve: () => ({ name: 'default', prompt: input.personaPrompt ?? '' }),
 	} as unknown as PersonaStore;
 	const sessionDir = input.sessionDir ?? mkdtempSync(join(tmpdir(), 'dshqq-model-'));
 	const key = scope === 'private' ? `u-${chatId}` : `g-${chatId}`;
@@ -454,6 +456,35 @@ describe('内置时间感知（time-context）', () => {
 	});
 });
 
+describe('SOUL.md 播种与注入', () => {
+	it('首次 setup 生成 SOUL.md，并把文件内容作为 persona section', async () => {
+		let setup: ((ctx: unknown) => Promise<void>) | undefined;
+		const section = vi.fn();
+		const bridge = makeBridge({
+			personaPrompt: '你是默认人格',
+			agentPresets: { mount: vi.fn(async () => {}) },
+			agents: {
+				resume: vi.fn(async (options: unknown) => {
+					setup = (options as { setup?: (ctx: unknown) => Promise<void> }).setup;
+					return { agent: { id: 'soul' }, dispose: async () => {} };
+				}),
+				create: vi.fn(),
+				get: () => undefined,
+			},
+		});
+		await bridge.ensureAgent();
+		expect(setup).toBeTypeOf('function');
+		await setup!({
+			registry: { has: () => true },
+			plugin: vi.fn(async () => {}),
+			systemPrompt: { section },
+		});
+		const path = join(bridge.sessionDir, 'SOUL.md');
+		expect(readFileSync(path, 'utf8')).toBe('你是默认人格');
+		expect(section).toHaveBeenCalledWith(expect.objectContaining({ name: 'dsh-qq-bot-persona', text: '你是默认人格' }));
+	});
+});
+
 describe('isSameDir', () => {
 	it('字符串不同但指向同一目录（符号链接）时视为一致', () => {
 		const real = mkdtempSync(join(tmpdir(), 'dshqq-real-'));
@@ -564,7 +595,7 @@ describe('启动预热与重建后重占（ChatBridgeManager）', () => {
 		const store = {
 			getChatModel: () => undefined,
 			defaultModel: () => undefined,
-			resolve: () => ({ name: 'default', prompt: '' }),
+			resolve: () => ({ name: 'default', prompt: input.personaPrompt ?? '' }),
 		} as unknown as PersonaStore;
 		const config = { dataDir: input.dataDir, groupSession: 'shared', workspaceMode: 'chat' } as unknown as DshQQConfig;
 		return new ChatBridgeManager(config, {

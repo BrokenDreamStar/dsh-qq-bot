@@ -1001,6 +1001,208 @@ function RoutePanel(props: { t: Translate; data: PersonaModelData; disabled: boo
 	);
 }
 
+/** SOUL.md 列表项（宿主 souls/list）。 */
+interface SoulListView {
+	chat: string;
+	path: string;
+	exists: boolean;
+	source: string;
+	chars: number;
+	preview: string;
+	template: string;
+}
+
+function parseSoulList(value: unknown): SoulListView[] {
+	const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+	const raw = Array.isArray(record.souls) ? record.souls : [];
+	const list: SoulListView[] = [];
+	for (const entry of raw) {
+		if (entry === null || typeof entry !== 'object') continue;
+		const row = entry as Record<string, unknown>;
+		if (typeof row.chat !== 'string' || row.chat === '') continue;
+		list.push({
+			chat: row.chat,
+			path: typeof row.path === 'string' ? row.path : '',
+			exists: row.exists === true,
+			source: typeof row.source === 'string' ? row.source : 'template',
+			chars: typeof row.chars === 'number' ? row.chars : 0,
+			preview: typeof row.preview === 'string' ? row.preview : '',
+			template: typeof row.template === 'string' ? row.template : '',
+		});
+	}
+	return list;
+}
+
+/**
+ * 「会话人格」卡片：每个会话一份 SOUL.md 的查看/编辑/重置/套模板。
+ * 人格库仍是模板库；这里改的是文件本身，保存后重建桥，下一条消息生效。
+ */
+function SoulPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined) | undefined; disabled: boolean }): ReactNode {
+	const { t, getRpc, disabled } = props;
+	const [souls, setSouls] = useState<SoulListView[]>([]);
+	const [chat, setChat] = useState('');
+	const [content, setContent] = useState('');
+	const [info, setInfo] = useState<{ path: string; source: string; exists: boolean; chars: number; template: string; error: string | null } | null>(null);
+	const [templates, setTemplates] = useState<string[]>([]);
+	const [template, setTemplate] = useState('');
+	const [busy, setBusy] = useState(false);
+	const [failed, setFailed] = useState<string | null>(null);
+	const [saved, setSaved] = useState(false);
+
+	const call = useCallback(
+		async (endpoint: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
+			const rpc = getRpc?.();
+			if (rpc === undefined) {
+				setFailed(t('soulRpcUnavailable'));
+				return null;
+			}
+			const answer = await rpc(endpoint, payload);
+			if (!answer.ok) {
+				setFailed(answer.error?.message ?? 'error');
+				return null;
+			}
+			setFailed(null);
+			return answer.value !== null && typeof answer.value === 'object' ? (answer.value as Record<string, unknown>) : {};
+		},
+		[getRpc, t],
+	);
+
+	const read = useCallback(
+		async (target: string): Promise<void> => {
+			if (target === '') return;
+			setBusy(true);
+			const value = await call('souls/read', { chat: target });
+			setBusy(false);
+			if (value === null) return;
+			setChat(target);
+			setContent(typeof value.content === 'string' ? value.content : '');
+			setInfo({
+				path: typeof value.path === 'string' ? value.path : '',
+				source: typeof value.source === 'string' ? value.source : 'template',
+				exists: value.exists === true,
+				chars: typeof value.chars === 'number' ? value.chars : 0,
+				template: typeof value.template === 'string' ? value.template : '',
+				error: typeof value.error === 'string' && value.error !== '' ? value.error : null,
+			});
+			setSaved(false);
+		},
+		[call],
+	);
+
+	const load = useCallback(async (): Promise<void> => {
+		setBusy(true);
+		const [listValue, templateValue] = await Promise.all([call('souls/list', {}), call('personas/list', {})]);
+		setBusy(false);
+		if (listValue !== null) {
+			const list = parseSoulList(listValue);
+			setSouls(list);
+			if (list.length > 0) await read(list[0]!.chat);
+		}
+		if (templateValue !== null) {
+			const raw = Array.isArray(templateValue.personas) ? templateValue.personas : [];
+			const names: string[] = [];
+			for (const entry of raw) {
+				if (entry !== null && typeof entry === 'object') {
+					const name = (entry as Record<string, unknown>).name;
+					if (typeof name === 'string' && name !== '') names.push(name);
+				}
+			}
+			setTemplates(names);
+			setTemplate(names[0] ?? '');
+		}
+	}, [call, read]);
+
+	useEffect(() => {
+		void load();
+		// 只在首次挂载时拉一次；后续保存走各自端点刷新。
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
+
+	const save = async (): Promise<void> => {
+		if (chat === '' || disabled || busy) return;
+		setBusy(true);
+		const value = await call('souls/save', { chat, content });
+		setBusy(false);
+		if (value !== null) {
+			await read(chat);
+			setSaved(true);
+		}
+	};
+
+	const reset = async (): Promise<void> => {
+		if (chat === '' || disabled || busy) return;
+		setBusy(true);
+		const value = await call('souls/reset', { chat });
+		setBusy(false);
+		if (value !== null) await read(chat);
+	};
+
+	const applyTemplate = async (): Promise<void> => {
+		if (chat === '' || template === '' || disabled || busy) return;
+		setBusy(true);
+		const value = await call('souls/apply', { chat, persona: template });
+		setBusy(false);
+		if (value !== null) await read(chat);
+	};
+
+	const sourceLabel = (source: string): string => {
+		if (source === 'file') return t('soulSourceFile');
+		if (source === 'seeded') return t('soulSourceSeeded');
+		if (source === 'empty') return t('soulSourceEmpty');
+		return t('soulSourceTemplate');
+	};
+
+	if (souls.length === 0) {
+		return (
+			<div className={css.logPanel}>
+				{failed !== null ? <p className={css.failed} role="status">{failed}</p> : null}
+				<p className={css.hint}>{busy ? t('loading') : t('soulNoChats')}</p>
+			</div>
+		);
+	}
+
+	return (
+		<div className={css.editor}>
+			<div className={css.taskHead}>
+				<select className={cls(css.input, css.select)} value={chat} disabled={disabled || busy} onChange={(event) => void read(event.target.value)}>
+					{souls.map((item) => (
+						<option key={item.chat} value={item.chat}>
+							{item.chat}（{item.chars} 字）
+						</option>
+					))}
+				</select>
+			</div>
+			{info !== null ? (
+				<p className={css.hint}>
+					{info.path} · {sourceLabel(info.source)} · {info.chars} 字 · {t('soulTemplateHint').replace('{name}', info.template || '—')}
+				</p>
+			) : null}
+			{info?.error !== null && info?.error !== undefined ? <p className={css.failed}>{info.error}</p> : null}
+			<textarea className={css.input} rows={10} value={content} disabled={disabled || busy} onChange={(event) => setContent(event.target.value)} />
+			<div className={css.footer}>
+				<button type="button" className={css.save} disabled={disabled || busy} onClick={() => void save()}>
+					{t('soulSave')}
+				</button>
+				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void reset()}>
+					{t('soulReset')}
+				</button>
+				<select className={cls(css.input, css.select)} value={template} disabled={disabled || busy} onChange={(event) => setTemplate(event.target.value)}>
+					{templates.map((name) => (
+						<option key={name} value={name}>
+							{name}
+						</option>
+					))}
+				</select>
+				<button type="button" className={css.discard} disabled={disabled || busy || template === ''} onClick={() => void applyTemplate()}>
+					{t('soulApplyTemplate')}
+				</button>
+			</div>
+			{saved ? <p className={css.saved} role="status">{t('soulSaved')}</p> : null}
+			{failed !== null ? <p className={css.failed} role="status">{failed}</p> : null}
+		</div>
+	);
+}
+
 /** 定时任务卡片一行的浏览器面（宿主 TaskView 的镜像；时间戳为 epoch ms）。 */
 export interface TaskRecordView {
 	id: string;
@@ -1152,6 +1354,35 @@ interface MemoryItemView {
 	updatedAt: number;
 }
 
+interface MemoryMemberView {
+	memberId: string;
+	memberRef: string;
+	displayName: string;
+	active: number;
+	pending: number;
+	profile: string;
+}
+
+function parseMemoryMembers(value: unknown): MemoryMemberView[] {
+	const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+	const raw = Array.isArray(record.members) ? record.members : [];
+	const members: MemoryMemberView[] = [];
+	for (const entry of raw) {
+		if (entry === null || typeof entry !== 'object') continue;
+		const row = entry as Record<string, unknown>;
+		if (typeof row.memberId !== 'string' || typeof row.displayName !== 'string') continue;
+		members.push({
+			memberId: row.memberId,
+			memberRef: typeof row.memberRef === 'string' ? row.memberRef : '',
+			displayName: row.displayName,
+			active: typeof row.active === 'number' ? row.active : 0,
+			pending: typeof row.pending === 'number' ? row.pending : 0,
+			profile: typeof row.profile === 'string' ? row.profile : '',
+		});
+	}
+	return members;
+}
+
 function parseMemoryItems(value: unknown): MemoryItemView[] {
 	const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 	const raw = Array.isArray(record.items) ? record.items : [];
@@ -1188,6 +1419,9 @@ function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined
 	const [editing, setEditing] = useState<{ id: number; content: string } | null>(null);
 	const [candidates, setCandidates] = useState(false);
 	const [busy, setBusy] = useState(false);
+	const [members, setMembers] = useState<MemoryMemberView[]>([]);
+	const [member, setMember] = useState<MemoryMemberView | null>(null);
+	const [memberItems, setMemberItems] = useState<MemoryItemView[]>([]);
 
 	const call = useCallback(
 		async (endpoint: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
@@ -1206,6 +1440,53 @@ function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined
 		},
 		[getRpc, t],
 	);
+
+	const loadMembers = useCallback(async (): Promise<void> => {
+		if (chatKey.trim() === '') {
+			setFailed(t('memoryChatRequired'));
+			return;
+		}
+		setBusy(true);
+		const value = await call('members/list', { chatKey: chatKey.trim() });
+		setBusy(false);
+		if (value === null) return;
+		setMembers(parseMemoryMembers(value));
+		setMember(null);
+		setMemberItems([]);
+	}, [call, chatKey, t]);
+
+	const openMember = useCallback(
+		async (target: MemoryMemberView): Promise<void> => {
+			setBusy(true);
+			const value = await call('members/profile', { chatKey: chatKey.trim(), memberId: target.memberId });
+			setBusy(false);
+			if (value === null) return;
+			setMember({ ...target, profile: typeof value.profile === 'string' ? value.profile : target.profile });
+			setMemberItems(parseMemoryItems(value));
+		},
+		[call, chatKey],
+	);
+
+	const approveMemberItem = async (id: number): Promise<void> => {
+		if (member === null || busy) return;
+		setBusy(true);
+		const value = await call('members/approve', { chatKey: chatKey.trim(), id });
+		setBusy(false);
+		if (value !== null) await openMember(member);
+	};
+
+	const forgetMember = async (target: MemoryMemberView): Promise<void> => {
+		if (busy) return;
+		if (typeof window !== 'undefined' && !window.confirm(t('memoryMemberForgetConfirm'))) return;
+		setBusy(true);
+		const value = await call('members/delete', { chatKey: chatKey.trim(), memberId: target.memberId });
+		setBusy(false);
+		if (value !== null) {
+			setMember(null);
+			setMemberItems([]);
+			await loadMembers();
+		}
+	};
 
 	const load = useCallback(async (): Promise<void> => {
 		if (chatKey.trim() === '') {
@@ -1301,11 +1582,53 @@ function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined
 				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void distill()}>
 					{t('memoryDistill')}
 				</button>
+				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void loadMembers()}>
+					{t('memoryMembers')}
+				</button>
 			</div>
 			{failed !== null ? (
 				<p className={css.failed} role="status">
 					{failed}
 				</p>
+			) : null}
+			{members.length > 0 ? (
+				<div className={css.logPanel}>
+					<p className={css.hint}>{t('memoryMembers')}</p>
+					{members.map((row) => (
+						<button
+							key={row.memberId}
+							type="button"
+							className={css.discard}
+							disabled={disabled || busy}
+							onClick={() => void openMember(row)}
+						>
+							{row.displayName}（{row.active}/{row.pending}）
+						</button>
+					))}
+					{member !== null ? (
+						<div className={css.logPanel}>
+							<p className={css.hint}>
+								{t('memoryMemberProfile')}：{member.displayName}
+							</p>
+							<pre className={css.hint}>{member.profile === '' ? t('memoryEmpty') : member.profile}</pre>
+							{memberItems.map((item) => (
+								<div key={item.id} className={css.editorItem}>
+									<p className={css.hint}>
+										#{item.id} [{item.kind}] {item.status !== 'active' ? `(${item.status})` : ''} {item.content}
+									</p>
+									{item.status === 'pending' ? (
+										<button type="button" className={css.save} disabled={disabled || busy} onClick={() => void approveMemberItem(item.id)}>
+											{t('memoryMemberApprove')}
+										</button>
+									) : null}
+								</div>
+							))}
+							<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void forgetMember(member)}>
+								{t('memoryMemberForget')}
+							</button>
+						</div>
+					) : null}
+				</div>
 			) : null}
 			{status === 'loading' || status === 'idle' ? <p className={css.hint}>{t('loading')}</p> : null}
 			{status === 'ready' && items.length === 0 ? <p className={css.hint}>{t('memoryEmpty')}</p> : null}
@@ -2454,6 +2777,12 @@ export function DshQQSection(props: CardProps): ReactNode {
 					const customBody =
 						group.custom === 'personas' ? (
 							<PersonaPanel t={props.t} data={personaData} disabled={!state.writable} />
+						) : group.custom === 'souls' ? (
+							rpcAvailable ? (
+								<SoulPanel t={props.t} getRpc={getRpc} disabled={!state.writable} />
+							) : (
+								<p className={css.hint}>{props.t('soulRpcUnavailable')}</p>
+							)
 						) : group.custom === 'routes' ? (
 							<RoutePanel t={props.t} data={personaData} disabled={!state.writable} />
 						) : group.custom === 'tasks' ? (

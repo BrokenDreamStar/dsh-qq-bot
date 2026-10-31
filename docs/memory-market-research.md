@@ -523,6 +523,7 @@ db.prepare('SELECT * FROM t WHERE t MATCH ?').all('今天天气不错'); // 1 �
 > - 新增 `content/kind/provenance/importance/expires_at`、敏感过滤、tombstone、审计；
 > - 新增 WebUI「记忆库」卡片与 `memory/*` RPC；
 > - `/memory` 新增 `list/search/forget`。
+> - **2026-11-01 新增**：共享群成员画像（`memory_members` + `subject_id` + 匿名 `member_ref`；每轮只注入当前说话人/被引用者；自述 active、转述 pending；WebUI 成员列表与 `/memory member`）。
 > - **尚未实现**：跨群 `user` scope 检索（配置 `memoryCrossGroupUserProfile` 仅保留位）、完整审计 UI、自动评测集。
 > 具体见 `docs/memory-design.md` 顶部变更说明与 `src/memory/`。
 

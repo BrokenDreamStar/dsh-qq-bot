@@ -56,6 +56,8 @@ export function itemView(fact: MemoryFact): Record<string, unknown> {
 		expiresAt: fact.expiresAt ?? null,
 		validFrom: fact.validFrom ?? null,
 		validTo: fact.validTo ?? null,
+		memberId: fact.subjectId ?? null,
+		memberName: fact.subjectName ?? '',
 	};
 }
 
@@ -75,7 +77,14 @@ export async function handleMemoryRpc(
 			const status = endpoint === 'memory/candidates' ? 'pending' : (asStatus(body.status) ?? 'active');
 			const query = typeof body.query === 'string' ? body.query : undefined;
 			const limit = typeof body.limit === 'number' && Number.isFinite(body.limit) ? Math.trunc(body.limit) : 100;
-			const items = deps.memory.listItems(chatKey, { ...(query !== undefined ? { query } : {}), status, limit });
+			const subjectId =
+				body.subjectId === null ? null : typeof body.subjectId === 'string' && body.subjectId !== '' ? body.subjectId : undefined;
+			const items = deps.memory.listItems(chatKey, {
+				...(query !== undefined ? { query } : {}),
+				status,
+				limit,
+				...(subjectId !== undefined ? { subjectId } : {}),
+			});
 			return ok({
 				chatKey,
 				items: items.map(itemView),
@@ -121,8 +130,9 @@ export async function handleMemoryRpc(
 			const body = asRecord(payload);
 			const chatKey = nonEmptyString(body.chatKey);
 			const query = typeof body.query === 'string' ? body.query : '';
+			const memberId = nonEmptyString(body.memberId);
 			if (chatKey === undefined) return fail('invalid', '缺少 chatKey');
-			return ok(deps.memory.preview(chatKey, query));
+			return ok(deps.memory.preview(chatKey, query, memberId));
 		}
 		if (endpoint === 'memory/distill') {
 			const body = asRecord(payload);
@@ -134,6 +144,78 @@ export async function handleMemoryRpc(
 				error: deps.memory.lastDistillError?.(chatKey) ?? null,
 				note: deps.memory.lastDistillNote?.(chatKey) ?? null,
 			});
+		}
+		if (endpoint === 'members/list') {
+			const body = asRecord(payload);
+			const chatKey = nonEmptyString(body.chatKey);
+			if (chatKey === undefined) return fail('invalid', '缺少 chatKey');
+			return ok({ chatKey, members: deps.memory.listMembers?.(chatKey) ?? [] });
+		}
+		if (endpoint === 'members/profile') {
+			const body = asRecord(payload);
+			const chatKey = nonEmptyString(body.chatKey);
+			const member = nonEmptyString(body.memberId) ?? nonEmptyString(body.member);
+			if (chatKey === undefined) return fail('invalid', '缺少 chatKey');
+			if (member === undefined) return fail('invalid', '缺少 memberId（QQ 号或 memberRef）');
+			const resolved = deps.memory.resolveMember?.(chatKey, member);
+			if (resolved === undefined) return fail('unsupported', '当前版本不支持成员画像');
+			if (!resolved.ok) return fail('not-found', resolved.error);
+			const items = deps.memory.listItems(chatKey, { subjectId: resolved.member.memberId, status: 'all', limit: 200 });
+			const profile = deps.memory.memberProfile?.(chatKey, resolved.member.memberId) ?? '';
+			return ok({
+				chatKey,
+				member: resolved.member,
+				profile,
+				items: items.map(itemView),
+			});
+		}
+		if (endpoint === 'members/save') {
+			const body = asRecord(payload);
+			const chatKey = nonEmptyString(body.chatKey);
+			const member = nonEmptyString(body.memberId) ?? nonEmptyString(body.member);
+			const content = typeof body.content === 'string' ? body.content.trim() : '';
+			if (chatKey === undefined) return fail('invalid', '缺少 chatKey');
+			if (member === undefined) return fail('invalid', '缺少 memberId');
+			if (content === '') return fail('invalid', 'content 不能为空');
+			const resolved = deps.memory.resolveMember?.(chatKey, member);
+			if (resolved === undefined) return fail('unsupported', '当前版本不支持成员画像');
+			if (!resolved.ok) return fail('not-found', resolved.error);
+			const id = typeof body.id === 'number' && Number.isInteger(body.id) && body.id > 0 ? body.id : undefined;
+			const result = deps.memory.saveItem(
+				chatKey,
+				{
+					...(id !== undefined ? { id } : {}),
+					content,
+					...(asKind(body.kind) !== undefined ? { kind: asKind(body.kind) } : {}),
+					subjectId: resolved.member.memberId,
+					subjectName: resolved.member.displayName,
+				},
+				'admin:webui',
+			);
+			if (!result.ok) return fail('invalid', result.error);
+			const items = deps.memory.listItems(chatKey, { subjectId: resolved.member.memberId, status: 'all', limit: 200 });
+			return ok({ chatKey, member: resolved.member, items: items.map(itemView) });
+		}
+		if (endpoint === 'members/approve') {
+			const body = asRecord(payload);
+			const chatKey = nonEmptyString(body.chatKey);
+			const id = typeof body.id === 'number' ? Math.trunc(body.id) : Number.NaN;
+			if (chatKey === undefined) return fail('invalid', '缺少 chatKey');
+			if (!Number.isInteger(id) || id <= 0) return fail('invalid', 'id 必须是正整数');
+			const changed = deps.memory.approveItem(chatKey, id);
+			return changed ? ok({ id, approved: true }) : fail('not-found', `没有找到 #${id}`);
+		}
+		if (endpoint === 'members/delete') {
+			const body = asRecord(payload);
+			const chatKey = nonEmptyString(body.chatKey);
+			const member = nonEmptyString(body.memberId) ?? nonEmptyString(body.member);
+			if (chatKey === undefined) return fail('invalid', '缺少 chatKey');
+			if (member === undefined) return fail('invalid', '缺少 memberId');
+			const resolved = deps.memory.resolveMember?.(chatKey, member);
+			if (resolved === undefined) return fail('unsupported', '当前版本不支持成员画像');
+			if (!resolved.ok) return fail('not-found', resolved.error);
+			const removed = deps.memory.forgetMember?.(chatKey, resolved.member.memberId, 'admin:webui') ?? 0;
+			return ok({ chatKey, member: resolved.member, removed });
 		}
 		if (endpoint === 'memory/stats') {
 			return ok(deps.memory.stats());

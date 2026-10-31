@@ -18,6 +18,7 @@ import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildQuotedBlock } from '../bridge/prompt.ts';
 import { renderEventLine } from '../memory/rank.ts';
+import { renderMemberProfile } from '../memory/card.ts';
 import { renderHandoff } from '../memory/handoff.ts';
 import { renderTranscript } from './history.ts';
 
@@ -108,5 +109,37 @@ describe('模型可见文本不携带 QQ 号', () => {
 		};
 		expect(renderEventLine(event)).not.toContain('2879767499');
 		expect(renderHandoff({ tail: [event], lastActivityAt: Date.now() })).not.toContain('2879767499');
+	});
+
+	it('成员画像只给昵称与内容，不带号码', () => {
+		const rendered = renderMemberProfile(
+			[
+				{
+					id: 1,
+					chatKey: 'g-888',
+					subject: '',
+					predicate: '',
+					object: '偏好简洁回复',
+					content: '偏好简洁回复',
+					kind: 'preference',
+					provenance: 'owner',
+					confidence: 0.9,
+					sourceFrom: 1,
+					sourceTo: 1,
+					createdAt: 0,
+					updatedAt: 0,
+					accessCount: 1,
+					lastAccessAt: 0,
+					pinned: false,
+					supersededBy: null,
+					subjectId: '2879767499',
+					subjectName: 'yanami',
+				},
+			],
+			{ name: 'yanami', maxChars: 400 },
+		).text;
+		expect(rendered).toContain('yanami');
+		expect(rendered).toContain('偏好简洁回复');
+		expect(rendered).not.toContain('2879767499');
 	});
 });

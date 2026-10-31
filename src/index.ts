@@ -130,6 +130,7 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 	// 动态管理员 + 群成员缓存 + 消息日志全在它下面）。旧键仍是读取兜底，见 paths.ts。
 	const pathEnv = { homeDir: homedir(), cwd: process.cwd() };
 	const dataDir = resolveDataDir(config, pathEnv);
+	const sessionsRoot = resolveSessionsRoot(config, pathEnv);
 	try {
 		mkdirSync(dataDir, { recursive: true });
 	} catch (error) {
@@ -485,11 +486,12 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 			const connection = getService<HostConnectionLike>(channelCtx, 'connection');
 			const webServer = getService<WebServerLike>(channelCtx, 'webServer');
 			if (connection === undefined || typeof connection.requestRejection !== 'function' || webServer === undefined || typeof webServer.register !== 'function') {
-				logger.warn('dsh-qq-bot: 缺少 connection / webServer，WebUI 配置页的 RPC（日志、人格库、人格与模型）不可用');
+				logger.warn('dsh-qq-bot: 缺少 connection / webServer，WebUI 配置页的 RPC（日志、人格模板、会话人格、人格与模型）不可用');
 				return;
 			}
 			const personaRpc: PersonaRpcDeps = {
 				store,
+				sessionsRoot,
 				getLlm: () => getService<LlmServiceLike>(ctx, 'llm'),
 				getDefaultModel: () => agentDefaultModel.currentSelection(),
 				refreshBridges: () => manager.rebuildAll(),

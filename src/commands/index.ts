@@ -15,6 +15,7 @@ import { describeModelSource, formatModelSpec, parseModelSpec } from '../bridge/
 import type { OneBotApi } from '../onebot/api.ts';
 import type { AdminStore } from '../pipeline/access.ts';
 import type { PersonaStore } from '../persona/store.ts';
+import { inspectSoul, MAX_SOUL_CHARS, writeSoulText } from '../persona/soul.ts';
 import type { DshServices } from '../dsh.ts';
 import { providerId } from '../dsh.ts';
 import type { InboundMessage } from '../onebot/events.ts';
@@ -181,8 +182,8 @@ export const COMMANDS: Record<string, CommandDef> = {
 		},
 	},
 	memory: {
-		usage: '/memory [list|search <词>|forget <id>|distill|reload]',
-		help: '查看本会话的长期记忆：list 列条目，search 检索，forget 删除（管理员），distill 立即蒸馏，reload 清画像缓存',
+		usage: '/memory [list|search <词>|member [昵称]|forget <id|昵称>|distill|reload]',
+		help: '查看本会话的长期记忆：list 列条目，search 检索，member 看群成员画像（管理员），forget 删除条目/成员画像（管理员），distill 立即蒸馏，reload 清缓存',
 		async run(ctx) {
 			const memory = ctx.memory;
 			if (memory === undefined || !memory.ready) {
@@ -191,15 +192,24 @@ export const COMMANDS: Record<string, CommandDef> = {
 			}
 			const [sub = '', ...rest] = ctx.arg.trim().split(/\s+/);
 			const tail = rest.join(' ').trim();
+			// 普通成员只能看到群级记忆；成员画像属于管理员视图（命令回复会发在群里）。
+			const isAdmin = (): boolean => {
+				try {
+					return ctx.admins.isAdmin(ctx.msg.senderId);
+				} catch {
+					return true;
+				}
+			};
 			if (sub === 'list') {
-				const items = memory.listItems(ctx.bridge.key, { limit: 20 });
+				const items = memory.listItems(ctx.bridge.key, { limit: 20, ...(isAdmin() ? {} : { subjectId: null }) });
 				if (items.length === 0) {
 					await ctx.reply('（本会话还没有记忆条目；说「记住…」或发 /memory distill）');
 					return;
 				}
 				const lines = [`【记忆条目】${ctx.bridge.label}（最近 ${items.length} 条）`];
 				for (const item of items) {
-					lines.push(`#${item.id} [${item.kind ?? 'fact'}] ${(item.content ?? item.object).slice(0, 120)}${item.pinned ? ' 📌' : ''}`);
+					const owner = item.subjectName !== undefined && item.subjectName !== '' ? `@${item.subjectName} ` : '';
+					lines.push(`#${item.id} [${item.kind ?? 'fact'}] ${owner}${(item.content ?? item.object).slice(0, 120)}${item.pinned ? ' 📌' : ''}`);
 				}
 				await ctx.reply(lines.join('\n'));
 				return;
@@ -209,7 +219,7 @@ export const COMMANDS: Record<string, CommandDef> = {
 					await ctx.reply('用法：/memory search <关键词>');
 					return;
 				}
-				const result = memory.recall(ctx.bridge.key, tail, 8);
+				const result = memory.recall(ctx.bridge.key, tail, 8, undefined, { groupOnly: !isAdmin() });
 				await ctx.reply(result.text);
 				return;
 			}
@@ -218,13 +228,63 @@ export const COMMANDS: Record<string, CommandDef> = {
 					await ctx.reply('❌ 只有管理员可以删除记忆条目');
 					return;
 				}
-				const id = Number.parseInt(tail, 10);
-				if (!Number.isInteger(id) || id <= 0) {
-					await ctx.reply('用法：/memory forget <id>（先用 /memory list 查 id）');
+				if (tail === '') {
+					await ctx.reply('用法：/memory forget <id> 或 /memory forget <成员昵称>（删掉该成员的全部画像）');
 					return;
 				}
-				const removed = memory.deleteItem(ctx.bridge.key, id, `admin:${ctx.msg.senderId}`);
-				await ctx.reply(removed ? `✅ 已删除记忆 #${id}` : `没有找到 #${id}`);
+				const id = Number.parseInt(tail, 10);
+				if (Number.isInteger(id) && id > 0) {
+					const removed = memory.deleteItem(ctx.bridge.key, id, `admin:${ctx.msg.senderId}`);
+					await ctx.reply(removed ? `✅ 已删除记忆 #${id}` : `没有找到 #${id}`);
+					return;
+				}
+				const resolved = memory.resolveMember?.(ctx.bridge.key, tail);
+				if (resolved === undefined) {
+					await ctx.reply('当前版本不支持成员画像');
+					return;
+				}
+				if (!resolved.ok) {
+					await ctx.reply(`❌ ${resolved.error}`);
+					return;
+				}
+				const removed = memory.forgetMember?.(ctx.bridge.key, resolved.member.memberId, `admin:${ctx.msg.senderId}`) ?? 0;
+				await ctx.reply(`✅ 已删除「${resolved.member.displayName}」的 ${removed} 条画像`);
+				return;
+			}
+			if (sub === 'member') {
+				if (!ctx.admins.isAdmin(ctx.msg.senderId)) {
+					await ctx.reply('❌ 群成员画像仅管理员可查看（内容会发在群里，避免暴露他人画像）');
+					return;
+				}
+				const members = memory.listMembers?.(ctx.bridge.key) ?? [];
+				if (members.length === 0) {
+					await ctx.reply('（本群还没有成员画像；群里有人发言并开启长期记忆后会自动建立）');
+					return;
+				}
+				if (tail === '') {
+					const lines = [`【群成员画像】${ctx.bridge.label}（${members.length} 人）`];
+					for (const member of members) {
+						lines.push(`${member.displayName}：${member.active} 条生效 / ${member.pending} 条待确认`);
+					}
+					lines.push('', '用法：/memory member <昵称> 查看单个成员；/memory forget <昵称> 删除其画像（管理员）');
+					await ctx.reply(lines.join('\n'));
+					return;
+				}
+				const resolved = memory.resolveMember?.(ctx.bridge.key, tail);
+				if (resolved === undefined) {
+					await ctx.reply('当前版本不支持成员画像');
+					return;
+				}
+				if (!resolved.ok) {
+					await ctx.reply(`❌ ${resolved.error}`);
+					return;
+				}
+				const profile = memory.memberProfile?.(ctx.bridge.key, resolved.member.memberId) ?? '';
+				const facts = memory.listItems(ctx.bridge.key, { subjectId: resolved.member.memberId, status: 'all', limit: 30 });
+				const pending = facts.filter((fact) => fact.status === 'pending').length;
+				const lines = [`【成员画像】${resolved.member.displayName}（${facts.length} 条，${pending} 条待确认）`, profile === '' ? '（还没有生效的画像）' : profile];
+				if (pending > 0) lines.push(`（有 ${pending} 条待管理员在 WebUI 确认）`);
+				await ctx.reply(lines.join('\n'));
 				return;
 			}
 			if (sub === 'distill') {
@@ -251,12 +311,13 @@ export const COMMANDS: Record<string, CommandDef> = {
 			const profile = memory.cardSection(ctx.bridge.key);
 			const chat = memory.chatStats(ctx.bridge.key);
 			const stats = memory.stats();
+			const memberCount = memory.listMembers?.(ctx.bridge.key).length ?? 0;
 			const lines = [
 				`【长期记忆】${ctx.bridge.label}`,
-				`画像：${chat.facts} 条条目；档案：${chat.events} 条消息（全库 ${stats.facts} 条 / ${stats.events} 条 / ${stats.chats} 个会话）`,
+				`记忆：${chat.facts} 条条目（含成员画像）；档案：${chat.events} 条消息；群成员：${memberCount} 人（全库 ${stats.facts} 条 / ${stats.events} 条 / ${stats.chats} 个会话）`,
 				profile === '' ? '（本会话还没有画像条目）' : profile,
 				'',
-				'用法：/memory list ｜ /memory search <词> ｜ /memory forget <id>（管理员）｜ /memory distill ｜ /memory reload',
+				'用法：/memory list ｜ /memory search <词> ｜ /memory member [昵称] ｜ /memory forget <id|昵称>（管理员）｜ /memory distill ｜ /memory reload',
 			];
 			await ctx.reply(lines.join('\n'));
 		},
@@ -339,24 +400,72 @@ export const COMMANDS: Record<string, CommandDef> = {
 		},
 	},
 	persona: {
-		usage: '/persona [名称|default]',
-		help: '查看/切换当前会话人格',
+		usage: '/persona [名称|reset|reload]',
+		help: '查看/编辑当前会话的 SOUL.md（人格文件）；名称 = 用模板覆盖，reset = 恢复库默认，reload = 重读文件并重建 agent',
 		async run(ctx) {
 			const arg = ctx.arg.trim();
+			const template = ctx.store.resolve(ctx.bridge.key);
+			const info = inspectSoul(ctx.bridge.sessionDir, template.prompt);
+			const names = ctx.store.list();
 			if (arg === '') {
-				const current = ctx.store.resolve(ctx.bridge.key);
-				const names = ctx.store.list();
-				await ctx.reply([`当前人格：${current.name}`, `可用：${names.join('、')}`, '用法：/persona 名称（default 清除覆盖）'].join('\n'));
+				const source =
+					info.source === 'file'
+						? 'SOUL.md'
+						: info.source === 'seeded'
+							? `SOUL.md（本次从模板「${template.name}」播种）`
+							: info.source === 'empty'
+								? 'SOUL.md 为空，当前回退模板'
+								: '模板库（尚未生成 SOUL.md）';
+				await ctx.reply(
+					[
+						`人格文件：${info.path}`,
+						`生效来源：${source}`,
+						`字数：${info.chars}（上限 ${MAX_SOUL_CHARS}）`,
+						`模板库当前解析：${template.name}`,
+						`可用模板：${names.join('、') || '（无）'}`,
+						'用法：/persona <模板名>（覆盖 SOUL.md）｜ /persona reset（恢复库默认）｜ /persona reload（重读文件并重建 agent）',
+					].join('\n'),
+				);
 				return;
 			}
-			const name = arg === 'default' ? null : arg;
-			if (name !== null && !ctx.store.list().includes(name)) {
-				await ctx.reply(`❌ 没有人格 "${name}"，可用：${ctx.store.list().join('、') || '（无）'}`);
+			if (arg === 'reload') {
+				await ctx.bridge.rebuild();
+				await ctx.reply('✅ 已重读 SOUL.md 并重建当前会话（历史保留）');
 				return;
 			}
-			ctx.store.setChatPersona(ctx.bridge.key, name);
+			if (arg === 'reset' || arg === 'default') {
+				const records = ctx.store.records();
+				const defaultName = ctx.store.defaultPersonaName();
+				const fallback = records.find((record) => record.name === defaultName) ?? records[0];
+				if (fallback === undefined) {
+					await ctx.reply('❌ 人格库为空，无法恢复默认');
+					return;
+				}
+				const written = writeSoulText(ctx.bridge.sessionDir, fallback.prompt);
+				if (!written.ok) {
+					await ctx.reply(`❌ 写入 SOUL.md 失败：${written.error}`);
+					return;
+				}
+				await ctx.bridge.rebuild();
+				await ctx.reply(`✅ 已用默认模板「${fallback.name}」覆盖 SOUL.md，并重建当前会话`);
+				return;
+			}
+			const record = ctx.store.records().find((entry) => entry.name === arg);
+			if (record === undefined) {
+				await ctx.reply(`❌ 没有人格模板 "${arg}"，可用：${names.join('、') || '（无）'}`);
+				return;
+			}
+			if ([...record.prompt].length > MAX_SOUL_CHARS) {
+				await ctx.reply(`❌ 模板「${record.name}」超过 ${MAX_SOUL_CHARS} 字，未写入 SOUL.md`);
+				return;
+			}
+			const written = writeSoulText(ctx.bridge.sessionDir, record.prompt);
+			if (!written.ok) {
+				await ctx.reply(`❌ 写入 SOUL.md 失败：${written.error}`);
+				return;
+			}
 			await ctx.bridge.rebuild();
-			await ctx.reply(name === null ? '✅ 已恢复默认人格' : `✅ 已切换人格 ${name}（历史保留）`);
+			await ctx.reply(`✅ 已用模板「${record.name}」覆盖 SOUL.md（${[...record.prompt].length} 字），并重建当前会话`);
 		},
 	},
 	cwd: {

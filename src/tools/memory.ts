@@ -65,6 +65,10 @@ export function registerMemoryTools(
 					type: 'integer',
 					description: `How many matching messages to return (default ${RECALL_DEFAULT_COUNT}). Capped by the deployment setting.`,
 				},
+				member: {
+					type: 'string',
+					description: 'Optional group member nickname. When given, only that member\'s profile entries and messages are searched (no QQ numbers).',
+				},
 			},
 			output: {
 				schema: {
@@ -84,7 +88,7 @@ export function registerMemoryTools(
 				if (!memory.ready) throw new Error('dsh-qq-bot: 长期记忆当前不可用（未启用或存储不可用，见 WebUI「长期记忆」卡片）');
 				// 工具注册需重启，但开关是热应用的：关掉后即便工具还在也拒绝检索。
 				if (!config.memoryRecallEnabled) throw new Error('dsh-qq-bot: 记忆检索已在 WebUI 关闭（设置 → qq-bot 配置 → 长期记忆 → 检索）');
-				const result = memory.recall(bridge.key, args.query, args.count ?? RECALL_DEFAULT_COUNT);
+				const result = memory.recall(bridge.key, args.query, args.count ?? RECALL_DEFAULT_COUNT, args.member);
 				return { count: result.count, found: result.count > 0, transcript: result.text };
 			},
 		}),
@@ -115,6 +119,10 @@ export function registerMemoryTools(
 					type: 'string',
 					description: 'A short unique substring identifying the entry to replace/remove. Required for replace and remove; if it matches more than one entry the tool asks for a more specific substring.',
 				},
+				about: {
+					type: 'string',
+					description: 'Optional target: omit for group-level facts; "me" for the current speaker; or a group member nickname. Facts about another member are recorded as pending until an admin approves them. Never use a QQ number.',
+				},
 			},
 			output: {
 				schema: {
@@ -132,12 +140,38 @@ export function registerMemoryTools(
 			async execute(args) {
 				const bridge = requireBridge(services, manager);
 				if (!memory.ready) throw new Error('dsh-qq-bot: 长期记忆当前不可用（未启用或存储不可用，见 WebUI「长期记忆」卡片）');
+				const turn = bridge.currentTurn();
+				let subjectId: string | undefined;
+				let subjectName: string | undefined;
+				let self = true;
+				if (bridge.scope === 'group') {
+					const about = args.about?.trim();
+					if (about !== undefined && about !== '' && about !== 'group') {
+						if (about === 'me' || about === '我') {
+							if (turn.senderId !== '') {
+								subjectId = turn.senderId;
+								self = true;
+							}
+						} else {
+							const resolved = memory.resolveMember?.(bridge.key, about);
+							if (resolved === undefined) throw new Error('dsh-qq-bot: 当前版本不支持成员画像（请升级插件）');
+							if (!resolved.ok) return { ok: false, message: resolved.error };
+							subjectId = resolved.member.memberId;
+							subjectName = resolved.member.displayName;
+							self = subjectId === turn.senderId;
+						}
+					}
+				}
 				const result = memory.memorize({
 					chatKey: bridge.key,
 					action: args.action,
 					...(args.content !== undefined ? { content: args.content } : {}),
 					...(args.old_text !== undefined ? { oldText: args.old_text } : {}),
 					...(args.kind !== undefined ? { kind: args.kind } : {}),
+					...(subjectId !== undefined ? { subjectId } : {}),
+					...(subjectName !== undefined ? { subjectName } : {}),
+					self,
+					isAdmin: turn.admin,
 				});
 				if (!result.ok) {
 					// 容量/匹配失败都是「可恢复错误」：把当前条目一起回给模型，让它自己整理。
