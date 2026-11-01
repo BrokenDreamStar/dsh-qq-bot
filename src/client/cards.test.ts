@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { OPEN_CARDS_KEY } from './cards.ts';
+import { ACTIVE_CARD_KEY, OPEN_CARDS_KEY } from './cards.ts';
 
 type CardsModule = typeof import('./cards.ts');
 
@@ -80,5 +80,16 @@ describe('设置页卡片展开态', () => {
 		expect(cards.readOpenCards()).toEqual({});
 		cards.writeOpenCard('reply', true);
 		expect(cards.readOpenCards()).toEqual({ reply: true });
+	});
+
+	it('导航选中项跨刷新保留，未知 id 回退到第一张卡片', () => {
+		const storage = fakeStorage();
+		installWindow(storage);
+		expect(cards.readActiveCard()).toBe('connection');
+		cards.writeActiveCard('memory');
+		expect(storage.data.get(ACTIVE_CARD_KEY)).toBe('memory');
+		expect(cards.readActiveCard()).toBe('memory');
+		storage.data.set(ACTIVE_CARD_KEY, 'notACard');
+		expect(cards.readActiveCard('wake')).toBe('wake');
 	});
 });

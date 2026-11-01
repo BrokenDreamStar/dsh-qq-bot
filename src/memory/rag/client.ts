@@ -8,6 +8,7 @@
 
 import { Worker } from 'node:worker_threads';
 import type { Logger } from '../../types.ts';
+import { createModelStatus } from './progress.ts';
 import type { RagChunkHit, RagProgress, RagRecord, RagSkill, RagStatus, RagWorkerConfig, SkillDraft } from './types.ts';
 
 export interface RagClientOptions {
@@ -37,6 +38,10 @@ const DEFAULT_STATUS: RagStatus = {
 	rerank: false,
 	runtime: 'missing',
 	model: 'missing',
+	models: {
+		embedding: createModelStatus('', false),
+		reranker: createModelStatus('', false),
+	},
 	messages: 0,
 	chunks: 0,
 	skills: 0,
@@ -135,7 +140,9 @@ export class RagClient {
 		const record = message as Record<string, unknown>;
 		if (record.event === 'status' && record.status !== null && typeof record.status === 'object') {
 			this.status = record.status as RagStatus;
-			if (this.status.model === 'ready' || this.status.model === 'error') this.progress = undefined;
+			const modelStates = this.status.models === undefined ? [] : [this.status.models.embedding, this.status.models.reranker];
+			const busy = modelStates.some(model => model.download === 'downloading' || model.load === 'loading');
+			if (!busy) this.progress = undefined;
 			this.options.onStatus?.(this.currentStatus);
 			return;
 		}

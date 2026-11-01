@@ -86,11 +86,24 @@ export interface RagProgress {
 	kind: 'install' | 'download' | 'embed' | 'rerank';
 	message?: string;
 	file?: string;
+	/** 进度所属模型；安装/嵌入时缺省。 */
+	model?: 'embedding' | 'reranker';
 	/** 0~100；拿不到时 undefined（WebUI 显示不确定进度）。 */
 	percent?: number;
 	loaded?: number;
 	total?: number;
 	at: number;
+}
+
+export type RagDownloadState = 'disabled' | 'missing' | 'downloading' | 'ready' | 'error';
+export type RagLoadState = 'disabled' | 'missing' | 'loading' | 'ready' | 'error';
+
+/** 单个本地模型的两阶段状态：文件下载与运行时加载互不混淆。 */
+export interface RagModelStatus {
+	id: string;
+	download: RagDownloadState;
+	load: RagLoadState;
+	error?: string;
 }
 
 /** 运行时/模型/数据库状态（WebUI 与日志用）。 */
@@ -102,7 +115,13 @@ export interface RagStatus {
 	embed: boolean;
 	rerank: boolean;
 	runtime: 'missing' | 'installing' | 'ready' | 'error';
+	/** 旧版聚合字段，保留兼容；新页面读取 models。 */
 	model: 'missing' | 'downloading' | 'ready' | 'error';
+	/** 向量与重排模型各自独立的文件/加载状态。 */
+	models: {
+		embedding: RagModelStatus;
+		reranker: RagModelStatus;
+	};
 	messages: number;
 	chunks: number;
 	skills: number;
