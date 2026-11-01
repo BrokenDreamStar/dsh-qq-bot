@@ -1,6 +1,6 @@
 {
   "name": "dsh-qq-bot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DeepSeek Harness × QQ（napcat / OneBot v11）适配插件：唤醒规则、访问控制、图片收发、引用回复、长文折叠转发、人格切换、主动消息与撤回",
   "type": "module",
   "main": "./dist/index.js",
