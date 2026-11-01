@@ -25,6 +25,7 @@ import { formatLogDigest } from '../logs/format.ts';
 import { describeSchedule, nextRunForTask } from '../tasks/schedule.ts';
 import type { ScheduledTask, TaskStore } from '../tasks/store.ts';
 import type { MemoryLike } from '../memory/index.ts';
+import { renderSkillBody } from '../memory/rag/render.ts';
 
 export interface CommandContext {
 	msg: InboundMessage;
@@ -182,17 +183,16 @@ export const COMMANDS: Record<string, CommandDef> = {
 		},
 	},
 	memory: {
-		usage: '/memory [list|search <词>|member [昵称]|forget <id|昵称>|distill|reload]',
-		help: '查看本会话的长期记忆：list 列条目，search 检索，member 看群成员画像（管理员），forget 删除条目/成员画像（管理员），distill 立即蒸馏，reload 清缓存',
+		usage: '/memory [status|search <词>|recent [n]|forget <id>|reindex|prune|setup]',
+		help: '查看本会话的长期记忆（RAG）：status 状态，search 检索，recent 最近片段，forget 删除片段（管理员），reindex 重建索引，prune 清理，setup 安装运行时/模型',
 		async run(ctx) {
 			const memory = ctx.memory;
 			if (memory === undefined || !memory.ready) {
-				await ctx.reply('（长期记忆未启用或存储不可用；在 WebUI「设置 → qq-bot 配置 → 长期记忆」里打开，或检查日志里的诊断）');
+				await ctx.reply('（长期记忆未启用或存储未就绪；在 WebUI「设置 → qq-bot 配置 → 长期记忆」里打开，或检查日志）');
 				return;
 			}
 			const [sub = '', ...rest] = ctx.arg.trim().split(/\s+/);
 			const tail = rest.join(' ').trim();
-			// 普通成员只能看到群级记忆；成员画像属于管理员视图（命令回复会发在群里）。
 			const isAdmin = (): boolean => {
 				try {
 					return ctx.admins.isAdmin(ctx.msg.senderId);
@@ -200,17 +200,16 @@ export const COMMANDS: Record<string, CommandDef> = {
 					return true;
 				}
 			};
-			if (sub === 'list') {
-				const items = memory.listItems(ctx.bridge.key, { limit: 20, ...(isAdmin() ? {} : { subjectId: null }) });
-				if (items.length === 0) {
-					await ctx.reply('（本会话还没有记忆条目；说「记住…」或发 /memory distill）');
-					return;
-				}
-				const lines = [`【记忆条目】${ctx.bridge.label}（最近 ${items.length} 条）`];
-				for (const item of items) {
-					const owner = item.subjectName !== undefined && item.subjectName !== '' ? `@${item.subjectName} ` : '';
-					lines.push(`#${item.id} [${item.kind ?? 'fact'}] ${owner}${(item.content ?? item.object).slice(0, 120)}${item.pinned ? ' 📌' : ''}`);
-				}
+			if (sub === '' || sub === 'status') {
+				const status = await memory.stats?.();
+				const lines = [
+					`【长期记忆】${ctx.bridge.label}`,
+					`状态：${status?.ready ? '就绪' : '未就绪'}；DB=${status?.db ? '✓' : '✗'} FTS=${status?.fts ? '✓' : '✗'} 向量=${status?.vec ? '✓' : '✗'} 嵌入=${status?.embed ? '✓' : '✗'} 重排=${status?.rerank ? '✓' : '✗'}`,
+					`数据：${status?.messages ?? 0} 条消息 / ${status?.chunks ?? 0} 个片段 / ${status?.skills ?? 0} 个技能；运行时=${status?.runtime ?? 'unknown'}，模型=${status?.model ?? 'unknown'}`,
+					...(status?.lastError !== undefined ? [`最近错误：${status.lastError}`] : []),
+					'',
+					'用法：/memory search <词> ｜ /memory recent ｜ /memory forget <id>（管理员）｜ /memory reindex ｜ /memory prune ｜ /memory setup',
+				];
 				await ctx.reply(lines.join('\n'));
 				return;
 			}
@@ -219,107 +218,162 @@ export const COMMANDS: Record<string, CommandDef> = {
 					await ctx.reply('用法：/memory search <关键词>');
 					return;
 				}
-				const result = memory.recall(ctx.bridge.key, tail, 8, undefined, { groupOnly: !isAdmin() });
+				const result = await memory.recall(ctx.bridge.key, tail, 8);
 				await ctx.reply(result.text);
 				return;
 			}
-			if (sub === 'forget') {
-				if (!ctx.admins.isAdmin(ctx.msg.senderId)) {
-					await ctx.reply('❌ 只有管理员可以删除记忆条目');
+			if (sub === 'recent') {
+				const limit = Number.parseInt(tail, 10);
+				const hits = await memory.recent?.(ctx.bridge.key, Number.isInteger(limit) && limit > 0 ? Math.min(limit, 50) : 10) ?? [];
+				if (hits.length === 0) {
+					await ctx.reply('（本会话还没有片段；先聊几句让记忆写入）');
 					return;
 				}
-				if (tail === '') {
-					await ctx.reply('用法：/memory forget <id> 或 /memory forget <成员昵称>（删掉该成员的全部画像）');
-					return;
+				const lines = [`【最近片段】${ctx.bridge.label}`];
+				for (const hit of hits) {
+					lines.push(`#${hit.id} [${new Date(hit.ts).toLocaleString('zh-CN')}] ${hit.text.replace(/\s*\n\s*/g, ' / ').slice(0, 160)}`);
 				}
-				const id = Number.parseInt(tail, 10);
-				if (Number.isInteger(id) && id > 0) {
-					const removed = memory.deleteItem(ctx.bridge.key, id, `admin:${ctx.msg.senderId}`);
-					await ctx.reply(removed ? `✅ 已删除记忆 #${id}` : `没有找到 #${id}`);
-					return;
-				}
-				const resolved = memory.resolveMember?.(ctx.bridge.key, tail);
-				if (resolved === undefined) {
-					await ctx.reply('当前版本不支持成员画像');
-					return;
-				}
-				if (!resolved.ok) {
-					await ctx.reply(`❌ ${resolved.error}`);
-					return;
-				}
-				const removed = memory.forgetMember?.(ctx.bridge.key, resolved.member.memberId, `admin:${ctx.msg.senderId}`) ?? 0;
-				await ctx.reply(`✅ 已删除「${resolved.member.displayName}」的 ${removed} 条画像`);
-				return;
-			}
-			if (sub === 'member') {
-				if (!ctx.admins.isAdmin(ctx.msg.senderId)) {
-					await ctx.reply('❌ 群成员画像仅管理员可查看（内容会发在群里，避免暴露他人画像）');
-					return;
-				}
-				const members = memory.listMembers?.(ctx.bridge.key) ?? [];
-				if (members.length === 0) {
-					await ctx.reply('（本群还没有成员画像；群里有人发言并开启长期记忆后会自动建立）');
-					return;
-				}
-				if (tail === '') {
-					const lines = [`【群成员画像】${ctx.bridge.label}（${members.length} 人）`];
-					for (const member of members) {
-						lines.push(`${member.displayName}：${member.active} 条生效 / ${member.pending} 条待确认`);
-					}
-					lines.push('', '用法：/memory member <昵称> 查看单个成员；/memory forget <昵称> 删除其画像（管理员）');
-					await ctx.reply(lines.join('\n'));
-					return;
-				}
-				const resolved = memory.resolveMember?.(ctx.bridge.key, tail);
-				if (resolved === undefined) {
-					await ctx.reply('当前版本不支持成员画像');
-					return;
-				}
-				if (!resolved.ok) {
-					await ctx.reply(`❌ ${resolved.error}`);
-					return;
-				}
-				const profile = memory.memberProfile?.(ctx.bridge.key, resolved.member.memberId) ?? '';
-				const facts = memory.listItems(ctx.bridge.key, { subjectId: resolved.member.memberId, status: 'all', limit: 30 });
-				const pending = facts.filter((fact) => fact.status === 'pending').length;
-				const lines = [`【成员画像】${resolved.member.displayName}（${facts.length} 条，${pending} 条待确认）`, profile === '' ? '（还没有生效的画像）' : profile];
-				if (pending > 0) lines.push(`（有 ${pending} 条待管理员在 WebUI 确认）`);
 				await ctx.reply(lines.join('\n'));
 				return;
 			}
-			if (sub === 'distill') {
-				await ctx.reply('⏳ 正在蒸馏这一段对话…');
-				const changed = await memory.distill(ctx.bridge.key, { force: true });
-				if (changed) {
-					await ctx.reply('✅ 长期记忆已更新（本轮起生效，画像段下一轮就能看到）');
+			if (sub === 'forget') {
+				if (!isAdmin()) {
+					await ctx.reply('❌ 只有管理员可以删除记忆片段');
 					return;
 				}
-				const reason = memory.lastDistillError?.(ctx.bridge.key);
-				if (reason !== undefined) {
-					await ctx.reply(`⚠️ 蒸馏失败：${reason}`);
+				const id = Number.parseInt(tail, 10);
+				if (!Number.isInteger(id) || id <= 0) {
+					await ctx.reply('用法：/memory forget <片段 id>');
 					return;
 				}
-				const note = memory.lastDistillNote?.(ctx.bridge.key);
-				await ctx.reply(note === undefined ? '（没有可蒸馏的新内容）' : `ℹ️ ${note}`);
+				const deleted = await memory.deleteChunk?.(id) ?? false;
+				await ctx.reply(deleted ? `✅ 已删除片段 #${id}` : `没有找到片段 #${id}`);
 				return;
 			}
-			if (sub === 'reload') {
-				memory.unfreeze(ctx.bridge.key);
-				await ctx.reply('✅ 已清画像缓存（本轮起系统提示读到最新条目）');
+			if (sub === 'reindex') {
+				if (!isAdmin()) {
+					await ctx.reply('❌ 只有管理员可以重建索引');
+					return;
+				}
+				const removed = await memory.reindex?.(ctx.bridge.key) ?? 0;
+				await ctx.reply(`✅ 已重建索引（删除 ${removed} 个旧片段，后台会重新生成）`);
 				return;
 			}
-			const profile = memory.cardSection(ctx.bridge.key);
-			const chat = memory.chatStats(ctx.bridge.key);
-			const stats = memory.stats();
-			const memberCount = memory.listMembers?.(ctx.bridge.key).length ?? 0;
-			const lines = [
-				`【长期记忆】${ctx.bridge.label}`,
-				`记忆：${chat.facts} 条条目（含成员画像）；档案：${chat.events} 条消息；群成员：${memberCount} 人（全库 ${stats.facts} 条 / ${stats.events} 条 / ${stats.chats} 个会话）`,
-				profile === '' ? '（本会话还没有画像条目）' : profile,
-				'',
-				'用法：/memory list ｜ /memory search <词> ｜ /memory member [昵称] ｜ /memory forget <id|昵称>（管理员）｜ /memory distill ｜ /memory reload',
-			];
-			await ctx.reply(lines.join('\n'));
+			if (sub === 'prune') {
+				if (!isAdmin()) {
+					await ctx.reply('❌ 只有管理员可以清理记忆');
+					return;
+				}
+				const removed = await memory.prune?.() ?? 0;
+				await ctx.reply(`✅ 已清理 ${removed} 条过期数据`);
+				return;
+			}
+			if (sub === 'setup') {
+				if (!isAdmin()) {
+					await ctx.reply('❌ 只有管理员可以安装运行时');
+					return;
+				}
+				await ctx.reply('⏳ 正在安装运行时/下载模型（可能需要几分钟，进度见消息日志）…');
+				const result = await memory.setup?.() ?? { installed: false, runtimeDir: '' };
+				await ctx.reply(result.installed ? `✅ 运行时已就绪：${result.runtimeDir}` : '⚠️ 运行时安装失败，继续 FTS-only；详见日志');
+				return;
+			}
+			await ctx.reply('用法：/memory [status|search <词>|recent [n]|forget <id>|reindex|prune|setup]');
+		},
+	},
+	skill: {
+		usage: '/skill [list|show <名称>|on|off|forget|promote <名称>|learn]',
+		help: '查看/管理自演进技能：list 列表，show 查看全文，on/off 启停（管理员），forget 删除（管理员），promote 提升全局（管理员），learn 查看最近学习状态',
+		async run(ctx) {
+			const memory = ctx.memory;
+			if (memory === undefined || !memory.ready) {
+				await ctx.reply('（长期记忆未启用或存储未就绪）');
+				return;
+			}
+			const [sub = 'list', ...rest] = ctx.arg.trim().split(/\s+/);
+			const tail = rest.join(' ').trim();
+			const isAdmin = (): boolean => {
+				try {
+					return ctx.admins.isAdmin(ctx.msg.senderId);
+				} catch {
+					return true;
+				}
+			};
+			const findSkill = async (): Promise<{ id: number; name: string } | undefined> => {
+				const skills = await memory.listSkills?.(ctx.bridge.key, true) ?? [];
+				return skills.find(skill => skill.name === tail);
+			};
+			if (sub === 'list' || sub === '') {
+				const skills = await memory.listSkills?.(ctx.bridge.key, false) ?? [];
+				if (skills.length === 0) {
+					await ctx.reply('（当前没有可用技能；带工具调用的成功对话后会自动学习）');
+					return;
+				}
+				const lines = [`【技能】${ctx.bridge.label}`];
+				for (const skill of skills) {
+					lines.push(`- ${skill.name}（${skill.scope === 'global' ? '全局' : '本会话'}，${skill.status}，用过 ${skill.useCount} 次）：${skill.description}`);
+				}
+				lines.push('', '用法：/skill show <名称> ｜ /skill on|off <名称>（管理员）｜ /skill forget <名称>（管理员）｜ /skill promote <名称>（管理员）');
+				await ctx.reply(lines.join('\n'));
+				return;
+			}
+			if (sub === 'show') {
+				if (tail === '') {
+					await ctx.reply('用法：/skill show <名称>');
+					return;
+				}
+				const skill = await memory.useSkill(ctx.bridge.key, tail);
+				await ctx.reply(skill === undefined ? `没有找到技能「${tail}」` : renderSkillBody(skill));
+				return;
+			}
+			if (sub === 'on' || sub === 'off') {
+				if (!isAdmin()) {
+					await ctx.reply('❌ 只有管理员可以启停技能');
+					return;
+				}
+				const skill = await findSkill();
+				if (skill === undefined) {
+					await ctx.reply(`没有找到技能「${tail}」`);
+					return;
+				}
+				const changed = await memory.toggleSkill?.(skill.id, sub === 'on' ? 'active' : 'disabled') ?? false;
+				await ctx.reply(changed ? `✅ 已${sub === 'on' ? '启用' : '停用'}「${skill.name}」` : '操作失败');
+				return;
+			}
+			if (sub === 'forget') {
+				if (!isAdmin()) {
+					await ctx.reply('❌ 只有管理员可以删除技能');
+					return;
+				}
+				const skill = await findSkill();
+				if (skill === undefined) {
+					await ctx.reply(`没有找到技能「${tail}」`);
+					return;
+				}
+				const deleted = await memory.deleteSkill?.(ctx.bridge.key, skill.id, `admin:${ctx.msg.senderId}`) ?? false;
+				await ctx.reply(deleted ? `✅ 已删除技能「${skill.name}」` : '删除失败');
+				return;
+			}
+			if (sub === 'promote') {
+				if (!isAdmin()) {
+					await ctx.reply('❌ 只有管理员可以提升全局技能');
+					return;
+				}
+				const skill = await findSkill();
+				if (skill === undefined) {
+					await ctx.reply(`没有找到技能「${tail}」`);
+					return;
+				}
+				const promoted = await memory.promoteSkill?.(ctx.bridge.key, skill.id);
+				await ctx.reply(promoted === undefined ? '提升失败' : `✅ 已提升为全局技能「${promoted.name}」`);
+				return;
+			}
+			if (sub === 'learn') {
+				const error = memory.lastSkillError?.(ctx.bridge.key);
+				await ctx.reply(error === undefined ? '（自动学习在带工具调用的成功轮次后触发；最近没有失败记录）' : `最近一次学习失败：${error}`);
+				return;
+			}
+			await ctx.reply('用法：/skill [list|show <名称>|on|off|forget|promote <名称>|learn]');
 		},
 	},
 	new: {

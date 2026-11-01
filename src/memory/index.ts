@@ -1,154 +1,80 @@
 /**
  * 记忆模块的对外装配面。
  *
- * `MemoryLike` 是**桥与工具真正依赖的最小接口**（与 dsh.ts 的 "Like" 策略一致）：
- * 这样 `bridge/chat.ts`、`pipeline/dispatcher.ts`、`tools/memory.ts` 都不需要
- * import 具体的 MemoryService 实现，单测里注入假实现也更容易。
+ * `MemoryLike` 是桥/工具/命令真正依赖的最小接口；单测可注入假实现。
+ * 具体实现是 `MemoryService`（RAG worker 门面）。
  */
+
 import type { Logger } from '../types.ts';
-import type { MemoryFact } from './types.ts';
+import type { MemoryLlmView } from './llm.ts';
 import { MemoryService, type MemoryConfigView } from './service.ts';
-import { openMemoryDatabase } from './store.ts';
+import type { AfterTurnInput, RagRecord, RagSkill, RagStatus, SkillDraft } from './rag/types.ts';
 
 export interface MemoryLike {
-	/** 是否可用（总开关打开且存储就绪）。 */
+	/** 是否可用（总开关打开且 worker 已就绪）。 */
 	readonly ready: boolean;
-	/** 记一条消息（入站或机器人自己的回复）；未启用时静默忽略。 */
-	record(event: {
-		chatKey: string;
-		generation: string;
-		ts?: number;
-		senderId: string;
-		senderName: string;
-		self?: boolean;
-		kind?: 'chat' | 'reply';
-		text: string;
-		msgId?: string;
-	}): number | undefined;
-	/** 群级卡片 section 文本（只放群级事实；无卡片时为空串）。 */
-	cardSection(chatKey: string): string;
-	/** 能力提示 section 文本（工具没注册时为空串）。 */
-	guidanceSection(available: boolean): string;
-	/** 解除卡片冻结（世代切换时调用）。 */
-	unfreeze(chatKey: string): void;
-	/** 新世代第一轮：产出一次性交接块（无内容时为空串）。 */
-	takeHandoff(chatKey: string, sessionId: string): Promise<string>;
-	/**
-	 * 标记某个 sessionId 已经"交接"过：fork 用完整原文继承了上一段，
-	 * 不能再让 takeHandoff 注入一份摘要（会与 fork 的历史重复）。
-	 */
-	markHanded?(chatKey: string, sessionId: string): void;
-	/** 每轮相关历史预取（零 LLM；不需要时为空串）。 */
-	prefetch(chatKey: string, query: string): string;
-	/** 单个群成员的画像（每轮注入 user 尾部；没有画像/未启用时为空串）。 */
-	memberProfile?(chatKey: string, memberId: string): string;
-	/** 群成员列表（WebUI / 命令用）。 */
-	listMembers?(chatKey: string): Array<{
-		memberRef: string;
-		memberId: string;
-		displayName: string;
-		active: number;
-		pending: number;
-		profile: string;
-	}>;
-	/** 按昵称/ref 找成员（工具与命令用）。 */
-	resolveMember?(chatKey: string, nameOrRef: string): { ok: true; member: { memberId: string; displayName: string } } | { ok: false; error: string };
-	/** 删除某个成员的全部记忆（“忘掉我”）。 */
-	forgetMember?(chatKey: string, memberId: string, actor: string): number;
-	/** 世代结束（/reset 前）：尽力蒸馏。 */
-	onGenerationEnd(chatKey: string, options?: { force?: boolean }): Promise<void>;
-	/** 每轮开始时清空写入失败计数。 */
-	resetTurnWriteFailures(chatKey: string): void;
-	/** 立即蒸馏（同一会话串行；返回是否真的落库了修改）。 */
-	distill(chatKey: string, options?: { force?: boolean }): Promise<boolean>;
-	/** 最近一次蒸馏失败的原因（`/memory distill` 直接回给用户；没失败过返回 undefined）。 */
-	lastDistillError?(chatKey: string): string | undefined;
-	/** 最近一次蒸馏"什么都没改"的说明（成功但零产出 / 没到阈值；失败时以 lastDistillError 为准）。 */
-	lastDistillNote?(chatKey: string): string | undefined;
-	/** 该会话的事实/档案条数（/memory 与诊断用）。 */
-	chatStats(chatKey: string): { facts: number; events: number };
-	/** 列记忆条目（`/memory list` 与 WebUI 用）。 */
-	listItems(
-		chatKey: string,
-		options?: { query?: string; status?: 'active' | 'pending' | 'superseded' | 'archived' | 'deleted' | 'all'; limit?: number; subjectId?: string | null },
-	): MemoryFact[];
-	/** 删除一条记忆（软删 + tombstone）。 */
-	deleteItem(chatKey: string, id: number, actor: string): boolean;
-	/** 测试召回：画像段 + 情景段。 */
-	preview(chatKey: string, query: string, memberId?: string): { profile: string; episodic: string };
+	/** 当前状态（WebUI/命令用）。 */
+	readonly currentStatus?: RagStatus;
+	/** 记一条消息；未启用时静默忽略。 */
+	record(event: RagRecord): void;
+	/** 每轮相关历史预取（无命中返回空串）。 */
+	prefetch(chatKey: string, query: string): Promise<string>;
 	/** `qq_recall_memory` 的实现。 */
-	recall(
-		chatKey: string,
-		query: string,
-		count?: number,
-		member?: string,
-		options?: { groupOnly?: boolean },
-	): { text: string; count: number; candidates: number };
-	/** `qq_memorize` 的实现。 */
-	memorize(input: {
-		chatKey: string;
-		action: 'add' | 'replace' | 'remove';
-		content?: string;
-		oldText?: string;
-		kind?: 'profile' | 'preference' | 'fact' | 'event' | 'plan' | 'rule';
-		subjectId?: string | null;
-		subjectName?: string;
-		self?: boolean;
-		isAdmin?: boolean;
-	}): { ok: true; text: string } | { ok: false; error: string; usage?: { label: string; entries: string[] } };
-	/** 配置热应用（卡片缓存失效 + 按总开关打开/关闭存储）。 */
+	recall(chatKey: string, query: string, count?: number): Promise<{ text: string; count: number; candidates: number }>;
+	/** 每轮可用技能列表（无命中返回空串）。 */
+	skills(chatKey: string, query: string): Promise<string>;
+	/** `qq_use_skill` 的实现。 */
+	useSkill(chatKey: string, name: string): Promise<RagSkill | undefined>;
+	listSkills?(chatKey: string, includeInactive?: boolean): Promise<RagSkill[]>;
+	recent?(chatKey: string, limit?: number): Promise<Array<{ id: number; chatKey: string; startSeq: number; endSeq: number; ts: number; text: string; score: number; rrf: number }>>;
+	deleteChunk?(chunkId: number): Promise<boolean>;
+	setup?(): Promise<{ installed: boolean; runtimeDir: string }>;
+	deleteSkill?(chatKey: string, skillId: number, actor: string): Promise<boolean>;
+	toggleSkill?(skillId: number, status: RagSkill['status']): Promise<boolean>;
+	promoteSkill?(chatKey: string, skillId: number): Promise<RagSkill | undefined>;
+	saveSkill?(draft: SkillDraft): Promise<RagSkill | undefined>;
+	/** 一轮结束后尝试学习技能（fire-and-forget）。 */
+	afterTurn?(input: AfterTurnInput): void;
+	/** 最近一次技能学习失败原因。 */
+	lastSkillError?(chatKey: string): string | undefined;
+	stats?(): Promise<RagStatus>;
+	prune?(): Promise<number>;
+	reindex?(chatKey?: string): Promise<number>;
+	/** 配置热应用。 */
 	reconfigure(): void;
-	stats(): { enabled: boolean; chats: number; facts: number; events: number; rev: number };
-	dispose(): void;
+	dispose(): Promise<void>;
 }
 
-export type { MemoryConfigView };
+export type { MemoryConfigView, MemoryLlmView, RagRecord, RagSkill, RagStatus, SkillDraft, AfterTurnInput };
 
 export interface CreateMemoryOptions {
-	/** 数据目录（库文件落在 `<dataDir>/memory.db`）。 */
+	/** 数据目录（库文件 `<dataDir>/memory.db`，runtime/models 也在其下）。 */
 	dataDir: string;
 	config: MemoryConfigView;
 	logger: Logger;
-	/** 会话称呼（群 888 / 好友 12345）。 */
-	labelOf: (chatKey: string) => string;
-	/** 惰性读取的 dsh llm 服务（蒸馏用；缺失则自动蒸馏停用）。 */
-	getLlm?: () => { stream?: unknown } | undefined;
-	/** 部署默认模型（蒸馏未显式配置模型时用它）。 */
+	/** 诊断痕迹出口（消息日志）。 */
+	note?: (event: string, detail: string) => void;
+	/** 惰性读取的 dsh llm 服务（技能学习用；缺失则学习停用）。 */
+	getLlm?: () => MemoryLlmView | undefined;
+	/** 部署默认模型。 */
 	getDefaultModel?: () => { provider?: string; model?: string } | undefined;
 	/** 构造 dsh-llm 的一次性用户消息（避免本模块直接依赖 dsh-llm）。 */
 	createUserMessage: (text: string) => unknown;
-	/** 存储就绪状态变化（打开 / 关闭 / 打开失败）后的回调：调用方同步工具注册。 */
-	onStorageChange?: () => void;
-	/** 诊断痕迹的出口（接到消息日志：WebUI 卡片 + NDJSON），见 MemoryServiceDeps.note。 */
-	note?: (event: string, detail: string) => void;
+	/** 存储就绪状态变化（打开/关闭/失败）后的回调：调用方同步工具注册。 */
+	onStatusChange?: () => void;
 }
 
-/** 创建并初始化记忆服务（总开关关着时返回一个「什么都不做」的服务实例）。 */
+/** 创建并初始化记忆服务（总开关关着时返回一个「什么都不做」的实例）。 */
 export async function createMemoryService(options: CreateMemoryOptions): Promise<MemoryService> {
 	const service = new MemoryService({
+		dataDir: options.dataDir,
 		config: options.config,
 		logger: options.logger,
-		// 存储随总开关热开热关：关着启动不建库，WebUI 打开后按需创建。
-		openStore: () =>
-			openMemoryDatabase({
-				filePath: `${options.dataDir}/memory.db`,
-				logger: options.logger,
-				maxEventsPerChat: options.config.memoryMaxEventsPerChat,
-				retentionDays: options.config.memoryRetentionDays,
-				factTtlDays: options.config.memoryFactTtlDays,
-				userPreferenceTtlDays: options.config.memoryUserPreferenceTtlDays,
-				tombstoneDays: options.config.memoryTombstoneDays,
-				sensitiveFilter: options.config.memorySensitiveFilter !== false,
-			}),
-		...(options.onStorageChange !== undefined ? { onStorageChange: options.onStorageChange } : {}),
 		...(options.note !== undefined ? { note: options.note } : {}),
-		getLlm: options.getLlm as never,
-		getDefaultModel: options.getDefaultModel,
-		labelOf: options.labelOf,
-		createUserMessage: options.createUserMessage as never,
-		// 空闲兜底蒸馏：默认 10 分钟一次（0 = 不启用）。
-		// 60s 心跳：空闲阈值是热配置，定时器间隔不能在这里快照。
-		idleSweepMs: 60_000,
+		...(options.getLlm !== undefined ? { getLlm: options.getLlm } : {}),
+		...(options.getDefaultModel !== undefined ? { getDefaultModel: options.getDefaultModel } : {}),
+		createUserMessage: options.createUserMessage,
+		...(options.onStatusChange !== undefined ? { onStatusChange: options.onStatusChange } : {}),
 	});
 	await service.openIfEnabled();
 	return service;

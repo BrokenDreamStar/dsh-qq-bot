@@ -128,7 +128,7 @@ describe('runTurn：没有总时长超时，只有无进展看门狗', () => {
 			expect(settled).toBe(false);
 
 			release?.();
-			await expect(promise).resolves.toEqual({ text: '', endReason: undefined, stalled: false });
+			await expect(promise).resolves.toEqual({ text: '', endReason: undefined, stalled: false, toolCalls: [] });
 		} finally {
 			vi.useRealTimers();
 		}

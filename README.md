@@ -8,7 +8,7 @@ DeepSeek Harness（dsh）× QQ 适配插件：以 **OneBot 11** 协议接入 QQ�
 OneBot 11 对接端 ⇄ Transport（正向/反向 WS）⇄ OneBot 协议层 ⇄ Pipeline ⇄ ChatBridge ⇄ dsh agent
 ```
 
-运行环境：Node ≥ 22.19.0，dsh ≥ **0.2.1-rc.2**（长期记忆需 Node ≥ 23.4，或 Node 22.x 加 `--experimental-sqlite`）。
+运行环境：Node ≥ 22.19.0，dsh ≥ **0.2.1-rc.2**（长期记忆使用 `node:sqlite` + FTS5；向量检索通过 `sqlite-vec` 运行时按需安装）。
 
 ## 快速开始
 
@@ -88,7 +88,7 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add link:/path/to/dsh-qq-bo
 | 群成员识别 | 成员名单（TTL + 落盘 + 单飞刷新，含角色与最近发言人）注入 system prompt；引用还原与 @ 语义化 |
 | 聊天记录 | `qq_read_history`：本地内存缓冲 + 对接端历史接口合并，只能读当前会话 |
 | 提问与回答 | agent 的 `ask_user_question`（含计划确认）转发到 QQ，接受 QQ 回复作为答案；与 dsh 界面两边谁先答用谁 |
-| 长期记忆 | 默认关闭。群级画像段（身份/偏好/规则，写入即生效）+ **群成员画像**（共享群里每个成员一份，每轮只注入当前说话人/被引用者，不注入全群）+ 情景段（每轮检索后注入 user 尾部）+ SQLite 记忆条目与原始档案 + 中文分词检索 + 世代交接 + 蒸馏（默认每 10 条/800 字/空闲兜底）+ WebUI「记忆库」/成员画像管理 |
+| 长期记忆（RAG） | 默认关闭。聊天写入本地 `<数据目录>/memory.db`，按 4 条/400 字切 chunk；FTS5 中文分词 + 可选 `sqlite-vec` 向量召回，开启重排时用本地 bge-reranker-base；相关片段注入 user 尾部（不进 system prompt）。WebUI「记忆库与技能」可查看检索结果、最近片段、运行时状态。**没有用户画像/群成员画像/蒸馏** |
 | 媒体与互动 | 收图落盘到会话媒体目录并把绝对路径交给 agent；戳一戳自动回复 |
 | 定时任务 | 任务总览与手动管理（启停/改期/删除/立即执行/新建）；任务绑定创建会话；每个任务可选「直接推送」（不调模型）或「agent 执行」 |
 | 人格模板 | 人格模板的增删改（`personas.json`）；模板只用于「还没有 SOUL.md 的会话」播种，或手动套用 |
@@ -111,10 +111,10 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add link:/path/to/dsh-qq-bo
 - **群聊里不提 QQ 号**：所有给模型看的文本（发言人标签、@ 提及、成员列表、聊天记录、引用块、记忆检索）只给昵称；号码仅用于插件内部。代价是重名成员无法靠号码区分。
 - **写句柄先占 + fork 兜底**：dsh 会话是单写者模型，在 dsh WebUI 里打开一个 QQ 会话就会占住写句柄。插件默认 `sessionIdleTimeoutMs: 0`（建立的会话永不回收），并在启动与重建后立刻占住，让界面只能复用同一个 agent；真被界面抢先时默认 `busyStrategy: fork`——从原会话的完整事件前缀分叉出新会话继续（`forkMaxEvents`，默认 4000 条，超出才回退），旧会话原样留给界面。`wait` 保留给"等界面关掉后继续原会话"的场景（`busyWaitMs`，默认 5 分钟，超时再 fork），`rotate` 只作最后兜底。`/status` 的「写句柄」行与 `/reclaim` 是配套入口。
 - **数据与工作目录同源**：每个聊天对象一个目录，它同时是 agent 默认工作目录、WebUI 左栏工作区与媒体落盘根；上下文隔离由 chatKey → 独立 sessionId 保证，不靠目录。
-- **网页搜索、长期记忆的工具默认只给管理员**（`qq_web_search`、`qq_recall_memory`、`qq_memorize` 不在聊天工具白名单里）；要让普通用户用，把它们加进 `userTools`。
+- **网页搜索、长期记忆/技能工具默认只给管理员**（`qq_web_search`、`qq_recall_memory`、`qq_use_skill`、`qq_list_skills` 不在聊天工具白名单里）；要让普通用户用，把它们加进 `userTools`。
 - **人格是每会话一份 `SOUL.md`**：首次建 agent 时从当前人格模板播种一次，之后文件是唯一生效源；`personas.json` 只做模板库，`chat-overrides.json` 只保留模型（旧 persona 字段仅用于首次播种）。改完文件后发 `/persona reload`，或在 WebUI「会话人格」里保存，会重建当前会话；`/persona <模板>` 用模板覆盖、`/persona reset` 恢复默认。不做旧数据迁移。**注意**：agent 有文件工具、cwd 就是会话目录，所以它能看到/改写 `SOUL.md`；别把 `write` / `edit` 随便放进普通用户的 `userTools`。
-- **群成员画像只给当前说话人**：共享群里张三发言时只注入张三的画像，李四发言时只注入李四的；引用别人消息时最多再带被引用者。全群画像不注入（token 与隐私都不允许），要查别人用 `qq_recall_memory(member="昵称")`。成员事实默认“本人自述直接生效、别人转述进候选区”，管理员在 WebUI「记忆库」里批准；`/memory member <昵称>` 可查看，`/memory forget <昵称>` 可删除（管理员）。
-- **热应用**：绝大多数配置改完即生效、无需重启。需要重启 dsh 的只有 `dataDir` 与「工具是否注册」类开关（`registerSendTools`、`tasksEnabled`、`historyEnabled`、`searchEnabled`）；长期记忆例外——它的总开关连工具一起即时注册/注销。
+- **RAG 只按当前会话检索**：每个 chatKey 独立库表，模型无法指定别的群/QQ 号；检索结果只给昵称与内容，QQ 号不进模型可见文本。没有成员画像、没有按人的聚合档案；「记住」只靠普通聊天进 RAG，需要时由 `qq_recall_memory` 检索。
+- **热应用**：绝大多数配置改完即生效、无需重启。需要重启 dsh 的只有 `dataDir` 与「工具是否注册」类开关（`registerSendTools`、`tasksEnabled`、`historyEnabled`、`searchEnabled`）；长期记忆的总开关连工具一起即时注册/注销，模型/运行时配置变化会重启 RAG worker。
 
 ## ⚠️ 安全须知（务必阅读）
 
@@ -154,7 +154,7 @@ QQ 群/私聊是**无认证入口**：任何能给机器人发消息的人都可
 | 会话目录（agent 工作目录 + 左栏分组 + 媒体根） | `<数据目录>/sessions/Friend_<QQ号>`、`Group_<群号>`（媒体在 `<会话目录>/media/<chatKey>/`） |
 | 人格模板 / 会话人格与模型覆盖 | `<数据目录>/personas.json`、`chat-overrides.json`；每个会话自己的 `<数据目录>/sessions/Friend_*\|Group_*/SOUL.md` |
 | 会话身份表（chatKey → sessionId）/ `/cwd` 覆盖 | `<数据目录>/chat-sessions.json`、`workspaces.json` |
-| 定时任务 / 群成员缓存 / 动态管理员 / 消息日志 / 长期记忆 | `<数据目录>/tasks.json`、`roster/`、`admins.json`、`message-log.ndjson`、`memory.db` |
+| 定时任务 / 群成员缓存 / 动态管理员 / 消息日志 / 长期记忆 | `<数据目录>/tasks.json`、`roster/`、`admins.json`、`message-log.ndjson`、`memory.db`、`models/`、`runtime/` |
 
 **dsh 宿主一侧：对话流水不在数据目录里**，而在 `$DSH_HOME`（默认 `~/.dsh`）下：
 
@@ -173,7 +173,7 @@ QQ 群/私聊是**无认证入口**：任何能给机器人发消息的人都可
 ## 命令与工具
 
 **内置命令**：`/help` `/status` `/reset` `/new` `/stop` `/sid` `/model` `/persona` `/cwd` `/op` `/deop` `/logs` `/tasks` `/memory` `/ping` `/reclaim`
-（`/memory` 支持 `list` 列条目、`search <词>` 检索、`member [昵称]` 看群成员画像（管理员）、`forget <id|昵称>` 删除条目/成员画像（管理员）、`distill` 立即蒸馏、`reload` 清画像缓存）
+（`/memory` 支持 `status`、`search <词>`、`recent [n]`、`forget <id>`（管理员）、`reindex`、`prune`、`setup`；`/skill` 支持 `list`、`show <名称>`、`on/off`、`forget`、`promote`、`learn`）
 
 **Agent 工具**：
 
@@ -183,7 +183,8 @@ QQ 群/私聊是**无认证入口**：任何能给机器人发消息的人都可
 | `qq_read_history` | 读取当前会话最近的聊天记录 |
 | `qq_web_search` | 按配置顺序联网搜索（默认仅管理员） |
 | `task_schedule` / `task_list` / `task_cancel` | 定时任务的登记 / 查询 / 取消（`delivery: direct` 为零 token 直接推送，`agent` 为到期唤醒模型） |
-| `qq_recall_memory` / `qq_memorize` | 长期记忆与群成员画像的检索/写入（默认仅管理员）；`member` / `about` 参数按昵称解析，不接受 QQ 号 |
+| `qq_recall_memory` | 检索当前会话的 RAG 历史（默认仅管理员） |
+| `qq_use_skill` / `qq_list_skills` | 加载/列出当前会话 + 全局的自演进技能（默认仅管理员） |
 | `ask_user_question`（dsh 内置） | 需要用户拍板时提问，问题与答案经 QQ 往返 |
 
 ## WebUI 配置界面
@@ -263,7 +264,7 @@ src/
 ├── persona/          # store（人格模板 + 会话覆盖）/ soul（每会话 SOUL.md）/ routes（friend_/group_ 选择器）/ rpc
 ├── tasks/            # 定时任务：schedule（时间表纯逻辑）/ template（direct 模板）/ store / scheduler / rpc
 ├── search/           # 网页搜索：priority（排序列表纯函数）/ providers / chain（顺延）/ service
-├── memory/           # 长期记忆：card / member（匿名 ref）/ store（SQLite + FTS5 + memory_members）/ rank / distill / handoff / guard / service / rpc / text
+├── memory/           # 长期记忆 RAG：rag/（db、chunk、fusion、render、worker、runtime、client）/ skills/（learn）/ guard / text / service / rpc
 ├── commands/         # 内置命令
 └── tools/            # qq_* 与 task_* 工具
 ```
@@ -272,7 +273,7 @@ dsh 还在 developer preview，API 可能有破坏性变更。所有 dsh API 调
 
 ## 相关文档
 
-- `docs/memory-design.md` — 长期记忆的设计与取舍
+- `docs/memory-design.md` — 长期记忆 RAG + 自演进技能的设计与取舍
 - `docs/memory-market-research.md` — 同类插件/记忆层/产品级实现的市场调研与改造建议
 
 ## License

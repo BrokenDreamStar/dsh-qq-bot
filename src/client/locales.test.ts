@@ -22,7 +22,7 @@ describe('toolLabel（工具勾选框的显示名）', () => {
 	});
 
 	it('对话工具与网页搜索/记忆工具都有中英文显示名', () => {
-		const names = [...CHAT_TOOLS, 'qq_web_search', 'qq_recall_memory', 'qq_memorize'];
+		const names = [...CHAT_TOOLS, 'qq_web_search', 'qq_recall_memory', 'qq_use_skill', 'qq_list_skills'];
 		for (const name of names) {
 			expect(toolLabel(bind(zh), name)).not.toBe(name);
 			expect(toolLabel(bind(en), name)).not.toBe(name);

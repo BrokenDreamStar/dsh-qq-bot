@@ -18,6 +18,8 @@ export interface TurnOutcome {
 	endReason?: TurnEndReason;
 	/** 无进展看门狗判定卡死并中断了这一轮（见 stall.ts；不是总时长超时）。 */
 	stalled: boolean;
+	/** 本轮工具调用摘要（技能学习用；只给名称 + 脱敏参数预览）。 */
+	toolCalls: Array<{ name: string; argsPreview?: string }>;
 }
 
 /**
@@ -40,10 +42,14 @@ export function readSessionEvents(session: SessionLogReader): readonly SessionEv
 }
 
 /** 从事件流里取本轮最后一条 assistant 文本与结束原因。 */
-export function summarizeTurn(events: readonly SessionEvent[], firstSeq: number): { text: string; endReason?: TurnEndReason } {
+export function summarizeTurn(
+	events: readonly SessionEvent[],
+	firstSeq: number,
+): { text: string; endReason?: TurnEndReason; toolCalls: Array<{ name: string; argsPreview?: string }> } {
 	let started = false;
 	let text = '';
 	let endReason: TurnEndReason | undefined;
+	const toolCalls: Array<{ name: string; argsPreview?: string }> = [];
 	for (const event of events) {
 		if (event.seq < firstSeq) continue;
 		if (event.type === 'turn/start') {
@@ -58,9 +64,30 @@ export function summarizeTurn(events: readonly SessionEvent[], firstSeq: number)
 				.join('');
 			if (joined.trim() !== '') text = joined;
 		}
+		if (event.type === 'tool/call') {
+			const data = event.data as { name?: unknown; arguments?: unknown };
+			const name = typeof data.name === 'string' ? data.name : '';
+			if (name !== '') toolCalls.push({ name, ...(previewArgs(data.arguments) !== undefined ? { argsPreview: previewArgs(data.arguments) } : {}) });
+		}
 		if (event.type === 'turn/end') endReason = event.data.reason;
 	}
-	return { text, endReason };
+	return { text, endReason, toolCalls };
+}
+
+/** 工具参数预览：只取常见安全字段，命中密钥字样就隐藏。 */
+function previewArgs(raw: unknown): string | undefined {
+	if (typeof raw !== 'string' || raw.trim() === '') return undefined;
+	if (/(password|passwd|token|secret|api[_-]?key|private[_-]?key)/i.test(raw)) return '[已隐藏]';
+	try {
+		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		for (const key of ['command', 'cmd', 'path', 'file', 'query', 'url', 'prompt', 'text']) {
+			const value = parsed[key];
+			if (typeof value === 'string' && value.trim() !== '') return value.slice(0, 200);
+		}
+	} catch {
+		// 不是 JSON：直接用原文
+	}
+	return raw.slice(0, 200);
 }
 
 export async function runTurn(options: {
@@ -109,8 +136,8 @@ export async function runTurn(options: {
 	} catch {
 		// 落盘失败不阻断回复（下次 flush 会补）。
 	}
-	const { text, endReason } = summarizeTurn(readSessionEvents(agent.session), firstSeq);
-	return { text, endReason, stalled };
+	const { text, endReason, toolCalls } = summarizeTurn(readSessionEvents(agent.session), firstSeq);
+	return { text, endReason, stalled, toolCalls };
 }
 
 /** 汇总一个会话累计 token 用量（/stats 用）。 */

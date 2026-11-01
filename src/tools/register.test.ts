@@ -88,21 +88,29 @@ describe('工具注册（defineTool 真的能编译这些 schema）', () => {
 		expect(definition.output?.schema?.required).toEqual(expect.arrayContaining(['sources', 'truncated', 'backends', 'unanswered']));
 	});
 
-	it('长期记忆两件套（recall / memorize）', () => {
+	it('长期记忆/技能三件套（recall / use_skill / list_skills）', () => {
 		const { ctx, names, definitions } = capture();
-		registerMemoryTools(ctx, fakeServices(), {} as never, { ready: true } as never, { memoryRecallEnabled: true } as never);
-		expect(names).toEqual(['qq_recall_memory', 'qq_memorize']);
+		registerMemoryTools(ctx, fakeServices(), {} as never, { ready: true } as never, {
+			memoryRecallEnabled: true,
+			memorySkillEnabled: true,
+		} as never);
+		expect(names).toEqual(['qq_recall_memory', 'qq_use_skill', 'qq_list_skills']);
 		// 必填字段同样走逐属性 required（对象级数组会让注册直接抛错）。
 		const recall = definitions[0] as { output?: { schema?: { required?: string[] } } };
 		expect(recall.output?.schema?.required).toEqual(expect.arrayContaining(['count', 'found', 'transcript']));
-		const memorize = definitions[1] as { output?: { schema?: { required?: string[] } } };
-		expect(memorize.output?.schema?.required).toEqual(expect.arrayContaining(['ok', 'message']));
+		const useSkill = definitions[1] as { output?: { schema?: { required?: string[] } } };
+		expect(useSkill.output?.schema?.required).toEqual(expect.arrayContaining(['found', 'name', 'body']));
+		const listSkills = definitions[2] as { output?: { schema?: { required?: string[] } } };
+		expect(listSkills.output?.schema?.required).toEqual(expect.arrayContaining(['count', 'skills']));
 	});
 
 	it('长期记忆工具可以运行时摘除（关掉总开关时用）', () => {
 		const { ctx, names } = capture();
-		const dispose = registerMemoryTools(ctx, fakeServices(), {} as never, { ready: true } as never, { memoryRecallEnabled: true } as never);
-		expect(names).toEqual(['qq_recall_memory', 'qq_memorize']);
+		const dispose = registerMemoryTools(ctx, fakeServices(), {} as never, { ready: true } as never, {
+			memoryRecallEnabled: true,
+			memorySkillEnabled: true,
+		} as never);
+		expect(names).toEqual(['qq_recall_memory', 'qq_use_skill', 'qq_list_skills']);
 		// 宿主返回 disposer 时必须能摘掉；返回 undefined = 老宿主，调用方据此记 warn。
 		expect(typeof dispose).toBe('function');
 		dispose?.();
@@ -120,8 +128,11 @@ describe('工具注册（defineTool 真的能编译这些 schema）', () => {
 				},
 			},
 		} as unknown as Context;
-		const dispose = registerMemoryTools(ctx, fakeServices(), {} as never, { ready: true } as never, { memoryRecallEnabled: true } as never);
-		expect(names).toEqual(['qq_recall_memory', 'qq_memorize']);
+		const dispose = registerMemoryTools(ctx, fakeServices(), {} as never, { ready: true } as never, {
+			memoryRecallEnabled: true,
+			memorySkillEnabled: true,
+		} as never);
+		expect(names).toEqual(['qq_recall_memory', 'qq_use_skill', 'qq_list_skills']);
 		expect(dispose).toBeUndefined();
 	});
 

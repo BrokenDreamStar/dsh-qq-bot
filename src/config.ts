@@ -198,86 +198,91 @@ export interface DshQQConfig {
 	 */
 	askUserWaitMs: number;
 
-	// 长期记忆（卡片「长期记忆」；默认关闭）
-	/**
-	 * 总开关：注入长期记忆卡片 + 记录会话档案 + 注册 qq_recall_memory / qq_memorize 工具。
-	 * **默认关闭**：开启后会按会话持久记录消息正文（有保留期与条数上限），需要显式同意。
-	 * **热应用**：打开即创建/打开记忆库并注册工具，关闭即关闭存储并摘除工具（库文件保留），
-	 * 采集/卡片/预取/交接/蒸馏同理，都不需要重启 dsh。
-	 */
+	// 长期记忆 / RAG（卡片「长期记忆」；默认关闭）
+	/** 总开关：记录聊天到本地 RAG 库、每轮注入相关历史、注册记忆/技能工具。默认关闭。 */
 	memoryEnabled: boolean;
-	/** 画像段字符预算（稳定层：身份/偏好/规则/置顶；超出时按分数丢弃尾部） */
-	memoryCardMaxChars: number;
-	/** 画像段独立预算（缺省回落到 memoryCardMaxChars） */
-	memoryProfileMaxChars: number;
-	/** 每轮情景段预算（检索到的记忆 + 原始消息；缺省 1200） */
-	memoryEpisodicMaxChars: number;
-	/** 单个会话的活跃记忆条数上限（超出按「非置顶 → 低重要度 → 低置信 → 最久未更新」淘汰） */
-	memoryMaxFacts: number;
-	/** 每轮 qq_memorize 允许的整理失败次数（超出则提示模型本轮停止整理） */
-	memoryMaxWriteFailuresPerTurn: number;
-	/** 注册 qq_recall_memory 检索工具（关 = 只保留卡片与自动预取） */
+	/** 首次开启时后台安装 runtime（@huggingface/transformers + sqlite-vec）。 */
+	memoryRuntimeAutoInstall: boolean;
+	/** 启用 embedding（bge-small-zh-v1.5 int8）；关闭则纯 FTS。 */
+	memoryEmbeddingEnabled: boolean;
+	/** embedding 模型 id（transformers.js 的 ONNX 移植）。 */
+	memoryEmbeddingModel: string;
+	/** ONNX 精度：int8 / fp16 / fp32。 */
+	memoryEmbeddingDtype: string;
+	/** HF 直连地址；失败自动切镜像。 */
+	memoryHfEndpoint: string;
+	/** HF 镜像地址（默认 hf-mirror.com）。 */
+	memoryHfMirror: string;
+	/** 启用本地 reranker（bge-reranker-base int8）；默认关闭。 */
+	memoryRerankEnabled: boolean;
+	/** reranker 模型 id。 */
+	memoryRerankModel: string;
+	/** 重排候选数（从融合 top-N 里取）。 */
+	memoryRerankTopN: number;
+	/** 重排超时（ms）；超时用融合分。 */
+	memoryRerankTimeoutMs: number;
+	/** 注册 qq_recall_memory 工具。 */
 	memoryRecallEnabled: boolean;
-	/** 单次召回的条数上限 */
+	/** 单次检索返回条数上限。 */
 	memoryRecallTopK: number;
-	/** 单次召回的正文总字数上限 */
+	/** 单次检索返回字数上限。 */
 	memoryRecallMaxChars: number;
-	/** 检索打分的时间衰减半衰期（天） */
-	memoryRecallHalfLifeDays: number;
-	/** 每轮按用户消息自动召回并注入相关历史（零 LLM，本地 FTS；与世代交接块二选一） */
+	/** 每轮自动预取相关历史。 */
 	memoryPrefetch: boolean;
-	/** 预取注入的最低分（低于则本轮不注入） */
+	/** 自动预取最低分（0~1）。 */
 	memoryPrefetchMinScore: number;
-	/** 预取最多注入的条数 */
+	/** 自动预取最多注入几条。 */
 	memoryPrefetchMaxItems: number;
-	/** 累计多少条新消息触发一次蒸馏（越大越省 token，时效性越差） */
-	memoryDistillEvery: number;
-	/** 蒸馏的最小新增字数（与条数阈值满足其一即可） */
-	memoryDistillMinChars: number;
-	/** 空闲多久后兜底蒸馏（ms；0 = 只在世代结束/手动时蒸馏） */
-	memoryDistillIdleMs: number;
-	/** 蒸馏用模型 provider（空 = 部署默认模型）；由「长期记忆」卡片的模型下拉与 model 一并写入 */
-	memoryDistillProvider: string;
-	/** 蒸馏用模型 id（空 = 部署默认模型）；WebUI 里是与「人格与模型」同一份清单的下拉 */
-	memoryDistillModel: string;
-	/** 蒸馏单次输出 token 上限（首轮尝试；不够时会用「空输出重试预算」再来一次） */
-	memoryDistillMaxTokens: number;
-	/** 空输出重试预算（token；0 = 不重试）：推理模型把预算烧在思考上时，放大预算再试一次 */
-	memoryDistillRetryTokens: number;
-	/** 单次蒸馏的超时（ms） */
-	memoryDistillTimeoutMs: number;
-	/** 世代交接块里附带的最后几条原话 */
-	memoryHandoffTail: number;
-	/** 世代结束（rotate/reset）时等待蒸馏的上限（ms；超时先用 tail 交接） */
-	memoryHandoffDistillWaitMs: number;
-	/** 会话档案（正文镜像）保留天数 */
+	/** 注入块总字数上限。 */
+	memoryInjectMaxChars: number;
+	/** 时间衰减半衰期（天）。 */
+	memoryRecencyHalfLifeDays: number;
+	/** 一个 chunk 最多几条消息。 */
+	memoryChunkMessages: number;
+	/** 一个 chunk 最多多少字。 */
+	memoryChunkMaxChars: number;
+	/** 相邻 chunk 重叠几条消息。 */
+	memoryChunkOverlap: number;
+	/** 聊天/ chunk 保留天数。 */
 	memoryRetentionDays: number;
-	/** 每个会话保留的档案条数上限 */
-	memoryMaxEventsPerChat: number;
-	/** 敏感类别过滤（手机号/住址/证件号/银行卡/健康/感情等；默认开启） */
+	/** 每个会话保留的消息条数上限。 */
+	memoryMaxMessagesPerChat: number;
+	/** 每个会话保留的 chunk 条数上限。 */
+	memoryMaxChunksPerChat: number;
+	/** 敏感信息过滤（手机号/证件号/银行卡/住址/凭证）。 */
 	memorySensitiveFilter: boolean;
-	/** 跨群/私聊共享用户画像（默认关闭：群友的闲聊不应自动变成跨群画像） */
-	memoryCrossGroupUserProfile: boolean;
-	/** 个人事实/低置信条目先进候选区（默认开启，管理员批准后才进画像） */
-	memoryCandidateReview: boolean;
-	/** 一般事实/事件的过期天数（默认 90；画像/偏好/规则不过期） */
-	memoryFactTtlDays: number;
-	/** 用户偏好的过期天数（默认 180） */
-	memoryUserPreferenceTtlDays: number;
-	/** 删除后的 tombstone 保留天数（默认 30；防止后台抽取复活已删内容） */
-	memoryTombstoneDays: number;
-	/** 每轮记录注入明细（id/分数/字符数；默认开启） */
+	/** 每轮记录注入明细。 */
 	memoryInjectLog: boolean;
-	/** 群成员画像（默认开启）：共享群每个成员一份，每轮只注入当前说话人/被引用者 */
-	memoryMemberProfiles: boolean;
-	/** 单个成员画像的字符预算（默认 400） */
-	memoryMemberProfileMaxChars: number;
-	/** 本人自述的成员事实直接生效（默认 true；false = 一律进候选区） */
-	memoryMemberAutoActive: boolean;
-	/** 单个成员的画像条数上限（默认 60） */
-	memoryMemberMaxFacts: number;
-	/** 单次蒸馏最多新增条数（默认 8） */
-	memoryDistillMaxNewFacts: number;
+	/** 启用自演进技能。 */
+	memorySkillEnabled: boolean;
+	/** 自动从成功轮次学习技能。 */
+	memorySkillAutoLearn: boolean;
+	/** 每多少轮尝试学习一次。 */
+	memorySkillLearnEveryTurns: number;
+	/** 至少几次工具调用才学习。 */
+	memorySkillLearnMinToolCalls: number;
+	/** 技能学习模型 provider（留空 = 部署默认）。 */
+	memorySkillProvider: string;
+	/** 技能学习模型 id（留空 = 部署默认）。 */
+	memorySkillModel: string;
+	/** 每个会话技能条数上限。 */
+	memorySkillMaxPerChat: number;
+	/** 每轮技能列表最多几条。 */
+	memorySkillInjectMaxItems: number;
+	/** 每轮技能列表字数上限。 */
+	memorySkillInjectMaxChars: number;
+	/** 自动生成的技能直接 active（false = draft）。 */
+	memorySkillAutoActivate: boolean;
+	/** 自动 active 的最低置信度。 */
+	memorySkillMinConfidence: number;
+	/** 技能正文最大字数。 */
+	memorySkillBodyMaxChars: number;
+	/** worker 检索超时（ms）。 */
+	memoryWorkerSearchTimeoutMs: number;
+	/** worker 写入超时（ms）。 */
+	memoryWorkerIngestTimeoutMs: number;
+	/** embedding 批大小。 */
+	memoryEmbedBatch: number;
 
 	// 媒体与互动（卡片「媒体与互动」）
 	/** 是否启用收图（下载图片传给 agent） */
@@ -419,44 +424,49 @@ export const ConfigSchema = Schema.object({
 	askUserEnabled: Schema.boolean().default(true).description('把 agent 的提问转发到 QQ：ask_user_question（以及计划确认等走同一条缝的工具）需要用户拍板时，把问题与选项发到 QQ，并接受 QQ 回复作为答案（回复序号/选项内容/自由文本，回复「跳过」跳过本题）。关闭后提问只在 dsh 界面里回答，QQ 用户看不到问题'),
 	askUserWaitMs: Schema.number().step(1000).min(0).max(3600000).default(DEFAULT_ASK_WAIT_MS).description('等待用户回答的上限（ms）：超时后不再等 QQ（把请求让给 dsh 界面的应答器；两边都没人答时模型会收到一条超时错误）；实际等待不超过单轮上限的一半；填 0 = 用默认值'),
 
-	// ── 长期记忆（卡片「长期记忆」）──
-	memoryEnabled: Schema.boolean().default(false).description('长期记忆总开关（默认关闭）：跨会话记住人物、群规与长期事项。开启后会按会话持久记录消息正文（<数据目录>/memory.db，含保留期与条数上限），并注册 qq_recall_memory / qq_memorize 工具（随开关即时注册/注销，无需重启）。记忆工具默认仅管理员可用，普通用户要用得在「工具权限」卡片加进 userTools'),
-	memoryCardMaxChars: Schema.number().step(50).min(200).max(2000).default(600).description('画像段字符预算：每轮随系统提示注入的稳定记忆上限（身份/偏好/规则/置顶；超出时按分数丢弃尾部，卡片末尾会提示还有多少条可用检索工具查看）'),
-	memoryProfileMaxChars: Schema.number().step(50).min(200).max(2000).default(400).description('画像段独立预算（留空/0 时回落到「记忆卡片字符预算」）：只放稳定身份、偏好与规则，建议 300–600 字'),
-	memoryEpisodicMaxChars: Schema.number().step(100).min(200).max(4000).default(1200).description('每轮情景段预算：把检索到的相关记忆与原始消息注入到当前 user 消息尾部，不污染 system 前缀缓存'),
-	memoryMaxFacts: Schema.number().step(5).min(5).max(1000).default(200).description('群级活跃记忆条数上限（只算 subject_id IS NULL 的群事实；成员画像另由「单个成员画像条数上限」控制。超出按「非置顶 → 低重要度 → 低置信 → 最久未更新」淘汰）'),
-	memoryMaxWriteFailuresPerTurn: Schema.number().step(1).min(0).max(10).default(3).description('每轮允许的记忆整理失败次数：卡片写满时报错让模型自己合并/删除，连续失败超过该值就提示它本轮停止整理（防止反复重试烧 token）'),
-	memoryRecallEnabled: Schema.boolean().default(true).description('注册 qq_recall_memory 检索工具：让 agent 主动查"几周前说过什么"（即时生效；每轮的自动预取不受它影响）'),
+	// ── 长期记忆 / RAG（卡片「长期记忆」）──
+	memoryEnabled: Schema.boolean().default(false).description('长期记忆总开关（默认关闭）：把聊天写入本地 RAG 库（<数据目录>/memory.db），每轮注入相关历史，并注册 qq_recall_memory / qq_use_skill / qq_list_skills 工具。首次开启会后台安装运行时并下载 embedding 模型；运行时未就绪时先跑 FTS-only。工具默认仅管理员可用，普通用户要用得在「工具权限」卡片加进 userTools'),
+	memoryRuntimeAutoInstall: Schema.boolean().default(true).description('首次开启时后台安装 RAG 运行时（@huggingface/transformers + sqlite-vec 到 <数据目录>/runtime/，不写插件依赖树）'),
+	memoryEmbeddingEnabled: Schema.boolean().default(true).description('启用 embedding（bge-small-zh-v1.5 int8）：关闭则只用 FTS5 关键词检索'),
+	memoryEmbeddingModel: Schema.string().default('Xenova/bge-small-zh-v1.5').description('embedding 模型 id（transformers.js 的 ONNX 移植；首次启用时下载到 <数据目录>/models/）'),
+	memoryEmbeddingDtype: Schema.string().default('int8').description('ONNX 精度：int8（默认，约 24MB）/ fp16 / fp32'),
+	memoryHfEndpoint: Schema.string().default('https://huggingface.co').description('HuggingFace 直连地址；下载失败会自动切换到下面的镜像重试'),
+	memoryHfMirror: Schema.string().default('https://hf-mirror.com').description('HuggingFace 镜像地址（直连失败时自动使用）'),
+	memoryRerankEnabled: Schema.boolean().default(false).description('启用本地 reranker（bge-reranker-base int8）：对融合 top-N 重新打分。默认关闭（首次启用会下载约 280MB 模型，CPU 推理有延迟）'),
+	memoryRerankModel: Schema.string().default('Xenova/bge-reranker-base').description('reranker 模型 id'),
+	memoryRerankTopN: Schema.number().step(5).min(5).max(100).default(50).description('重排候选数：从融合结果里取前 N 条做 (query, document) 打分'),
+	memoryRerankTimeoutMs: Schema.number().step(500).min(500).max(30000).default(5000).description('重排超时（ms）：超时/异常直接用融合分，不影响回复'),
+	memoryRecallEnabled: Schema.boolean().default(true).description('注册 qq_recall_memory 检索工具（即时生效；每轮自动预取不受它影响）'),
 	memoryRecallTopK: Schema.number().step(1).min(1).max(30).default(8).description('单次检索最多返回多少条历史记录'),
 	memoryRecallMaxChars: Schema.number().step(100).min(200).max(6000).default(1500).description('单次检索返回的正文总字数上限（整条取舍，不截断句子）'),
-	memoryRecallHalfLifeDays: Schema.number().step(1).min(1).max(365).default(30).description('检索打分的时间衰减半衰期（天）：越久远的记录权重越低'),
-	memoryPrefetch: Schema.boolean().default(true).description('每轮按用户消息自动召回相关历史并注入（本地 FTS 检索、零模型调用；覆盖率与分数不达标就不注入）'),
-	memoryPrefetchMinScore: Schema.number().step(0.05).min(0).max(1).default(0.35).description('自动预取的最低分（0~1）：低于该分本轮不注入历史片段'),
-	memoryPrefetchMaxItems: Schema.number().step(1).min(0).max(10).default(3).description('自动预取最多注入几条历史消息（0 = 关闭注入但仍保留检索工具）'),
-	memoryDistillEvery: Schema.number().step(5).min(5).max(1000).default(10).description('累计多少条新消息触发一次记忆蒸馏（默认 10；旧默认 50 在安静群里可能几天都不触发）'),
-	memoryDistillMinChars: Schema.number().step(100).min(200).max(20000).default(800).description('蒸馏的最小新增字数（与条数阈值满足其一即触发；默认 800）'),
-	memoryDistillIdleMs: Schema.number().step(60000).min(0).max(86400000).default(600000).description('空闲兜底蒸馏间隔（ms）：距上次成功蒸馏超过该时间且有新消息就补一次（会真正 force，不再被条数/字数阈值挡住）；0 = 只在世代结束或 /memory distill 时蒸馏。热应用：60s 心跳实时读取'),
-	memoryDistillProvider: Schema.string().default('').description('蒸馏用模型 provider（留空 = 部署默认模型）；WebUI 里不单独出现：由蒸馏模型下拉与 model 一并写入，手改配置同样生效'),
-	memoryDistillModel: Schema.string().default('').description('蒸馏用模型 id（留空 = 部署默认模型）；WebUI 里是与「人格与模型」卡片同一份 dsh 模型清单的下拉，选中后同时写 provider 与本项'),
-	memoryDistillMaxTokens: Schema.number().step(1).min(128).max(32768).default(800).description('蒸馏首轮尝试的输出 token 上限（上限 32768）。推理模型会把整个预算烧在思考上、一个可见字都不吐：这种情况插件会沿预算阶梯（4 倍递增，见「空输出重试预算」）自动往上试，并把够用/被吃光的预算记住，之后直接从那一档起步'),
-	memoryDistillRetryTokens: Schema.number().step(1).min(0).max(32768).default(16000).description('重试预算的**上限**（token；0 = 不重试）：首轮没有可见文本时，沿预算阶梯按 4 倍递增重试到这一档；哪一档成功就记住哪一档，下一轮直接起步（推理模型不必每轮重走阶梯）。推理模型的思考长度常常超过首轮预算，这里给足（默认 16000）才有可见输出。重试的超时按预算比例放宽（最多首轮的 4 倍、上限 120s）'),
-	memoryDistillTimeoutMs: Schema.number().step(1000).min(1000).max(120000).default(15000).description('单次蒸馏的超时（ms）：超时即中止本次蒸馏，水位线不推进，下次重试同一区间；空输出重试会按预算比例放宽这个上限（最多 4 倍、最高 120s）'),
-	memoryHandoffTail: Schema.number().step(1).min(0).max(50).default(10).description('世代交接块（换了新会话时注入一次）里附带的最后几条原话；0 = 只给摘要'),
-	memoryHandoffDistillWaitMs: Schema.number().step(500).min(0).max(30000).default(8000).description('世代结束（轮换/重置）时等待蒸馏完成的上限（ms）：超时就用现有卡片 + 最后几条原话先交接'),
-	memoryRetentionDays: Schema.number().step(1).min(1).max(3650).default(90).description('会话档案（消息正文镜像）保留天数，超期自动清理'),
-	memoryMaxEventsPerChat: Schema.number().step(100).min(100).max(200000).default(20000).description('每个会话保留的档案条数上限，超出删最旧的'),
-	memorySensitiveFilter: Schema.boolean().default(true).description('敏感类别过滤：手机号/住址/证件号/银行卡/健康/感情等默认不写入长期记忆（群友的隐私不该被自动做成画像）'),
-	memoryCrossGroupUserProfile: Schema.boolean().default(false).description('[预留] 跨群/私聊共享用户画像：当前版本尚未实现跨群检索，配置仅保留位；不要依赖它'),
-	memoryCandidateReview: Schema.boolean().default(false).description('个人事实/不可信来源先进候选区（pending），管理员在 WebUI 批准后才进画像；默认关闭（自动抽取直接生效），开启后更保守但需要人工批准'),
-	memoryFactTtlDays: Schema.number().step(1).min(1).max(3650).default(90).description('一般事实/事件的过期天数（默认 90；画像/偏好/规则不过期；检索命中不续期，只有再次确认才续期）'),
-	memoryUserPreferenceTtlDays: Schema.number().step(1).min(1).max(3650).default(180).description('用户偏好的过期天数（默认 180）'),
-	memoryTombstoneDays: Schema.number().step(1).min(1).max(3650).default(30).description('删除后的 tombstone 保留天数（默认 30；防止后台抽取把已删内容重新记回来）'),
-	memoryInjectLog: Schema.boolean().default(true).description('每轮记录注入明细（注入了哪些记忆 id、分数、字符数、是否截断），供 WebUI 诊断与 /memory 排查'),
-	memoryMemberProfiles: Schema.boolean().default(true).description('群成员画像：共享群会话里每个成员一份画像；每轮只把当前说话人（和被引用者）的画像注入本轮上下文，不注入全群，也不进 system prompt'),
-	memoryMemberProfileMaxChars: Schema.number().step(50).min(100).max(2000).default(400).description('单个群成员画像的字符预算（默认 400）；超出时按重要度/更新时间丢弃，不会截断单条句子'),
-	memoryMemberAutoActive: Schema.boolean().default(true).description('本人自述的成员事实直接生效（默认开启）；别人转述的事实始终进候选区等管理员确认。关闭后所有成员事实都先进候选区'),
-	memoryMemberMaxFacts: Schema.number().step(5).min(5).max(500).default(60).description('单个群成员的画像条数上限（默认 60；超出按非置顶→低重要度→最久未更新淘汰）'),
-	memoryDistillMaxNewFacts: Schema.number().step(1).min(1).max(30).default(8).description('单次蒸馏最多新增多少条记忆（默认 8；多人群里比 5 更合适，但别调太大以免一次塞入过多噪声）'),
+	memoryPrefetch: Schema.boolean().default(true).description('每轮按用户消息自动召回相关历史并注入 user 尾部（本地检索，零 LLM）'),
+	memoryPrefetchMinScore: Schema.number().step(0.05).min(0).max(1).default(0.35).description('自动预取的最低分（0~1）：低于该分本轮不注入'),
+	memoryPrefetchMaxItems: Schema.number().step(1).min(0).max(10).default(3).description('自动预取最多注入几条历史片段（0 = 关闭注入但仍保留检索工具）'),
+	memoryInjectMaxChars: Schema.number().step(100).min(200).max(6000).default(1200).description('注入块总字数上限（整条取舍，不截断句子）'),
+	memoryRecencyHalfLifeDays: Schema.number().step(1).min(1).max(365).default(30).description('时间衰减半衰期（天）：越久远的记录权重越低'),
+	memoryChunkMessages: Schema.number().step(1).min(1).max(20).default(4).description('一个 chunk 最多几条消息'),
+	memoryChunkMaxChars: Schema.number().step(50).min(100).max(2000).default(400).description('一个 chunk 最多多少字；超长消息按此切段'),
+	memoryChunkOverlap: Schema.number().step(1).min(0).max(5).default(1).description('相邻 chunk 重叠几条消息，避免问答对被切断'),
+	memoryRetentionDays: Schema.number().step(1).min(1).max(3650).default(365).description('聊天/chunk 保留天数，超期自动清理'),
+	memoryMaxMessagesPerChat: Schema.number().step(100).min(100).max(500000).default(50000).description('每个会话保留的消息条数上限'),
+	memoryMaxChunksPerChat: Schema.number().step(100).min(100).max(200000).default(20000).description('每个会话保留的 chunk 条数上限'),
+	memorySensitiveFilter: Schema.boolean().default(true).description('敏感信息过滤：手机号/证件号/银行卡/住址/凭证默认不写入长期记忆'),
+	memoryInjectLog: Schema.boolean().default(true).description('每轮记录注入明细（命中 id、分数、字符数），供 WebUI 与 /memory 排查'),
+	memorySkillEnabled: Schema.boolean().default(true).description('启用自演进技能：从成功轮次自动总结可复用流程，并在后续对话里检索/加载'),
+	memorySkillAutoLearn: Schema.boolean().default(true).description('自动学习技能（关闭后只能手动编辑/导入）'),
+	memorySkillLearnEveryTurns: Schema.number().step(1).min(1).max(100).default(6).description('每多少轮尝试学习一次（带工具调用的成功轮次才计入）'),
+	memorySkillLearnMinToolCalls: Schema.number().step(1).min(0).max(10).default(1).description('一轮至少几次工具调用才值得总结（0 = 纯聊天也学）'),
+	memorySkillProvider: Schema.string().default('').description('技能学习模型 provider（留空 = 部署默认）；WebUI 里由模型下拉与 model 一并写入'),
+	memorySkillModel: Schema.string().default('').description('技能学习模型 id（留空 = 部署默认模型）；WebUI 里与「人格与模型」同一份模型清单的下拉'),
+	memorySkillMaxPerChat: Schema.number().step(5).min(5).max(500).default(100).description('每个会话技能条数上限；超出按使用次数/更新时间淘汰到 archived'),
+	memorySkillInjectMaxItems: Schema.number().step(1).min(0).max(10).default(3).description('每轮技能列表最多展示几条（0 = 不注入）'),
+	memorySkillInjectMaxChars: Schema.number().step(50).min(100).max(2000).default(400).description('每轮技能列表字数上限'),
+	memorySkillAutoActivate: Schema.boolean().default(true).description('自动生成的技能直接 active；关闭则先进 draft 等管理员批准'),
+	memorySkillMinConfidence: Schema.number().step(0.05).min(0).max(1).default(0.6).description('自动 active 的最低置信度（低于则进 draft）'),
+	memorySkillBodyMaxChars: Schema.number().step(100).min(200).max(8000).default(2000).description('技能正文最大字数（防止上下文污染）'),
+	memoryWorkerSearchTimeoutMs: Schema.number().step(500).min(500).max(30000).default(5000).description('worker 检索超时（ms）：超时本轮不注入，不影响回复'),
+	memoryWorkerIngestTimeoutMs: Schema.number().step(1000).min(1000).max(120000).default(30000).description('worker 写入超时（ms）'),
+	memoryEmbedBatch: Schema.number().step(1).min(1).max(64).default(16).description('embedding 批大小（越大越快，内存占用越高）'),
 
 	mediaEnabled: Schema.boolean().default(true).description('启用收图（下载图片并把本地路径交给 agent）'),
 	mediaMaxMB: Schema.number().step(1).min(1).max(100).default(20).description('单张图片下载上限（MB）'),

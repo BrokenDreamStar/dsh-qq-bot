@@ -226,14 +226,11 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 		dataDir,
 		config,
 		logger,
-		// 记忆卡片/检索/蒸馏里的会话称呼**不带号码**：这些文本会进模型上下文，
-		// 号码一旦出现就会被写进回复（见 AGENTS.md「模型可见文本里不许出现 QQ 号」）。
-		labelOf: (chatKey) => (chatKey.startsWith('u-') ? '与对方的私聊' : '本群'),
-		getLlm: () => llmSeam,
+		getLlm: () => llmSeam as never,
 		getDefaultModel: () => services.agentDefaultModel.currentSelection(),
 		createUserMessage: (text) => createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }),
 		// 存储随总开关热开热关：状态一变就同步工具注册（见 syncMemoryTools）。
-		onStorageChange: () => {
+		onStatusChange: () => {
 			syncMemoryTools();
 		},
 		// 记忆的关键状态与失败原因进消息日志（WebUI「消息日志与诊断」卡片 + NDJSON）：
@@ -372,7 +369,7 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 		}
 	}
 
-	// 长期记忆工具（qq_recall_memory / qq_memorize）：默认仅管理员可用——它们
+	// 长期记忆/技能工具（qq_recall_memory / qq_use_skill / qq_list_skills）：默认仅管理员可用——它们
 	// **不在** CHAT_TOOLS 里，普通用户要用得显式加进 userTools（与 qq_web_search 同）。
 	// 工具随总开关与存储状态实时注册/注销：WebUI 打开开关（存储随之打开）后
 	// 立刻可用，关掉开关即摘掉，不需要重启 dsh。
@@ -384,10 +381,10 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 				memoryToolsDispose = registerMemoryTools(ctx, services, manager, memory, config);
 				memoryToolReady = true;
 				logger.info(
-					`dsh-qq-bot: 长期记忆已启用（卡片 ${config.memoryCardMaxChars} 字，蒸馏每 ${config.memoryDistillEvery} 条/空闲 ${Math.round(config.memoryDistillIdleMs / 60000)} 分钟；qq_recall_memory / qq_memorize 已注册）`,
+					`dsh-qq-bot: 长期记忆已启用（RAG：FTS${config.memoryEmbeddingEnabled ? ' + 向量' : ''}${config.memoryRerankEnabled ? ' + 重排' : ''}；qq_recall_memory / qq_use_skill / qq_list_skills 已注册）`,
 				);
 			} catch (error) {
-				logger.warn(`dsh-qq-bot: 长期记忆工具注册失败（qq_recall_memory / qq_memorize 不可用）: ${error instanceof Error ? error.message : String(error)}`);
+				logger.warn(`dsh-qq-bot: 长期记忆工具注册失败（qq_recall_memory / qq_use_skill / qq_list_skills 不可用）: ${error instanceof Error ? error.message : String(error)}`);
 			}
 			return;
 		}
@@ -622,7 +619,7 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 		// 聊天记录：开关/上限即时生效（缓冲调小立即裁剪）；工具注册仍需重启。
 		history.reconfigure();
 		// 长期记忆：卡片缓存失效 + 按新的保留期裁剪一次；总开关变化会顺带
-		// 打开/关闭存储，存储状态一变就同步记忆工具（见 onStorageChange）。
+		// 打开/关闭存储，存储状态一变就同步记忆工具（见 onStatusChange）。
 		memory.reconfigure();
 		// 空闲回收：`sessionIdleTimeoutMs` 改成 0 = 插件会话永不回收，
 		// 定时器要跟着启停（否则关掉的回收器还会继续跑）。
@@ -651,6 +648,9 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 	(ctx as unknown as { on(event: string, listener: () => void): void }).on('dispose', () => {
 		scheduler.stop();
 		transport.stop();
+		void memory.dispose().catch((error: unknown) => {
+			logger.warn(`dsh-qq-bot: 长期记忆 worker 关闭异常: ${error instanceof Error ? error.message : String(error)}`);
+		});
 		void manager.disposeAll().catch((error: unknown) => {
 			logger.warn(`dsh-qq-bot: 会话销毁异常: ${error instanceof Error ? error.message : String(error)}`);
 		});

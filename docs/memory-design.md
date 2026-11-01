@@ -1,3 +1,40 @@
+# 长期记忆：本地 RAG + 自演进技能（当前实现）
+
+> **2026-11-02 重构**：旧的「群级画像 + 群成员画像 + 事实卡 + 蒸馏 + 世代交接」
+> 已整体删除（`memory_facts` / `memory_members` / `memory_facts_fts` / handoff
+> 全部 drop），长期记忆改为**聊天 RAG** + **自演进技能**。下面是当前实现的边界；
+> 文末保留旧版设计作为历史参考。
+
+## 当前实现（2026-11-02）
+
+- **存储**：`<数据目录>/memory.db`，`node:sqlite` + FTS5；`sqlite-vec` 可选。
+  - `rag_messages`：聊天原文（`chat_key/session_id/ts/sender_name/self/kind/text/msg_id`）。
+  - `rag_chunks` + `rag_chunks_fts`：4 条 / 400 字一窗，1 条重叠；中文 `Intl.Segmenter` 预分词。
+  - `rag_chunk_vec`：`float[512]`，按 `chat_key` 分区（sqlite-vec 不支持分区时退化为全局 KNN + 过滤）。
+  - `rag_skills` + `rag_skills_fts` + `rag_skill_vec`：自演进技能（按 chatKey 隔离，管理员可提升全局）。
+  - `rag_meta` / `rag_audit` / `rag_skill_tombstones`。
+- **写入**：dispatcher 在访问控制/信息过滤之后调用 `memory.record()`；已注册命令、
+  自然语言元指令、敏感信息（手机号/证件号/银行卡/住址/凭证）不写入。
+  机器人最终回复以 `kind='reply'` 写入；主链路 fire-and-forget。
+- **读路径**：每轮 `prefetch()` 检索相关 chunk，注入 **user 消息尾部**（不进 system prompt）；
+  `qq_recall_memory` 按需检索；无命中不注入。
+- **混合召回**：FTS top-50 + 向量 top-50 → RRF → 时间衰减/词元覆盖率 → 可选 rerank top-50。
+- **嵌入**：`Xenova/bge-small-zh-v1.5`（ONNX int8，512 维，CLS pooling + L2 normalize，
+  query 侧加 BGE 指令前缀）。首次启用下载到 `<数据目录>/models/`，直连失败切 `hf-mirror.com`。
+- **重排**：`Xenova/bge-reranker-base`（ONNX int8），默认关闭；超时/异常回退融合分。
+- **运行时隔离**：Worker 线程 + `<数据目录>/runtime/<manifestHash>/` 动态安装
+  `@huggingface/transformers` / `sqlite-vec`；不写插件依赖树。runtime/模型未就绪时
+  `node:sqlite` + FTS5 继续工作（FTS-only）。
+- **技能**：成功且带工具调用的轮次后，按间隔用 `ctx.llm.stream()` 总结可复用流程；
+  技能是**文本说明**，不是可执行代码。`qq_use_skill` 加载全文，工具权限仍由
+  `toolGuard` 决定。默认自动 active、仅当前会话；管理员可停用/删除/提升全局。
+- **没有**：用户画像、群成员画像、事实卡、蒸馏、世代交接、`qq_memorize`。
+  「记住」= 普通聊天进 RAG，需要时检索；没有确定性置顶入口。
+
+---
+
+# 附录：旧版设计（已废弃，仅历史参考）
+
 # 跨会话长期记忆（group memory）设计方案
 
 > 目标：**同一个 QQ 会话（chatKey）跨会话世代记住东西**，在性能与 token 消耗之间取得可控平衡。

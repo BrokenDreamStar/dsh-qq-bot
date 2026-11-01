@@ -95,7 +95,7 @@ export function contentHash(text: string): string {
  *
  * 这类消息不应该被蒸馏成记忆（否则"把刚才那条删了"会变成一条用户偏好），
  * 也不应该参与画像。保守匹配，避免误伤"记住我喜欢简短回复"这类真正的记忆请求
- * ——后者由 `qq_memorize` 工具处理，本来就不依赖蒸馏。
+ * ——新实现里「记住」只靠普通聊天进 RAG，不再有 qq_memorize/蒸馏。
  */
 const META_COMMAND_PATTERNS: readonly RegExp[] = [
 	/^(把)?(刚才|刚刚|之前|上一条|那条|这条).{0,8}(删|删掉|删除|忘|忘掉|取消)/,

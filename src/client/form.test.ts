@@ -67,15 +67,18 @@ describe('字段定义与文案字典', () => {
 			'rateLimit.windowMs', 'rateLimit.max', 'rosterEnabled', 'rosterTtlMs', 'rosterMaxMembers', 'quoteMaxChars',
 			'historyEnabled', 'historyMaxMessages', 'historyBufferPerChat', 'historyRemoteFetch',
 			'askUserEnabled', 'askUserWaitMs',
-			'memoryEnabled', 'memoryCardMaxChars', 'memoryProfileMaxChars', 'memoryEpisodicMaxChars', 'memoryMaxFacts', 'memoryMaxWriteFailuresPerTurn',
-			'memoryMemberProfiles', 'memoryMemberProfileMaxChars', 'memoryMemberMaxFacts', 'memoryMemberAutoActive',
-			'memoryRecallEnabled', 'memoryRecallTopK', 'memoryRecallMaxChars', 'memoryRecallHalfLifeDays',
-			'memoryPrefetch', 'memoryPrefetchMinScore', 'memoryPrefetchMaxItems',
-			'memoryDistillEvery', 'memoryDistillMinChars', 'memoryDistillIdleMs', 'memoryDistillMaxNewFacts',
-			'memoryDistillModel', 'memoryDistillMaxTokens', 'memoryDistillRetryTokens', 'memoryDistillTimeoutMs',
-			'memoryHandoffTail', 'memoryHandoffDistillWaitMs', 'memoryRetentionDays', 'memoryMaxEventsPerChat',
-			'memorySensitiveFilter', 'memoryCrossGroupUserProfile', 'memoryCandidateReview',
-			'memoryFactTtlDays', 'memoryUserPreferenceTtlDays', 'memoryInjectLog', 'memoryTombstoneDays',
+			'memoryEnabled', 'memoryRuntimeAutoInstall',
+			'memoryEmbeddingEnabled', 'memoryEmbeddingModel', 'memoryEmbeddingDtype', 'memoryHfEndpoint', 'memoryHfMirror',
+			'memoryRerankEnabled', 'memoryRerankModel', 'memoryRerankTopN', 'memoryRerankTimeoutMs',
+			'memoryRecallEnabled', 'memoryRecallTopK', 'memoryRecallMaxChars',
+			'memoryPrefetch', 'memoryPrefetchMinScore', 'memoryPrefetchMaxItems', 'memoryInjectMaxChars', 'memoryRecencyHalfLifeDays',
+			'memoryChunkMessages', 'memoryChunkMaxChars', 'memoryChunkOverlap', 'memoryRetentionDays',
+			'memoryMaxMessagesPerChat', 'memoryMaxChunksPerChat', 'memoryEmbedBatch',
+			'memorySensitiveFilter', 'memoryInjectLog',
+			'memorySkillEnabled', 'memorySkillAutoLearn', 'memorySkillLearnEveryTurns', 'memorySkillLearnMinToolCalls',
+			'memorySkillModel', 'memorySkillMaxPerChat', 'memorySkillInjectMaxItems', 'memorySkillInjectMaxChars',
+			'memorySkillAutoActivate', 'memorySkillMinConfidence', 'memorySkillBodyMaxChars',
+			'memoryWorkerSearchTimeoutMs', 'memoryWorkerIngestTimeoutMs',
 			'restrictTools', 'userTools', 'blockedTools', 'replyMaxChars',
 			'foldForward', 'foldThreshold', 'replyWithQuote', 'replyQuoteOnMention', 'replyWithMention', 'mediaEnabled', 'mediaMaxMB',
 			'pokeReply', 'autoApproveRequests', 'preset', 'workspaceMode',
@@ -255,12 +258,12 @@ describe('formatField / parseField', () => {
 	});
 
 	it('modelSelect：字段定义带 provider 伴生路径（一次选择写两项）', () => {
-		const def = FIELD_GROUPS.flatMap((group) => group.fields).find((entry) => entry.key === 'memoryDistillModel');
+		const def = FIELD_GROUPS.flatMap((group) => group.fields).find((entry) => entry.key === 'memorySkillModel');
 		expect(def?.kind).toBe('modelSelect');
-		expect(def?.path).toEqual(['memoryDistillModel']);
-		expect(def?.extraPaths).toEqual([['memoryDistillProvider']]);
+		expect(def?.path).toEqual(['memorySkillModel']);
+		expect(def?.extraPaths).toEqual([['memorySkillProvider']]);
 		// provider 不再单独占一行（值由同一个下拉写入）。
-		expect(FIELD_GROUPS.flatMap((group) => group.fields).some((entry) => entry.key === 'memoryDistillProvider')).toBe(false);
+		expect(FIELD_GROUPS.flatMap((group) => group.fields).some((entry) => entry.key === 'memorySkillProvider')).toBe(false);
 	});
 });
 
@@ -573,71 +576,71 @@ describe('DshQQCardController（按卡暂存/保存）', () => {
 	});
 
 	it('modelSelect：未暂存时显示 provider/model 合成的规格串', () => {
-		const fake = fakeScope({ value: { memoryDistillProvider: 'deepseek-official', memoryDistillModel: 'deepseek-chat' } });
+		const fake = fakeScope({ value: { memorySkillProvider: 'deepseek-official', memorySkillModel: 'deepseek-chat' } });
 		const face = new DshQQCardController(fake.scope).inject() as unknown as CardFace;
 		const state = face.hooks.dshQQCard.getSnapshot();
-		expect(state.fields.memoryDistillModel.kind).toBe('modelSelect');
-		expect(state.fields.memoryDistillModel.text).toBe('deepseek-official/deepseek-chat');
+		expect(state.fields.memorySkillModel.kind).toBe('modelSelect');
+		expect(state.fields.memorySkillModel.text).toBe('deepseek-official/deepseek-chat');
 		expect(state.cards.memory.dirty).toBe(false);
 	});
 
 	it('modelSelect：任一段为空都显示为"部署默认"（空串）', () => {
-		const onlyModel = fakeScope({ value: { memoryDistillProvider: '', memoryDistillModel: 'deepseek-chat' } });
+		const onlyModel = fakeScope({ value: { memorySkillProvider: '', memorySkillModel: 'deepseek-chat' } });
 		const face = new DshQQCardController(onlyModel.scope).inject() as unknown as CardFace;
-		expect(face.hooks.dshQQCard.getSnapshot().fields.memoryDistillModel.text).toBe('');
+		expect(face.hooks.dshQQCard.getSnapshot().fields.memorySkillModel.text).toBe('');
 		// 只有 provider（手改配置）：模型为空仍算"未指定"，不显示成半截规格串。
-		const onlyProvider = fakeScope({ value: { memoryDistillProvider: 'deepseek-official', memoryDistillModel: '' } });
+		const onlyProvider = fakeScope({ value: { memorySkillProvider: 'deepseek-official', memorySkillModel: '' } });
 		const face2 = new DshQQCardController(onlyProvider.scope).inject() as unknown as CardFace;
-		expect(face2.hooks.dshQQCard.getSnapshot().fields.memoryDistillModel.text).toBe('');
+		expect(face2.hooks.dshQQCard.getSnapshot().fields.memorySkillModel.text).toBe('');
 	});
 
 	it('modelSelect：一次选择同时写 provider 与 model 两个配置项', async () => {
-		const fake = fakeScope({ value: { memoryDistillProvider: '', memoryDistillModel: '' } });
+		const fake = fakeScope({ value: { memorySkillProvider: '', memorySkillModel: '' } });
 		const face = new DshQQCardController(fake.scope).inject() as unknown as CardFace;
-		face.stageValue('memoryDistillModel', 'deepseek-official/deepseek-chat');
+		face.stageValue('memorySkillModel', 'deepseek-official/deepseek-chat');
 		const state = face.hooks.dshQQCard.getSnapshot();
 		expect(state.cards.memory.dirty).toBe(true);
-		expect(state.fields.memoryDistillModel.text).toBe('deepseek-official/deepseek-chat');
-		expect(state.fields.memoryDistillModel.overridden).toBe(true);
+		expect(state.fields.memorySkillModel.text).toBe('deepseek-official/deepseek-chat');
+		expect(state.fields.memorySkillModel.overridden).toBe(true);
 		face.save('memory');
 		await settle();
 		expect(fake.committed[0]).toEqual([
-			{ op: 'set', path: ['memoryDistillModel'], value: 'deepseek-chat' },
-			{ op: 'set', path: ['memoryDistillProvider'], value: 'deepseek-official' },
+			{ op: 'set', path: ['memorySkillModel'], value: 'deepseek-chat' },
+			{ op: 'set', path: ['memorySkillProvider'], value: 'deepseek-official' },
 		]);
 	});
 
 	it('modelSelect：模型 id 含斜杠时只按第一个斜杠切分 provider', async () => {
-		const fake = fakeScope({ value: { memoryDistillProvider: '', memoryDistillModel: '' } });
+		const fake = fakeScope({ value: { memorySkillProvider: '', memorySkillModel: '' } });
 		const face = new DshQQCardController(fake.scope).inject() as unknown as CardFace;
-		face.stageValue('memoryDistillModel', 'openrouter/anthropic/claude-sonnet-4');
+		face.stageValue('memorySkillModel', 'openrouter/anthropic/claude-sonnet-4');
 		face.save('memory');
 		await settle();
 		expect(fake.committed[0]).toEqual([
-			{ op: 'set', path: ['memoryDistillModel'], value: 'anthropic/claude-sonnet-4' },
-			{ op: 'set', path: ['memoryDistillProvider'], value: 'openrouter' },
+			{ op: 'set', path: ['memorySkillModel'], value: 'anthropic/claude-sonnet-4' },
+			{ op: 'set', path: ['memorySkillProvider'], value: 'openrouter' },
 		]);
 	});
 
 	it('modelSelect：选「部署默认」= 两个路径都退回组合层；无覆盖时不产生写入', async () => {
 		const covered = fakeScope({
-			value: { memoryDistillProvider: 'deepseek-official', memoryDistillModel: 'deepseek-chat' },
-			user: { memoryDistillProvider: 'deepseek-official', memoryDistillModel: 'deepseek-chat' },
+			value: { memorySkillProvider: 'deepseek-official', memorySkillModel: 'deepseek-chat' },
+			user: { memorySkillProvider: 'deepseek-official', memorySkillModel: 'deepseek-chat' },
 		});
 		const face = new DshQQCardController(covered.scope).inject() as unknown as CardFace;
-		face.stageValue('memoryDistillModel', '');
+		face.stageValue('memorySkillModel', '');
 		expect(face.hooks.dshQQCard.getSnapshot().cards.memory.dirty).toBe(true);
 		face.save('memory');
 		await settle();
 		expect(covered.committed[0]).toEqual([
-			{ op: 'unset', path: ['memoryDistillModel'] },
-			{ op: 'unset', path: ['memoryDistillProvider'] },
+			{ op: 'unset', path: ['memorySkillModel'] },
+			{ op: 'unset', path: ['memorySkillProvider'] },
 		]);
 
 		// 组合层本来就没有覆盖（默认就是部署默认）→ 不产生任何写入。
-		const bare = fakeScope({ value: { memoryDistillProvider: '', memoryDistillModel: '' } });
+		const bare = fakeScope({ value: { memorySkillProvider: '', memorySkillModel: '' } });
 		const face2 = new DshQQCardController(bare.scope).inject() as unknown as CardFace;
-		face2.stageValue('memoryDistillModel', '');
+		face2.stageValue('memorySkillModel', '');
 		expect(face2.hooks.dshQQCard.getSnapshot().cards.memory.dirty).toBe(false);
 		face2.save('memory');
 		await settle();
@@ -646,11 +649,11 @@ describe('DshQQCardController（按卡暂存/保存）', () => {
 
 	it('modelSelect：重选当前项不产生写入', async () => {
 		const fake = fakeScope({
-			value: { memoryDistillProvider: 'deepseek-official', memoryDistillModel: 'deepseek-chat' },
-			user: { memoryDistillProvider: 'deepseek-official', memoryDistillModel: 'deepseek-chat' },
+			value: { memorySkillProvider: 'deepseek-official', memorySkillModel: 'deepseek-chat' },
+			user: { memorySkillProvider: 'deepseek-official', memorySkillModel: 'deepseek-chat' },
 		});
 		const face = new DshQQCardController(fake.scope).inject() as unknown as CardFace;
-		face.stageValue('memoryDistillModel', 'deepseek-official/deepseek-chat');
+		face.stageValue('memorySkillModel', 'deepseek-official/deepseek-chat');
 		expect(face.hooks.dshQQCard.getSnapshot().cards.memory.dirty).toBe(false);
 		face.save('memory');
 		await settle();
@@ -659,22 +662,22 @@ describe('DshQQCardController（按卡暂存/保存）', () => {
 
 	it('modelSelect：resetField 把两个路径一起退回组合层', async () => {
 		const fake = fakeScope({
-			value: { memoryDistillProvider: 'deepseek-official', memoryDistillModel: 'deepseek-chat' },
-			user: { memoryDistillProvider: 'deepseek-official', memoryDistillModel: 'deepseek-chat' },
+			value: { memorySkillProvider: 'deepseek-official', memorySkillModel: 'deepseek-chat' },
+			user: { memorySkillProvider: 'deepseek-official', memorySkillModel: 'deepseek-chat' },
 		});
 		const face = new DshQQCardController(fake.scope).inject() as unknown as CardFace;
-		expect(face.hooks.dshQQCard.getSnapshot().fields.memoryDistillModel.overridden).toBe(true);
-		face.resetField('memoryDistillModel');
+		expect(face.hooks.dshQQCard.getSnapshot().fields.memorySkillModel.overridden).toBe(true);
+		face.resetField('memorySkillModel');
 		const state = face.hooks.dshQQCard.getSnapshot();
-		expect(state.fields.memoryDistillModel.text).toBe('');
+		expect(state.fields.memorySkillModel.text).toBe('');
 		// 「恢复默认」是"退回组合层"手势：保存后不再有覆盖（与 toolList 同类语义）。
-		expect(state.fields.memoryDistillModel.overridden).toBe(false);
+		expect(state.fields.memorySkillModel.overridden).toBe(false);
 		expect(state.cards.memory.dirty).toBe(true);
 		face.save('memory');
 		await settle();
 		expect(fake.committed[0]).toEqual([
-			{ op: 'unset', path: ['memoryDistillModel'] },
-			{ op: 'unset', path: ['memoryDistillProvider'] },
+			{ op: 'unset', path: ['memorySkillModel'] },
+			{ op: 'unset', path: ['memorySkillProvider'] },
 		]);
 	});
 

@@ -1343,211 +1343,225 @@ function useTaskData(getRpc: (() => RpcCaller | undefined) | undefined, active: 
 	};
 }
 
-/** WebUI 记忆条目视图（宿主 `memory/list` 的返回）。 */
-interface MemoryItemView {
+/** 记忆/技能面板的视图类型（宿主 RPC 返回）。 */
+interface RagStatusView {
+	ready: boolean;
+	db: boolean;
+	fts: boolean;
+	vec: boolean;
+	embed: boolean;
+	rerank: boolean;
+	runtime: string;
+	model: string;
+	messages: number;
+	chunks: number;
+	skills: number;
+	lastError?: string;
+}
+
+interface RagChunkView {
 	id: number;
-	content: string;
-	kind: string;
+	ts: number;
+	text: string;
+	score: number;
+}
+
+interface RagSkillView {
+	id: number;
+	name: string;
+	description: string;
+	whenToUse: string;
+	body: string;
 	status: string;
-	importance: number;
-	pinned: boolean;
-	updatedAt: number;
+	scope: string;
+	useCount: number;
 }
 
-interface MemoryMemberView {
-	memberId: string;
-	memberRef: string;
-	displayName: string;
-	active: number;
-	pending: number;
-	profile: string;
-}
-
-function parseMemoryMembers(value: unknown): MemoryMemberView[] {
+function parseRagStatus(value: unknown): RagStatusView | null {
 	const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
-	const raw = Array.isArray(record.members) ? record.members : [];
-	const members: MemoryMemberView[] = [];
-	for (const entry of raw) {
-		if (entry === null || typeof entry !== 'object') continue;
-		const row = entry as Record<string, unknown>;
-		if (typeof row.memberId !== 'string' || typeof row.displayName !== 'string') continue;
-		members.push({
-			memberId: row.memberId,
-			memberRef: typeof row.memberRef === 'string' ? row.memberRef : '',
-			displayName: row.displayName,
-			active: typeof row.active === 'number' ? row.active : 0,
-			pending: typeof row.pending === 'number' ? row.pending : 0,
-			profile: typeof row.profile === 'string' ? row.profile : '',
-		});
-	}
-	return members;
+	if (typeof record.ready !== 'boolean') return null;
+	return {
+		ready: record.ready,
+		db: record.db === true,
+		fts: record.fts === true,
+		vec: record.vec === true,
+		embed: record.embed === true,
+		rerank: record.rerank === true,
+		runtime: typeof record.runtime === 'string' ? record.runtime : 'unknown',
+		model: typeof record.model === 'string' ? record.model : 'unknown',
+		messages: typeof record.messages === 'number' ? record.messages : 0,
+		chunks: typeof record.chunks === 'number' ? record.chunks : 0,
+		skills: typeof record.skills === 'number' ? record.skills : 0,
+		...(typeof record.lastError === 'string' ? { lastError: record.lastError } : {}),
+	};
 }
 
-function parseMemoryItems(value: unknown): MemoryItemView[] {
+function parseChunks(value: unknown): RagChunkView[] {
 	const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 	const raw = Array.isArray(record.items) ? record.items : [];
-	const items: MemoryItemView[] = [];
+	const items: RagChunkView[] = [];
 	for (const entry of raw) {
 		if (entry === null || typeof entry !== 'object') continue;
 		const row = entry as Record<string, unknown>;
-		if (typeof row.id !== 'number' || typeof row.content !== 'string') continue;
+		if (typeof row.id !== 'number' || typeof row.text !== 'string') continue;
 		items.push({
 			id: row.id,
-			content: row.content,
-			kind: typeof row.kind === 'string' ? row.kind : 'fact',
-			status: typeof row.status === 'string' ? row.status : 'active',
-			importance: typeof row.importance === 'number' ? row.importance : 0.5,
-			pinned: row.pinned === true,
-			updatedAt: typeof row.updatedAt === 'number' ? row.updatedAt : 0,
+			ts: typeof row.ts === 'number' ? row.ts : 0,
+			text: row.text,
+			score: typeof row.score === 'number' ? row.score : 0,
 		});
 	}
 	return items;
 }
 
+function parseSkills(value: unknown): RagSkillView[] {
+	const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+	const raw = Array.isArray(record.items) ? record.items : [];
+	const items: RagSkillView[] = [];
+	for (const entry of raw) {
+		if (entry === null || typeof entry !== 'object') continue;
+		const row = entry as Record<string, unknown>;
+		if (typeof row.id !== 'number' || typeof row.name !== 'string') continue;
+		items.push({
+			id: row.id,
+			name: row.name,
+			description: typeof row.description === 'string' ? row.description : '',
+			whenToUse: typeof row.whenToUse === 'string' ? row.whenToUse : '',
+			body: typeof row.body === 'string' ? row.body : '',
+			status: typeof row.status === 'string' ? row.status : 'active',
+			scope: row.scope === 'global' ? 'global' : 'chat',
+			useCount: typeof row.useCount === 'number' ? row.useCount : 0,
+		});
+	}
+	return items;
+}
+
+function formatChunkTime(ts: number): string {
+	if (!Number.isFinite(ts) || ts <= 0) return '';
+	const date = new Date(ts);
+	const pad = (value: number): string => String(value).padStart(2, '0');
+	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 /**
- * 记忆库面板（卡片展开体）：输入 chatKey 后查看/搜索/编辑/删除/置顶，
- * 以及「测试召回」「立即蒸馏」。配置项仍在上一张「长期记忆」卡。
+ * 记忆库与技能面板：状态、检索测试、最近片段、运行时安装、技能管理。
+ * 配置项仍在上一张「长期记忆」卡。
  */
 function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined) | undefined; disabled: boolean }): ReactNode {
 	const { t, getRpc, disabled } = props;
 	const [chatKey, setChatKey] = useState('');
 	const [query, setQuery] = useState('');
-	const [items, setItems] = useState<MemoryItemView[]>([]);
-	const [status, setStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
-	const [failed, setFailed] = useState<string | null>(null);
-	const [preview, setPreview] = useState<{ profile: string; episodic: string } | null>(null);
-	const [editing, setEditing] = useState<{ id: number; content: string } | null>(null);
-	const [candidates, setCandidates] = useState(false);
+	const [status, setStatus] = useState<RagStatusView | null>(null);
+	const [chunks, setChunks] = useState<RagChunkView[]>([]);
+	const [skills, setSkills] = useState<RagSkillView[]>([]);
+	const [selected, setSelected] = useState<RagSkillView | null>(null);
 	const [busy, setBusy] = useState(false);
-	const [members, setMembers] = useState<MemoryMemberView[]>([]);
-	const [member, setMember] = useState<MemoryMemberView | null>(null);
-	const [memberItems, setMemberItems] = useState<MemoryItemView[]>([]);
+	const [failed, setFailed] = useState<string | null>(null);
 
-	const call = useCallback(
-		async (endpoint: string, payload: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
-			const rpc = getRpc?.();
-			if (rpc === undefined) {
-				setFailed(t('memoryRpcUnavailable'));
-				return null;
-			}
-			const answer = await rpc(endpoint, payload);
-			if (!answer.ok) {
-				setFailed(answer.error?.message ?? 'error');
-				return null;
-			}
-			setFailed(null);
-			return answer.value !== null && typeof answer.value === 'object' ? (answer.value as Record<string, unknown>) : {};
-		},
-		[getRpc, t],
-	);
+	const call = useCallback(async (endpoint: string, payload: Record<string, unknown> = {}): Promise<unknown> => {
+		const rpc = getRpc?.();
+		if (rpc === undefined) throw new Error(t('memoryRpcUnavailable'));
+		const result = await rpc(endpoint, payload);
+		if (!result.ok) throw new Error(result.error?.message ?? 'RPC 失败');
+		return result.value;
+	}, [getRpc, t]);
 
-	const loadMembers = useCallback(async (): Promise<void> => {
-		if (chatKey.trim() === '') {
-			setFailed(t('memoryChatRequired'));
-			return;
-		}
+	const run = useCallback(async (task: () => Promise<void>): Promise<void> => {
+		if (disabled) return;
 		setBusy(true);
-		const value = await call('members/list', { chatKey: chatKey.trim() });
-		setBusy(false);
-		if (value === null) return;
-		setMembers(parseMemoryMembers(value));
-		setMember(null);
-		setMemberItems([]);
-	}, [call, chatKey, t]);
-
-	const openMember = useCallback(
-		async (target: MemoryMemberView): Promise<void> => {
-			setBusy(true);
-			const value = await call('members/profile', { chatKey: chatKey.trim(), memberId: target.memberId });
+		setFailed(null);
+		try {
+			await task();
+		} catch (error) {
+			setFailed(error instanceof Error ? error.message : String(error));
+		} finally {
 			setBusy(false);
-			if (value === null) return;
-			setMember({ ...target, profile: typeof value.profile === 'string' ? value.profile : target.profile });
-			setMemberItems(parseMemoryItems(value));
-		},
-		[call, chatKey],
-	);
-
-	const approveMemberItem = async (id: number): Promise<void> => {
-		if (member === null || busy) return;
-		setBusy(true);
-		const value = await call('members/approve', { chatKey: chatKey.trim(), id });
-		setBusy(false);
-		if (value !== null) await openMember(member);
-	};
-
-	const forgetMember = async (target: MemoryMemberView): Promise<void> => {
-		if (busy) return;
-		if (typeof window !== 'undefined' && !window.confirm(t('memoryMemberForgetConfirm'))) return;
-		setBusy(true);
-		const value = await call('members/delete', { chatKey: chatKey.trim(), memberId: target.memberId });
-		setBusy(false);
-		if (value !== null) {
-			setMember(null);
-			setMemberItems([]);
-			await loadMembers();
 		}
-	};
+	}, [disabled]);
 
-	const load = useCallback(async (): Promise<void> => {
-		if (chatKey.trim() === '') {
-			setFailed(t('memoryChatRequired'));
-			return;
-		}
-		setStatus('loading');
-		const value = await call(candidates ? 'memory/candidates' : 'memory/list', {
-			chatKey: chatKey.trim(),
-			...(query.trim() !== '' ? { query: query.trim() } : {}),
+	const refreshStatus = useCallback(async (): Promise<void> => {
+		await run(async () => {
+			setStatus(parseRagStatus(await call('memory/status')));
 		});
-		if (value === null) {
-			setStatus('error');
-			return;
-		}
-		setItems(parseMemoryItems(value));
-		setStatus('ready');
-	}, [call, candidates, chatKey, query, t]);
+	}, [call, run]);
 
-	const save = async (): Promise<void> => {
-		if (editing === null || disabled || busy) return;
-		setBusy(true);
-		const value = await call('memory/save', { chatKey: chatKey.trim(), id: editing.id, content: editing.content });
-		setBusy(false);
-		if (value !== null) {
-			setEditing(null);
-			await load();
-		}
-	};
+	const search = useCallback(async (): Promise<void> => {
+		await run(async () => {
+			if (chatKey.trim() === '' || query.trim() === '') throw new Error(t('memoryChatRequired'));
+			const value = (await call('memory/search', { chatKey: chatKey.trim(), query: query.trim(), limit: 10 })) as { items?: unknown };
+			setChunks(parseChunks(value));
+		});
+	}, [call, chatKey, query, run, t]);
 
-	const remove = async (id: number): Promise<void> => {
-		if (disabled || busy) return;
-		setBusy(true);
-		const value = await call('memory/delete', { chatKey: chatKey.trim(), id });
-		setBusy(false);
-		if (value !== null) await load();
-	};
+	const loadRecent = useCallback(async (): Promise<void> => {
+		await run(async () => {
+			if (chatKey.trim() === '') throw new Error(t('memoryChatRequired'));
+			const value = (await call('memory/recent', { chatKey: chatKey.trim(), limit: 20 })) as { items?: unknown };
+			setChunks(parseChunks(value));
+		});
+	}, [call, chatKey, run, t]);
 
-	const previewRecall = async (): Promise<void> => {
-		if (chatKey.trim() === '') return;
-		setBusy(true);
-		const value = await call('memory/preview', { chatKey: chatKey.trim(), query: query.trim() });
-		setBusy(false);
-		if (value !== null) {
-			setPreview({
-				profile: typeof value.profile === 'string' ? value.profile : '',
-				episodic: typeof value.episodic === 'string' ? value.episodic : '',
-			});
-		}
-	};
+	const loadSkills = useCallback(async (): Promise<void> => {
+		await run(async () => {
+			if (chatKey.trim() === '') throw new Error(t('memoryChatRequired'));
+			const value = (await call('skills/list', { chatKey: chatKey.trim(), includeInactive: true })) as { items?: unknown };
+			setSkills(parseSkills(value));
+		});
+	}, [call, chatKey, run, t]);
 
-	const distill = async (): Promise<void> => {
-		if (chatKey.trim() === '' || disabled || busy) return;
-		setBusy(true);
-		const value = await call('memory/distill', { chatKey: chatKey.trim() });
-		setBusy(false);
-		if (value !== null) {
-			if (typeof value.error === 'string' && value.error !== '') setFailed(value.error);
-			await load();
-		}
-	};
+	const setup = useCallback(async (): Promise<void> => {
+		await run(async () => {
+			await call('memory/setup');
+			setStatus(parseRagStatus(await call('memory/status')));
+		});
+	}, [call, run]);
+
+	const reindex = useCallback(async (): Promise<void> => {
+		await run(async () => {
+			if (chatKey.trim() === '') throw new Error(t('memoryChatRequired'));
+			await call('memory/reindex', { chatKey: chatKey.trim() });
+			await refreshStatus();
+		});
+	}, [call, chatKey, refreshStatus, run, t]);
+
+	const prune = useCallback(async (): Promise<void> => {
+		await run(async () => {
+			await call('memory/prune');
+			await refreshStatus();
+		});
+	}, [call, refreshStatus, run]);
+
+	const deleteChunk = useCallback(async (id: number): Promise<void> => {
+		await run(async () => {
+			await call('memory/delete', { id });
+			setChunks((prev) => prev.filter((item) => item.id !== id));
+		});
+	}, [call, run]);
+
+	const toggleSkill = useCallback(async (skill: RagSkillView): Promise<void> => {
+		await run(async () => {
+			await call('skills/toggle', { id: skill.id, status: skill.status === 'active' ? 'disabled' : 'active' });
+			await loadSkills();
+		});
+	}, [call, loadSkills, run]);
+
+	const deleteSkill = useCallback(async (skill: RagSkillView): Promise<void> => {
+		await run(async () => {
+			await call('skills/delete', { chatKey: chatKey.trim(), id: skill.id });
+			await loadSkills();
+		});
+	}, [call, chatKey, loadSkills, run]);
+
+	const promoteSkill = useCallback(async (skill: RagSkillView): Promise<void> => {
+		await run(async () => {
+			await call('skills/promote', { chatKey: chatKey.trim(), id: skill.id });
+			await loadSkills();
+		});
+	}, [call, chatKey, loadSkills, run]);
+
+	useEffect(() => {
+		void refreshStatus();
+	}, [refreshStatus]);
 
 	return (
 		<div className={css.logPanel}>
@@ -1570,20 +1584,26 @@ function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined
 				/>
 			</div>
 			<div className={css.footer}>
-				<button type="button" className={css.save} disabled={disabled || busy} onClick={() => void load()}>
-					{t('memoryLoad')}
+				<button type="button" className={css.save} disabled={disabled || busy} onClick={() => void refreshStatus()}>
+					{t('memoryStatus')}
 				</button>
-				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => { setCandidates((prev) => !prev); }}>
-					{candidates ? t('memoryActive') : t('memoryCandidates')}
-				</button>
-				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void previewRecall()}>
+				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void search()}>
 					{t('memoryPreview')}
 				</button>
-				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void distill()}>
-					{t('memoryDistill')}
+				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void loadRecent()}>
+					{t('memoryRecent')}
 				</button>
-				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void loadMembers()}>
-					{t('memoryMembers')}
+				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void loadSkills()}>
+					{t('memorySkills')}
+				</button>
+				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void setup()}>
+					{t('memorySetup')}
+				</button>
+				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void reindex()}>
+					{t('memoryReindex')}
+				</button>
+				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void prune()}>
+					{t('memoryPrune')}
 				</button>
 			</div>
 			{failed !== null ? (
@@ -1591,107 +1611,64 @@ function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined
 					{failed}
 				</p>
 			) : null}
-			{members.length > 0 ? (
+			{status !== null ? (
 				<div className={css.logPanel}>
-					<p className={css.hint}>{t('memoryMembers')}</p>
-					{members.map((row) => (
-						<button
-							key={row.memberId}
-							type="button"
-							className={css.discard}
-							disabled={disabled || busy}
-							onClick={() => void openMember(row)}
-						>
-							{row.displayName}（{row.active}/{row.pending}）
-						</button>
-					))}
-					{member !== null ? (
-						<div className={css.logPanel}>
-							<p className={css.hint}>
-								{t('memoryMemberProfile')}：{member.displayName}
-							</p>
-							<pre className={css.hint}>{member.profile === '' ? t('memoryEmpty') : member.profile}</pre>
-							{memberItems.map((item) => (
-								<div key={item.id} className={css.editorItem}>
-									<p className={css.hint}>
-										#{item.id} [{item.kind}] {item.status !== 'active' ? `(${item.status})` : ''} {item.content}
-									</p>
-									{item.status === 'pending' ? (
-										<button type="button" className={css.save} disabled={disabled || busy} onClick={() => void approveMemberItem(item.id)}>
-											{t('memoryMemberApprove')}
-										</button>
-									) : null}
-								</div>
-							))}
-							<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void forgetMember(member)}>
-								{t('memoryMemberForget')}
-							</button>
-						</div>
-					) : null}
+					<p className={css.hint}>
+						{t('memoryRuntime')}：{status.ready ? 'ready' : 'not ready'} ｜ DB={status.db ? '✓' : '✗'} ｜ FTS={status.fts ? '✓' : '✗'} ｜ vec={status.vec ? '✓' : '✗'} ｜ embed={status.embed ? '✓' : '✗'} ｜ rerank={status.rerank ? '✓' : '✗'}
+					</p>
+					<p className={css.hint}>
+						{status.messages} messages ｜ {status.chunks} chunks ｜ {status.skills} skills ｜ runtime={status.runtime} ｜ model={status.model}
+					</p>
+					{status.lastError !== undefined ? <p className={css.failed}>{status.lastError}</p> : null}
 				</div>
 			) : null}
-			{status === 'loading' || status === 'idle' ? <p className={css.hint}>{t('loading')}</p> : null}
-			{status === 'ready' && items.length === 0 ? <p className={css.hint}>{t('memoryEmpty')}</p> : null}
-			{items.map((item) => (
-				<div key={item.id} className={css.editorItem}>
-					<div className={css.taskHead}>
-						<span className={css.hint}>
-							#{item.id} [{item.kind}] {item.pinned ? '📌 ' : ''}
-							{item.status !== 'active' ? `(${item.status})` : ''} {formatStamp(item.updatedAt)}
-						</span>
-					</div>
-					{editing?.id === item.id ? (
-						<>
-							<textarea
-								className={css.input}
-								value={editing.content}
-								disabled={disabled || busy}
-								onChange={(event) => setEditing({ id: item.id, content: event.target.value })}
-							/>
+			{chunks.length > 0 ? (
+				<div className={css.logPanel}>
+					<p className={css.hint}>{t('memoryRecent')}</p>
+					{chunks.map((item) => (
+						<div key={item.id} className={css.logPanel}>
+							<p className={css.hint}>
+								#{item.id} ｜ {formatChunkTime(item.ts)} ｜ score={item.score.toFixed(3)}
+							</p>
+							<pre className={css.hint}>{item.text}</pre>
+							<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void deleteChunk(item.id)}>
+								{t('memoryDelete')}
+							</button>
+						</div>
+					))}
+				</div>
+			) : null}
+			{skills.length > 0 ? (
+				<div className={css.logPanel}>
+					<p className={css.hint}>{t('memorySkills')}</p>
+					{skills.map((skill) => (
+						<div key={skill.id} className={css.logPanel}>
+							<p className={css.hint}>
+								{skill.name}（{skill.scope === 'global' ? 'global' : 'chat'}，{skill.status}，used {skill.useCount}）
+							</p>
+							<p className={css.hint}>{skill.description}</p>
 							<div className={css.footer}>
-								<button type="button" className={css.save} disabled={disabled || busy} onClick={() => void save()}>
-									{t('memorySave')}
+								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => setSelected(skill)}>
+									{t('memoryView')}
 								</button>
-								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => setEditing(null)}>
-									{t('memoryCancel')}
+								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void toggleSkill(skill)}>
+									{skill.status === 'active' ? t('memoryDisable') : t('memoryEnable')}
 								</button>
-							</div>
-						</>
-					) : (
-						<>
-							<p className={css.hint}>{item.content}</p>
-							<div className={css.footer}>
-								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => setEditing({ id: item.id, content: item.content })}>
-									{t('memoryEdit')}
+								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void promoteSkill(skill)}>
+									{t('memoryPromote')}
 								</button>
-								<button
-									type="button"
-									className={css.discard}
-									disabled={disabled || busy}
-									onClick={() => {
-										setBusy(true);
-										void call('memory/save', { chatKey: chatKey.trim(), id: item.id, content: item.content, pinned: !item.pinned }).then((value) => {
-											setBusy(false);
-											if (value !== null) void load();
-										});
-									}}
-								>
-									{item.pinned ? t('memoryUnpin') : t('memoryPin')}
-								</button>
-								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void remove(item.id)}>
+								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void deleteSkill(skill)}>
 									{t('memoryDelete')}
 								</button>
 							</div>
-						</>
-					)}
+						</div>
+					))}
 				</div>
-			))}
-			{preview !== null ? (
+			) : null}
+			{selected !== null ? (
 				<div className={css.logPanel}>
-					<p className={css.hint}>{t('memoryPreviewProfile')}</p>
-					<pre className={css.hint}>{preview.profile === '' ? t('memoryEmpty') : preview.profile}</pre>
-					<p className={css.hint}>{t('memoryPreviewEpisodic')}</p>
-					<pre className={css.hint}>{preview.episodic === '' ? t('memoryEmpty') : preview.episodic}</pre>
+					<p className={css.hint}>{selected.name}</p>
+					<pre className={css.hint}>{selected.body}</pre>
 				</div>
 			) : null}
 		</div>

@@ -184,7 +184,7 @@ export class Dispatcher {
 			const bridge = this.bridgeFor(msg);
 			memory.record({
 				chatKey: bridge.key,
-				generation: bridge.sessionIdString,
+				sessionId: bridge.sessionIdString,
 				ts: (typeof msg.time === 'number' && msg.time > 0 ? msg.time : Math.floor(Date.now() / 1000)) * 1000,
 				senderId: msg.senderId,
 				senderName: msg.senderName !== '' ? msg.senderName : msg.senderId,

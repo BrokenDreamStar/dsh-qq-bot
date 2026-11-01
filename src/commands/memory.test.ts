@@ -1,8 +1,7 @@
 /**
- * /memory 命令的行为测试（含"未启用时的降级提示"）。
+ * /memory 命令的行为测试（RAG 版）。
  *
- * 命令是最容易被误改坏的一环：它依赖 CommandContext 注入的 memory 服务，
- * 而该服务在未启用时是一个 ready=false 的空实现 —— 这里把两条路径都钉住。
+ * 命令依赖 CommandContext 注入的 memory 服务；未启用时是 ready=false 的空实现。
  */
 import { describe, expect, it } from 'vitest';
 import { COMMANDS } from './index.ts';
@@ -11,16 +10,16 @@ import type { MemoryLike } from '../memory/index.ts';
 
 interface Captured {
 	replies: string[];
-	distilled: Array<{ chatKey: string; force?: boolean }>;
-	unfrozen: string[];
 }
 
 function context(memory: MemoryLike | undefined): { ctx: CommandContext; captured: Captured } {
-	const captured: Captured = { replies: [], distilled: [], unfrozen: [] };
+	const captured: Captured = { replies: [] };
 	const ctx = {
 		arg: '',
 		bridge: { key: 'g-888', label: '群 888' },
 		memory,
+		admins: { isAdmin: () => true },
+		msg: { senderId: '1001' },
 		reply: async (text: string) => {
 			captured.replies.push(text);
 		},
@@ -32,22 +31,31 @@ function fakeMemory(overrides: Partial<MemoryLike> = {}): MemoryLike {
 	const base: MemoryLike = {
 		ready: true,
 		record: () => undefined,
-		cardSection: () => '【长期记忆】1. 本群 偏好 回复简短',
-		guidanceSection: () => '',
-		unfreeze: (chatKey) => {
-			(base as unknown as { _u?: string[] })._u?.push(chatKey);
-		},
-		takeHandoff: async () => '',
-		prefetch: () => '',
-		onGenerationEnd: async () => {},
-		resetTurnWriteFailures: () => {},
-		distill: async () => true,
-		chatStats: () => ({ facts: 1, events: 3 }),
-		recall: () => ({ text: '', count: 0, candidates: 0 }),
-		memorize: () => ({ ok: true, text: '' }),
-		reconfigure: () => {},
-		stats: () => ({ enabled: true, chats: 1, facts: 1, events: 3, rev: 1 }),
-		dispose: () => {},
+		prefetch: async () => '',
+		recall: async () => ({ text: '（没有找到相关的历史聊天记录）', count: 0, candidates: 0 }),
+		skills: async () => '',
+		useSkill: async () => undefined,
+		listSkills: async () => [],
+		recent: async () => [],
+		deleteChunk: async () => true,
+		reindex: async () => 3,
+		prune: async () => 1,
+		setup: async () => ({ installed: true, runtimeDir: '/tmp/rt' }),
+		stats: async () => ({
+			ready: true,
+			db: true,
+			fts: true,
+			vec: true,
+			embed: true,
+			rerank: false,
+			runtime: 'ready',
+			model: 'ready',
+			messages: 10,
+			chunks: 3,
+			skills: 1,
+		}),
+		reconfigure: () => undefined,
+		dispose: async () => undefined,
 	};
 	return { ...base, ...overrides };
 }
@@ -66,85 +74,91 @@ describe('/memory 命令', () => {
 		expect(captured.replies[0]).toContain('未启用');
 	});
 
-	it('默认展示卡片、本会话统计与全库统计', async () => {
+	it('默认展示状态、统计与组件状态', async () => {
 		const { ctx, captured } = context(fakeMemory());
 		await COMMANDS.memory!.run(ctx);
 		const text = captured.replies.join('\n');
 		expect(text).toContain('【长期记忆】群 888');
-		expect(text).toContain('记忆：1 条条目（含成员画像）；档案：3 条消息');
-		expect(text).toContain('全库 1 条 / 3 条 / 1 个会话');
-		expect(text).toContain('本群 偏好 回复简短');
+		expect(text).toContain('10 条消息');
+		expect(text).toContain('3 个片段');
+		expect(text).toContain('DB=✓');
+		expect(text).toContain('向量=✓');
 	});
 
-	it('卡片为空时给出明确文案而不是空白', async () => {
-		const { ctx, captured } = context(fakeMemory({ cardSection: () => '' }));
-		await COMMANDS.memory!.run(ctx);
-		expect(captured.replies.join('\n')).toContain('还没有画像条目');
-	});
-
-	it('distill 子命令强制蒸馏并回报结果', async () => {
-		const calls: Array<{ chatKey: string; force?: boolean }> = [];
+	it('search 调 recall 并把结果回给用户', async () => {
+		const calls: Array<{ chatKey: string; query: string; count?: number }> = [];
 		const { ctx, captured } = context(
 			fakeMemory({
-				distill: async (chatKey, options) => {
-					calls.push({ chatKey, ...(options ?? {}) });
+				recall: async (chatKey, query, count) => {
+					calls.push({ chatKey, query, ...(count !== undefined ? { count } : {}) });
+					return { text: '【会话档案】备份方案', count: 1, candidates: 3 };
+				},
+			}),
+		);
+		ctx.arg = 'search 备份';
+		await COMMANDS.memory!.run(ctx);
+		expect(calls).toEqual([{ chatKey: 'g-888', query: '备份', count: 8 }]);
+		expect(captured.replies.join('\n')).toContain('备份方案');
+	});
+
+	it('recent 展示最近片段', async () => {
+		const { ctx, captured } = context(
+			fakeMemory({
+				recent: async () => [
+					{ id: 7, chatKey: 'g-888', startSeq: 1, endSeq: 2, ts: Date.now(), text: '张三: 我用 restic 试了', score: 0.9, rrf: 0.8 },
+				],
+			}),
+		);
+		ctx.arg = 'recent';
+		await COMMANDS.memory!.run(ctx);
+		const text = captured.replies.join('\n');
+		expect(text).toContain('#7');
+		expect(text).toContain('restic');
+	});
+
+	it('forget 删除片段', async () => {
+		const deleted: number[] = [];
+		const { ctx, captured } = context(
+			fakeMemory({
+				deleteChunk: async id => {
+					deleted.push(id);
 					return true;
 				},
 			}),
 		);
-		ctx.arg = 'distill';
+		ctx.arg = 'forget 3';
 		await COMMANDS.memory!.run(ctx);
-		expect(calls).toEqual([{ chatKey: 'g-888', force: true }]);
-		expect(captured.replies.join('\n')).toContain('长期记忆已更新');
+		expect(deleted).toEqual([3]);
+		expect(captured.replies.join('\n')).toContain('已删除片段 #3');
 	});
 
-	it('distill 没有可蒸馏内容时如实说明', async () => {
-		const { ctx, captured } = context(fakeMemory({ distill: async () => false }));
-		ctx.arg = 'distill';
-		await COMMANDS.memory!.run(ctx);
-		expect(captured.replies.join('\n')).toContain('没有可蒸馏的新内容');
-	});
-
-	it('distill 有"零产出/跳过"说明时回说明（区分"没新消息"与"模型认为不值得记"）', async () => {
+	it('reindex 重建索引', async () => {
+		const reindexed: string[] = [];
 		const { ctx, captured } = context(
 			fakeMemory({
-				distill: async () => false,
-				lastDistillNote: () => '模型看过 3 条新消息（覆盖到 seq 12），认为没有值得长期记住的内容',
-			}),
-		);
-		ctx.arg = 'distill';
-		await COMMANDS.memory!.run(ctx);
-		const text = captured.replies.join('\n');
-		expect(text).toContain('认为没有值得长期记住的内容');
-		expect(text).not.toContain('没有可蒸馏的新内容');
-	});
-
-	it('distill 失败时把失败原因回给用户（不让用户去翻看不到的日志）', async () => {
-		const { ctx, captured } = context(
-			fakeMemory({
-				distill: async () => false,
-				lastDistillError: () => '蒸馏调用失败：no adapter for provider deepseek-official',
-			}),
-		);
-		ctx.arg = 'distill';
-		await COMMANDS.memory!.run(ctx);
-		const text = captured.replies.join('\n');
-		expect(text).toContain('蒸馏失败');
-		expect(text).toContain('no adapter for provider');
-	});
-
-	it('reload 解冻卡片缓存', async () => {
-		const unfrozen: string[] = [];
-		const { ctx, captured } = context(
-			fakeMemory({
-				unfreeze: (chatKey) => {
-					unfrozen.push(chatKey);
+				reindex: async chatKey => {
+					if (chatKey !== undefined) reindexed.push(chatKey);
+					return 3;
 				},
 			}),
 		);
-		ctx.arg = 'reload';
+		ctx.arg = 'reindex';
 		await COMMANDS.memory!.run(ctx);
-		expect(unfrozen).toEqual(['g-888']);
-		expect(captured.replies.join('\n')).toContain('清画像缓存');
+		expect(reindexed).toEqual(['g-888']);
+		expect(captured.replies.join('\n')).toContain('删除 3 个旧片段');
+	});
+
+	it('prune 清理', async () => {
+		const { ctx, captured } = context(fakeMemory());
+		ctx.arg = 'prune';
+		await COMMANDS.memory!.run(ctx);
+		expect(captured.replies.join('\n')).toContain('已清理 1 条');
+	});
+
+	it('setup 安装运行时', async () => {
+		const { ctx, captured } = context(fakeMemory());
+		ctx.arg = 'setup';
+		await COMMANDS.memory!.run(ctx);
+		expect(captured.replies.join('\n')).toContain('运行时已就绪');
 	});
 });
