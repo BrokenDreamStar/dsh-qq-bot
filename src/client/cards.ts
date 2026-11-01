@@ -12,12 +12,15 @@ import { FIELD_GROUPS } from './form.ts';
 
 /** sessionStorage 键（前缀 dshqq-，与 UI 类名规范一致）。 */
 export const OPEN_CARDS_KEY = 'dshqq-open-cards';
+/** 当前导航选中的卡片（设置页已改为一次只展示一个功能域）。 */
+export const ACTIVE_CARD_KEY = 'dshqq-active-card';
 
 /** 合法的卡片 id 集合：只认 FIELD_GROUPS 里的卡片，避免历史残留键越攒越多。 */
 const CARD_IDS = new Set(FIELD_GROUPS.map((group) => group.id));
 
 /** 进程内缓存：storage 不可用（隐私模式/旧宿主/测试）时的唯一来源。 */
 let memory: Record<string, boolean> = {};
+let activeMemory: string | undefined;
 
 function storage(): Storage | undefined {
 	try {
@@ -64,5 +67,32 @@ export function writeOpenCard(id: string, open: boolean): void {
 		store.setItem(OPEN_CARDS_KEY, JSON.stringify(next));
 	} catch {
 		// 写失败（配额/隐私模式）：内存态仍生效，仅刷新后丢展开态。
+	}
+}
+
+/** 读取上次打开的功能域；未知/缺失时回退到第一张卡片。 */
+export function readActiveCard(fallback = 'connection'): string {
+	const store = storage();
+	if (store !== undefined) {
+		try {
+			const raw = store.getItem(ACTIVE_CARD_KEY);
+			if (raw !== null) activeMemory = CARD_IDS.has(raw) ? raw : undefined;
+		} catch {
+			// 同 readOpenCards：storage 不可用时只使用内存态。
+		}
+	}
+	return activeMemory !== undefined && CARD_IDS.has(activeMemory) ? activeMemory : fallback;
+}
+
+/** 记住当前功能域，页面重挂载/刷新后仍停在原处。 */
+export function writeActiveCard(id: string): void {
+	if (!CARD_IDS.has(id)) return;
+	activeMemory = id;
+	const store = storage();
+	if (store === undefined) return;
+	try {
+		store.setItem(ACTIVE_CARD_KEY, id);
+	} catch {
+		// 写失败时仍保留内存态。
 	}
 }

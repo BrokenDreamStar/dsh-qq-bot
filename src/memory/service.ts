@@ -15,6 +15,7 @@ import type { Logger } from '../types.ts';
 import { scanSensitive } from './guard.ts';
 import type { MemoryLlmView } from './llm.ts';
 import { RagClient } from './rag/client.ts';
+import { createModelStatus } from './rag/progress.ts';
 import { renderChunkBlock, renderRecallBlock, renderSkillList } from './rag/render.ts';
 import { ensureRuntime, resolveRuntimePaths, resolveVecPath, type RuntimePaths } from './rag/runtime.ts';
 import type { AfterTurnInput, RagProgress, RagRecord, RagSkill, RagStatus, RagWorkerConfig, SkillDraft } from './rag/types.ts';
@@ -91,6 +92,10 @@ const EMPTY_STATUS: RagStatus = {
 	rerank: false,
 	runtime: 'missing',
 	model: 'missing',
+	models: {
+		embedding: createModelStatus('', false),
+		reranker: createModelStatus('', false),
+	},
 	messages: 0,
 	chunks: 0,
 	skills: 0,

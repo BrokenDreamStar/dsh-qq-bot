@@ -1,8 +1,8 @@
 /**
  * 配置页面的表单模型（纯逻辑，不依赖 react，可测）。
  *
- * 对齐 dsh 内置插件卡片的暂存语义：每个分组是一张独立折叠卡片，控件只
- * 暂存用户输入，卡片底部的保存是唯一把暂存变成 settings 文档变更的时机；
+ * 对齐 dsh 内置插件卡片的暂存语义：每个功能域是一张独立编辑卡，控件只
+ * 暂存用户输入，卡片内的保存是唯一把暂存变成 settings 文档变更的时机；
  * 字段是否"已覆盖"看 user 层的存在性而非值比较（与默认值相同的覆盖仍是
  * 覆盖）。一次卡内保存把该卡所有暂存合并成一个带 revision fence 的原子
  * mutate；各卡的暂存/保存/失败互相隔离。
@@ -40,6 +40,10 @@ export type FieldKind =
 	 * 用途：数组顺序本身有语义的短列表（如网页搜索的 `searchOrder`）。
 	 */
 	| 'orderList'
+	/** 两个引用开关聚合成一个三态下拉，存储仍写旧布尔键。 */
+	| 'quoteMode'
+	/** 一个阈值同时表达折叠开关与触发字数，0 = 关闭。 */
+	| 'foldThreshold'
 	/**
 	 * 模型下拉：值型是 `provider/model` 规格串（空 = 部署默认模型），选项来自
 	 * 宿主 `models/list`（= dsh「设置 → 模型」的同一份运行时清单，与「人格与
@@ -55,10 +59,8 @@ export interface FieldDef {
 	/** settings 文档写入路径。 */
 	path: string[];
 	/**
-	 * 伴生写入路径（只有 `modelSelect` 用）：控件的一次选择同时写多个配置项。
-	 * 约定 `path` = 模型 id（`memoryDistillModel`）、`extraPaths[0]` = provider
-	 * （`memoryDistillProvider`）：下拉选中的规格串拆成两段分别写入，暂存仍
-	 * 是"一个字段一个值"。
+	 * 伴生写入路径：一个聚合控件同时写多个旧配置键，避免为了精简界面而迁移
+	 * 持久化格式；modelSelect、quoteMode 与 foldThreshold 都通过它保持后端兼容。
 	 */
 	extraPaths?: readonly string[][];
 	kind: FieldKind;
@@ -264,12 +266,10 @@ export const FIELD_GROUPS: FieldGroup[] = [
 		fields: [
 			...withSub('subShape', [
 				f('replyMaxChars', 'number'),
-				f('foldForward', 'boolean'),
-				f('foldThreshold', 'number'),
+				{ ...f('foldThreshold', 'foldThreshold'), extraPaths: [['foldForward']] },
 			]),
 			...withSub('subQuote', [
-				f('replyQuoteOnMention', 'boolean'),
-				f('replyWithQuote', 'boolean'),
+				{ ...f('quoteMode', 'quoteMode', ['none', 'mention', 'always']), path: ['replyWithQuote'], extraPaths: [['replyQuoteOnMention']] },
 				f('quoteMaxChars', 'number'),
 			]),
 			...withSub('subMention', [f('replyWithMention', 'boolean')]),
@@ -359,7 +359,6 @@ export const FIELD_GROUPS: FieldGroup[] = [
 				f('memoryRerankTopN', 'number'),
 				f('memoryRerankTimeoutMs', 'number'),
 				f('memoryWorkerSearchTimeoutMs', 'number'),
-				f('memoryWorkerIngestTimeoutMs', 'number'),
 			]),
 			...withSub('subMemorySkill', [
 				f('memorySkillEnabled', 'boolean'),
@@ -367,7 +366,6 @@ export const FIELD_GROUPS: FieldGroup[] = [
 				f('memorySkillLearnEveryTurns', 'number'),
 				f('memorySkillLearnMinToolCalls', 'number'),
 				{ ...f('memorySkillModel', 'modelSelect'), extraPaths: [['memorySkillProvider']] },
-				f('memorySkillMaxPerChat', 'number'),
 				f('memorySkillInjectMaxItems', 'number'),
 				f('memorySkillInjectMaxChars', 'number'),
 				f('memorySkillAutoActivate', 'boolean'),
@@ -558,9 +556,21 @@ export function joinModelSpec(provider: string, model: string): string {
 	return provider !== '' && model !== '' ? `${provider}/${model}` : '';
 }
 
+export type QuoteMode = 'none' | 'mention' | 'always';
+
+/** 旧双布尔键 → 页面三态；always 优先，兼容手改配置中两个开关同时为 true。 */
+export function quoteModeOf(always: boolean, onMention: boolean): QuoteMode {
+	return always ? 'always' : onMention ? 'mention' : 'none';
+}
+
+/** 页面三态 → 旧双布尔键，不改变运行时的引用判定。 */
+export function quoteFlagsOf(mode: QuoteMode): { always: boolean; onMention: boolean } {
+	return { always: mode === 'always', onMention: mode !== 'none' };
+}
+
 /** 把 section 值格式化成控件显示文本。 */
 export function formatField(def: FieldDef, value: unknown): string {
-	if (def.kind === 'number') return typeof value === 'number' && Number.isFinite(value) ? String(value) : '';
+	if (def.kind === 'number' || def.kind === 'foldThreshold') return typeof value === 'number' && Number.isFinite(value) ? String(value) : '';
 	if (def.kind === 'boolean') return '';
 	if (def.kind === 'list') return Array.isArray(value) ? value.map(String).join('\n') : '';
 	// lineList 与 list 同值型（字符串数组），只是控件是单行输入。
@@ -578,7 +588,7 @@ export function formatField(def: FieldDef, value: unknown): string {
 export function parseField(def: FieldDef, text: string): { kind: 'set'; value: unknown } | { kind: 'clear' } | undefined {
 	// orderList 没有文本形态：草稿是数组，写入/清空由 plan() 与 fieldState() 直接处理。
 	if (def.kind === 'orderList') return undefined;
-	if (def.kind === 'number') {
+	if (def.kind === 'number' || def.kind === 'foldThreshold') {
 		const trimmed = text.trim();
 		if (trimmed === '') return { kind: 'clear' };
 		const parsed = Number(trimmed);
@@ -600,7 +610,7 @@ export function parseField(def: FieldDef, text: string): { kind: 'set'; value: u
 				.filter((entry) => entry !== ''),
 		};
 	}
-	if (def.kind === 'enum') {
+	if (def.kind === 'enum' || def.kind === 'quoteMode') {
 		return def.options?.includes(text) === true ? { kind: 'set', value: text } : undefined;
 	}
 	const trimmed = text.trim();
@@ -647,10 +657,7 @@ export class DshQQCardController {
 			},
 			resetField: (key: string) => {
 				const def = this.def(key);
-				// modelSelect 的"当前值"是 provider + model 合成的规格串（见 modelSpec）；
-				// 其余字段单值直接格式化。
-				const baseText = def.kind === 'modelSelect' ? this.modelSpec(def, 'base') : formatField(def, getPath(this.snapshot().base, def.path));
-				this.stage(key, { text: baseText, clear: true });
+				this.stage(key, { text: this.fieldText(def, 'base'), clear: true });
 			},
 			save: (cardId: string) => {
 				void this.save(cardId);
@@ -684,6 +691,17 @@ export class DshQQCardController {
 
 	private sectionValue(def: FieldDef): unknown {
 		return getPath(this.snapshot().value, def.path);
+	}
+
+	/** 聚合控件的显示值由多个旧键合成，普通控件仍只读取自己的路径。 */
+	private fieldText(def: FieldDef, layer: 'value' | 'base'): string {
+		if (def.kind === 'modelSelect') return this.modelSpec(def, layer);
+		const root = this.snapshot()[layer];
+		if (def.kind === 'quoteMode') {
+			const mentionPath = def.extraPaths?.[0] ?? ['replyQuoteOnMention'];
+			return quoteModeOf(getPath(root, def.path) === true, getPath(root, mentionPath) === true);
+		}
+		return formatField(def, getPath(root, def.path));
 	}
 
 	private overridden(key: string): boolean {
@@ -743,6 +761,23 @@ export class DshQQCardController {
 		}
 	}
 
+	/** 聚合控件恢复默认时，主键与伴生键必须一起退回组合层。 */
+	private planClearPaths(def: FieldDef, ops: SettingsPathOp[], verify: Array<(user: unknown) => boolean>): void {
+		const user = this.snapshot().user;
+		for (const path of [def.path, ...(def.extraPaths ?? [])]) {
+			if (!hasPath(user, path)) continue;
+			ops.push({ op: 'unset', path });
+			verify.push((layer) => !hasPath(layer, path));
+		}
+	}
+
+	/** 只在目标值与当前生效值不同时写入，避免重选聚合项制造冗余覆盖。 */
+	private planSetValue(path: string[], next: unknown, ops: SettingsPathOp[], verify: Array<(user: unknown) => boolean>): void {
+		if (getPath(this.snapshot().value, path) === next) return;
+		ops.push({ op: 'set', path, value: next });
+		verify.push((layer) => getPath(layer, path) === next);
+	}
+
 	/** 把（某张卡内的）暂存解析成一次原子写入的计划。 */
 	private plan(cardId?: string): SavePlan {
 		const ops: SettingsPathOp[] = [];
@@ -757,6 +792,42 @@ export class DshQQCardController {
 			if (def.kind === 'modelSelect') {
 				const spec = staged.clear ? '' : typeof staged.value === 'string' ? staged.value : staged.text;
 				this.planModelWrite(def, spec.trim(), ops, verify);
+				continue;
+			}
+			if (def.kind === 'quoteMode') {
+				if (staged.clear) {
+					this.planClearPaths(def, ops, verify);
+					continue;
+				}
+				const mode = staged.text as QuoteMode;
+				if (def.options?.includes(mode) !== true) {
+					invalid = true;
+					continue;
+				}
+				const flags = quoteFlagsOf(mode);
+				this.planSetValue(def.path, flags.always, ops, verify);
+				const mentionPath = def.extraPaths?.[0];
+				if (mentionPath !== undefined) this.planSetValue(mentionPath, flags.onMention, ops, verify);
+				continue;
+			}
+			if (def.kind === 'foldThreshold') {
+				if (staged.clear) {
+					this.planClearPaths(def, ops, verify);
+					continue;
+				}
+				const parsed = parseField(def, staged.text);
+				if (parsed === undefined) {
+					invalid = true;
+					continue;
+				}
+				if (parsed.kind === 'clear') {
+					this.planClearPaths(def, ops, verify);
+					continue;
+				}
+				const threshold = Number(parsed.value);
+				this.planSetValue(def.path, threshold, ops, verify);
+				const enabledPath = def.extraPaths?.[0];
+				if (enabledPath !== undefined) this.planSetValue(enabledPath, threshold > 0, ops, verify);
 				continue;
 			}
 			if (staged.clear) {
@@ -825,8 +896,7 @@ export class DshQQCardController {
 			const current = this.sectionValue(def);
 			return {
 				kind: def.kind,
-				// modelSelect 的显示值是 provider + model 合成的规格串。
-				text: def.kind === 'modelSelect' ? this.modelSpec(def, 'value') : formatField(def, current),
+				text: this.fieldText(def, 'value'),
 				checked: current === true,
 				options,
 				values: (def.kind === 'toolList' || def.kind === 'orderList') && Array.isArray(current) ? current.map(String) : undefined,

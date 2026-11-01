@@ -7,6 +7,8 @@ import {
 	hasPath,
 	joinModelSpec,
 	parseField,
+	quoteFlagsOf,
+	quoteModeOf,
 	SETTINGS_NS,
 	splitModelSpec,
 } from './form.ts';
@@ -44,11 +46,22 @@ describe('字段定义与文案字典', () => {
 		}
 	});
 
+	it('每项说明都是单行一句话，避免长段落把控件撑高', () => {
+		for (const group of FIELD_GROUPS) {
+			for (const def of group.fields) {
+				const hint = zh[`${def.key}Hint`] ?? '';
+				expect(hint, `${def.key}Hint`).not.toContain('\n');
+				expect((hint.match(/。/g) ?? []).length, `${def.key}Hint 应为一句`).toBeLessThanOrEqual(1);
+				expect(hint.length, `${def.key}Hint 过长`).toBeLessThanOrEqual(80);
+			}
+		}
+	});
+
 	it('enum 与 orderList 的每个取值都有 zh/en 选项文案', () => {
 		for (const group of FIELD_GROUPS) {
 			for (const def of group.fields) {
 				// orderList 的选项同样是 ${key}.${value}（列表行与"加入"按钮都用它）。
-				if ((def.kind !== 'enum' && def.kind !== 'orderList') || def.options === undefined) continue;
+				if ((def.kind !== 'enum' && def.kind !== 'quoteMode' && def.kind !== 'orderList') || def.options === undefined) continue;
 				for (const option of def.options) {
 					expect(zh[`${def.key}.${option}`], `${def.key}.${option} (zh)`).toBeTruthy();
 					expect(en[`${def.key}.${option}`], `${def.key}.${option} (en)`).toBeTruthy();
@@ -76,11 +89,11 @@ describe('字段定义与文案字典', () => {
 			'memoryMaxMessagesPerChat', 'memoryMaxChunksPerChat', 'memoryEmbedBatch',
 			'memorySensitiveFilter', 'memoryInjectLog',
 			'memorySkillEnabled', 'memorySkillAutoLearn', 'memorySkillLearnEveryTurns', 'memorySkillLearnMinToolCalls',
-			'memorySkillModel', 'memorySkillMaxPerChat', 'memorySkillInjectMaxItems', 'memorySkillInjectMaxChars',
+			'memorySkillModel', 'memorySkillInjectMaxItems', 'memorySkillInjectMaxChars',
 			'memorySkillAutoActivate', 'memorySkillMinConfidence', 'memorySkillBodyMaxChars',
-			'memoryWorkerSearchTimeoutMs', 'memoryWorkerIngestTimeoutMs',
+			'memoryWorkerSearchTimeoutMs',
 			'restrictTools', 'userTools', 'blockedTools', 'replyMaxChars',
-			'foldForward', 'foldThreshold', 'replyWithQuote', 'replyQuoteOnMention', 'replyWithMention', 'mediaEnabled', 'mediaMaxMB',
+			'foldThreshold', 'quoteMode', 'replyWithMention', 'mediaEnabled', 'mediaMaxMB',
 			'pokeReply', 'autoApproveRequests', 'preset', 'workspaceMode',
 			'dataDir', 'turnIdleTimeoutMs', 'sessionIdleTimeoutMs', 'busyStrategy', 'busyWaitMs', 'forkMaxEvents', 'maxQueue', 'registerSendTools',
 			'tasksEnabled', 'taskMaxPerChat',
@@ -160,11 +173,12 @@ describe('字段定义与文案字典', () => {
 			FIELD_GROUPS.flatMap((group) => group.fields).find((def) => def.key === key)?.sub;
 		expect(cardOf('groupMentionOnly')).toBe(cardOf('wakePrefixes'));
 		expect(cardOf('privateNeedsWake')).toBe(cardOf('wakePrefixes'));
-		expect(cardOf('replyWithQuote')).toBe(cardOf('replyWithMention'));
-		expect(cardOf('quoteMaxChars')).toBe(cardOf('replyWithQuote'));
-		// 「被 @ 时引用原消息」与「一律引用」同属引用功能域，同一张卡同一子分节。
-		expect(cardOf('replyQuoteOnMention')).toBe(cardOf('replyWithQuote'));
-		expect(subOf('replyQuoteOnMention')).toBe(subOf('replyWithQuote'));
+		expect(cardOf('quoteMode')).toBe(cardOf('replyWithMention'));
+		expect(cardOf('quoteMaxChars')).toBe(cardOf('quoteMode'));
+		// 引用双开关与折叠双开关已聚合，但仍写回原配置键。
+		expect(cardOf('quoteMode')).toBe('reply');
+		expect(subOf('quoteMode')).toBe('subQuote');
+		expect(cardOf('foldThreshold')).toBe('reply');
 		expect(cardOf('groupSession')).toBe(cardOf('sessionIdleTimeoutMs'));
 		expect(cardOf('registerSendTools')).toBe(cardOf('restrictTools'));
 		// 名单三项与准入模式同卡（保存/放弃以卡为单位，名单不该另存一张）。
@@ -679,6 +693,48 @@ describe('DshQQCardController（按卡暂存/保存）', () => {
 			{ op: 'unset', path: ['memorySkillModel'] },
 			{ op: 'unset', path: ['memorySkillProvider'] },
 		]);
+	});
+
+	it('quoteMode：三态映射旧双布尔键，保存后仍兼容原配置', async () => {
+		expect(quoteModeOf(false, false)).toBe('none');
+		expect(quoteModeOf(false, true)).toBe('mention');
+		expect(quoteModeOf(true, true)).toBe('always');
+		expect(quoteFlagsOf('none')).toEqual({ always: false, onMention: false });
+		expect(quoteFlagsOf('mention')).toEqual({ always: false, onMention: true });
+		expect(quoteFlagsOf('always')).toEqual({ always: true, onMention: true });
+
+		const fake = fakeScope({ value: { replyWithQuote: false, replyQuoteOnMention: true } });
+		const face = new DshQQCardController(fake.scope).inject() as unknown as CardFace;
+		expect(face.hooks.dshQQCard.getSnapshot().fields.quoteMode.text).toBe('mention');
+		face.stageValue('quoteMode', 'always');
+		face.save('reply');
+		await settle();
+		expect(fake.committed[0]).toEqual([{ op: 'set', path: ['replyWithQuote'], value: true }]);
+	});
+
+	it('foldThreshold：一个输入同时控制开关与阈值，0 表示关闭', async () => {
+		const fake = fakeScope({ value: { foldForward: true, foldThreshold: 4000 } });
+		const face = new DshQQCardController(fake.scope).inject() as unknown as CardFace;
+		face.edit('foldThreshold', '2500');
+		face.save('reply');
+		await settle();
+		expect(fake.committed[0]).toEqual([{ op: 'set', path: ['foldThreshold'], value: 2500 }]);
+
+		const off = fakeScope({ value: { foldForward: true, foldThreshold: 4000 } });
+		const face2 = new DshQQCardController(off.scope).inject() as unknown as CardFace;
+		face2.edit('foldThreshold', '0');
+		face2.save('reply');
+		await settle();
+		expect(off.committed[0]).toEqual([
+			{ op: 'set', path: ['foldThreshold'], value: 0 },
+			{ op: 'set', path: ['foldForward'], value: false },
+		]);
+	});
+
+	it('不再展示两个无效配置项，但后端 schema 仍保持兼容', () => {
+		const keys = new Set(FIELD_GROUPS.flatMap((group) => group.fields.map((def) => def.key)));
+		expect(keys.has('memoryWorkerIngestTimeoutMs')).toBe(false);
+		expect(keys.has('memorySkillMaxPerChat')).toBe(false);
 	});
 
 	it('discard：只清空所在卡的暂存', async () => {

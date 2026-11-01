@@ -1,11 +1,10 @@
 /**
  * 配置页面组件：注册为独立 settings.section（设置左列顶级入口）。
- * 页面 = 标题/简介 + 每个分组一张折叠卡片，卡片交互与内置插件配置页的
- * 卡片一致（折叠头 + 简介 + 未保存角标 + 卡内暂存 + 卡底部保存/放弃）。
- * 结构与设计令牌（--dsw-alias-*）对齐内置样式，类名前缀 dshqq- 自持。
+ * 页面 = 左侧功能域导航 + 右侧单张编辑卡；保存栏吸顶，长分类按子分节折叠。
+ * 结构对齐内置样式，类名前缀 dshqq- 自持。
  */
-import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import { readOpenCards, writeOpenCard } from './cards.ts';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { readActiveCard, writeActiveCard } from './cards.ts';
 import type { ReactNode } from 'react';
 import type { FieldDef, FieldGroup, FieldState, CardShell, CardState } from './form.ts';
 import { FIELD_GROUPS, CONNECTION_CARD_ID } from './form.ts';
@@ -25,6 +24,31 @@ const css = {
 	sectionWrap: 'dshqq-sectionWrap',
 	sectionHead: 'dshqq-sectionHead',
 	subHead: 'dshqq-subHead',
+	subsection: 'dshqq-subsection',
+	subsectionHead: 'dshqq-subsectionHead',
+	subsectionCount: 'dshqq-subsectionCount',
+	subsectionBody: 'dshqq-subsectionBody',
+	layout: 'dshqq-layout',
+	nav: 'dshqq-nav',
+	navSection: 'dshqq-navSection',
+	navGroup: 'dshqq-navGroup',
+	navItem: 'dshqq-navItem',
+	navItemActive: 'dshqq-navItemActive',
+	navItemText: 'dshqq-navItemText',
+	navDot: 'dshqq-navDot',
+	content: 'dshqq-content',
+	saveBar: 'dshqq-saveBar',
+	saveActions: 'dshqq-saveActions',
+	modelGrid: 'dshqq-modelGrid',
+	modelGridHead: 'dshqq-modelGridHead',
+	modelCard: 'dshqq-modelCard',
+	modelTitle: 'dshqq-modelTitle',
+	modelStates: 'dshqq-modelStates',
+	modelState: 'dshqq-modelState',
+	modelStateOk: 'dshqq-modelStateOk',
+	modelStateBusy: 'dshqq-modelStateBusy',
+	modelStateError: 'dshqq-modelStateError',
+	modelStateOff: 'dshqq-modelStateOff',
 	readOnly: 'dshqq-readOnly',
 	empty: 'dshqq-empty',
 	card: 'dshqq-card',
@@ -74,6 +98,7 @@ const css = {
 	orderAdd: 'dshqq-orderAdd',
 	invalid: 'dshqq-invalid',
 	hint: 'dshqq-hint',
+	fieldHint: 'dshqq-fieldHint',
 	toggleRow: 'dshqq-toggleRow',
 	switch: 'dshqq-switch',
 	switchOn: 'dshqq-switchOn',
@@ -1352,9 +1377,17 @@ interface RagProgressView {
 	kind: string;
 	message?: string;
 	file?: string;
+	model?: string;
 	percent?: number;
 	loaded?: number;
 	total?: number;
+}
+
+interface RagModelStatusView {
+	id: string;
+	download: string;
+	load: string;
+	error?: string;
 }
 
 interface RagStatusView {
@@ -1366,6 +1399,7 @@ interface RagStatusView {
 	rerank: boolean;
 	runtime: string;
 	model: string;
+	models?: { embedding: RagModelStatusView; reranker: RagModelStatusView };
 	messages: number;
 	chunks: number;
 	skills: number;
@@ -1399,24 +1433,58 @@ function parseRagProgress(value: unknown): RagProgressView | undefined {
 		kind: row.kind,
 		...(typeof row.message === 'string' ? { message: row.message } : {}),
 		...(typeof row.file === 'string' ? { file: row.file } : {}),
+		...(row.model === 'embedding' || row.model === 'reranker' ? { model: row.model } : {}),
 		...(typeof row.percent === 'number' && Number.isFinite(row.percent) ? { percent: row.percent } : {}),
 		...(typeof row.loaded === 'number' && Number.isFinite(row.loaded) ? { loaded: row.loaded } : {}),
 		...(typeof row.total === 'number' && Number.isFinite(row.total) ? { total: row.total } : {}),
 	};
 }
 
+function parseRagModelStatus(value: unknown, fallbackId: string): RagModelStatusView | undefined {
+	if (value === null || typeof value !== 'object') return undefined;
+	const row = value as Record<string, unknown>;
+	return {
+		id: typeof row.id === 'string' ? row.id : fallbackId,
+		download: typeof row.download === 'string' ? row.download : 'unknown',
+		load: typeof row.load === 'string' ? row.load : 'unknown',
+		...(typeof row.error === 'string' && row.error !== '' ? { error: row.error } : {}),
+	};
+}
+
+function legacyModelStatus(model: string, enabled: boolean, id: string): RagModelStatusView {
+	if (!enabled) return { id, download: 'disabled', load: 'disabled' };
+	if (model === 'ready') return { id, download: 'ready', load: 'ready' };
+	if (model === 'downloading') return { id, download: 'downloading', load: 'loading' };
+	if (model === 'error') return { id, download: 'error', load: 'error' };
+	return { id, download: 'missing', load: 'missing' };
+}
+
 function parseRagStatus(value: unknown): RagStatusView | null {
 	const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 	if (typeof record.ready !== 'boolean') return null;
+	const embed = record.embed === true;
+	const rerank = record.rerank === true;
+	const modelsRaw = record.models !== null && typeof record.models === 'object' ? (record.models as Record<string, unknown>) : {};
+	const embedding = parseRagModelStatus(modelsRaw.embedding, 'embedding') ?? legacyModelStatus(
+		typeof record.model === 'string' ? record.model : 'unknown',
+		true,
+		'embedding',
+	);
+	const reranker = parseRagModelStatus(modelsRaw.reranker, 'reranker') ?? legacyModelStatus(
+		rerank ? 'ready' : 'missing',
+		true,
+		'reranker',
+	);
 	return {
 		ready: record.ready,
 		db: record.db === true,
 		fts: record.fts === true,
 		vec: record.vec === true,
-		embed: record.embed === true,
-		rerank: record.rerank === true,
+		embed,
+		rerank,
 		runtime: typeof record.runtime === 'string' ? record.runtime : 'unknown',
 		model: typeof record.model === 'string' ? record.model : 'unknown',
+		models: { embedding, reranker },
 		messages: typeof record.messages === 'number' ? record.messages : 0,
 		chunks: typeof record.chunks === 'number' ? record.chunks : 0,
 		skills: typeof record.skills === 'number' ? record.skills : 0,
@@ -1480,6 +1548,125 @@ function formatChunkTime(ts: number): string {
 	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+/** 记忆状态轮询：配置卡与记忆库共用，1.5s 只在对应面板可见时运行。 */
+function useMemoryStatus(
+	getRpc: (() => RpcCaller | undefined) | undefined,
+	enabled: boolean,
+): [RagStatusView | null, (status: RagStatusView | null) => void] {
+	const [status, setStatus] = useState<RagStatusView | null>(null);
+	useEffect(() => {
+		if (!enabled || getRpc === undefined) return;
+		let cancelled = false;
+		const tick = async (): Promise<void> => {
+			const call = getRpc();
+			if (call === undefined) return;
+			try {
+				const answer = await call('memory/status', {});
+				if (cancelled || !answer.ok) return;
+				setStatus(parseRagStatus(answer.value));
+			} catch {
+				// 短暂失败不打断面板；下一次轮询会恢复。
+			}
+		};
+		void tick();
+		const timer = setInterval(() => void tick(), 1500);
+		return () => {
+			cancelled = true;
+			clearInterval(timer);
+		};
+	}, [enabled, getRpc]);
+	return [status, setStatus];
+}
+
+function modelStateLabel(t: Translate, kind: 'download' | 'load' | 'runtime', value: string): string {
+	const base = kind === 'download' ? 'memoryStateDownload' : kind === 'load' ? 'memoryStateLoad' : 'memoryStateRuntime';
+	const suffix =
+		value === 'ready'
+			? 'Ready'
+			: value === 'downloading' || value === 'loading' || value === 'installing'
+				? 'Busy'
+				: value === 'error'
+					? 'Error'
+					: value === 'disabled'
+						? 'Disabled'
+						: 'Missing';
+	return t(`${base}${suffix}`);
+}
+
+function modelStateClass(value: string): string {
+	if (value === 'ready') return css.modelStateOk;
+	if (value === 'downloading' || value === 'loading' || value === 'installing') return css.modelStateBusy;
+	if (value === 'error') return css.modelStateError;
+	return css.modelStateOff;
+}
+
+function ModelStatusCard(props: {
+	t: Translate;
+	title: string;
+	status: RagModelStatusView;
+	progress?: RagProgressView;
+}): ReactNode {
+	const { t, title, status } = props;
+	const failed = status.download === 'error' || status.load === 'error';
+	return (
+		<div className={css.modelCard}>
+			<div className={css.modelTitle}>
+				<span>{title}</span>
+				<span className={css.badgeMuted}>{status.id === '' ? '—' : status.id}</span>
+			</div>
+			<div className={css.modelStates}>
+				<span className={cls(css.modelState, modelStateClass(status.download))}>
+					{t('memoryDownloadLabel')}：{modelStateLabel(t, 'download', status.download)}
+					{status.download === 'downloading' && props.progress?.percent !== undefined
+						? ` ${Math.round(props.progress.percent)}%`
+						: ''}
+				</span>
+				<span className={cls(css.modelState, modelStateClass(status.load))}>
+					{t('memoryLoadLabel')}：{modelStateLabel(t, 'load', status.load)}
+				</span>
+			</div>
+			{failed && status.error !== undefined ? <p className={css.failed}>{status.error}</p> : null}
+		</div>
+	);
+}
+
+/**
+ * 本地模型状态：把「文件已下载」与「运行时已加载」拆成两个独立检查点，
+ * 避免 ready/FTS-only 混在一起时误判。状态来自 worker 的真实加载流程。
+ */
+function MemoryModelStatusPanel(props: { t: Translate; status: RagStatusView | null }): ReactNode {
+	const { t, status } = props;
+	if (status === null) return <p className={css.hint}>{t('loading')}</p>;
+	const models = status.models ?? {
+		embedding: legacyModelStatus(status.model, true, 'embedding'),
+		reranker: legacyModelStatus(status.rerank ? 'ready' : 'missing', true, 'reranker'),
+	};
+	const progressOf = (kind: 'embedding' | 'reranker'): RagProgressView | undefined =>
+		status.progress?.model === kind || (status.progress?.model === undefined && kind === 'embedding') ? status.progress : undefined;
+	const runtime =
+		models.embedding.download === 'disabled' && models.reranker.download === 'disabled'
+			? 'disabled'
+			: status.progress?.kind === 'install'
+				? 'installing'
+				: status.runtime;
+	return (
+		<div className={css.modelGrid}>
+			<div className={css.modelGridHead}>
+				<span className={css.label}>{t('memoryModelStatus')}</span>
+				<span className={cls(css.modelState, modelStateClass(runtime))}>
+					{modelStateLabel(t, 'runtime', runtime)}
+					{runtime === 'installing' && status.progress?.percent !== undefined
+						? ` ${Math.round(status.progress.percent)}%`
+						: ''}
+				</span>
+			</div>
+			<ModelStatusCard t={t} title={t('memoryEmbeddingModelShort')} status={models.embedding} progress={progressOf('embedding')} />
+			<ModelStatusCard t={t} title={t('memoryRerankModelShort')} status={models.reranker} progress={progressOf('reranker')} />
+			{status.lastError !== undefined ? <p className={css.failed}>{status.lastError}</p> : null}
+		</div>
+	);
+}
+
 /**
  * 记忆库与技能面板：状态、检索测试、最近片段、运行时安装、技能管理。
  * 配置项仍在上一张「长期记忆」卡。
@@ -1488,7 +1675,7 @@ function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined
 	const { t, getRpc, disabled } = props;
 	const [chatKey, setChatKey] = useState('');
 	const [query, setQuery] = useState('');
-	const [status, setStatus] = useState<RagStatusView | null>(null);
+	const [status, setStatus] = useMemoryStatus(getRpc, true);
 	const [chunks, setChunks] = useState<RagChunkView[]>([]);
 	const [skills, setSkills] = useState<RagSkillView[]>([]);
 	const [selected, setSelected] = useState<RagSkillView | null>(null);
@@ -1596,25 +1783,6 @@ function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined
 		});
 	}, [call, chatKey, loadSkills, run]);
 
-	useEffect(() => {
-		if (disabled) return;
-		let cancelled = false;
-		const tick = async (): Promise<void> => {
-			try {
-				const value = await call('memory/status');
-				if (!cancelled) setStatus(parseRagStatus(value));
-			} catch {
-				// 面板打开期间短暂失败不打断用户操作；下一次轮询会恢复。
-			}
-		};
-		void tick();
-		const timer = setInterval(() => void tick(), 1500);
-		return () => {
-			cancelled = true;
-			clearInterval(timer);
-		};
-	}, [call, disabled]);
-
 	return (
 		<div className={css.logPanel}>
 			<div className={css.taskHead}>
@@ -1686,13 +1854,10 @@ function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined
 			) : null}
 			{status !== null ? (
 				<div className={css.logPanel}>
+					<MemoryModelStatusPanel t={t} status={status} />
 					<p className={css.hint}>
-						{t('memoryRuntime')}：{status.ready ? 'ready' : 'not ready'} ｜ DB={status.db ? '✓' : '✗'} ｜ FTS={status.fts ? '✓' : '✗'} ｜ vec={status.vec ? '✓' : '✗'} ｜ embed={status.embed ? '✓' : '✗'} ｜ rerank={status.rerank ? '✓' : '✗'}
+						{status.messages} messages ｜ {status.chunks} chunks ｜ {status.skills} skills ｜ DB={status.db ? '✓' : '✗'} ｜ FTS={status.fts ? '✓' : '✗'} ｜ vec={status.vec ? '✓' : '✗'}
 					</p>
-					<p className={css.hint}>
-						{status.messages} messages ｜ {status.chunks} chunks ｜ {status.skills} skills ｜ runtime={status.runtime} ｜ model={status.model}
-					</p>
-					{status.lastError !== undefined ? <p className={css.failed}>{status.lastError}</p> : null}
 				</div>
 			) : null}
 			{chunks.length > 0 ? (
@@ -2133,6 +2298,7 @@ function TextRow(props: RowProps & { multiline?: boolean }): ReactNode {
 			: state.text === '' && def.kind === 'lineList'
 				? 'lineListEmpty'
 				: `${def.key}Hint`;
+	const hintText = state.invalid ? t('invalidNumber') : t(hintKey);
 	return (
 		<div className={css.field}>
 			<FieldHead {...props} htmlFor={id} />
@@ -2160,7 +2326,7 @@ function TextRow(props: RowProps & { multiline?: boolean }): ReactNode {
 					}}
 				/>
 			)}
-			<p className={state.invalid ? css.invalid : css.hint}>{state.invalid ? t('invalidNumber') : t(hintKey)}</p>
+			<p title={hintText} className={state.invalid ? css.invalid : cls(css.hint, css.fieldHint)}>{hintText}</p>
 		</div>
 	);
 }
@@ -2187,7 +2353,7 @@ function SelectRow(props: RowProps): ReactNode {
 					</option>
 				))}
 			</select>
-			<p className={css.hint}>{t(`${def.key}Hint`)}</p>
+			<p title={t(`${def.key}Hint`)} className={cls(css.hint, css.fieldHint)}>{t(`${def.key}Hint`)}</p>
 		</div>
 	);
 }
@@ -2232,7 +2398,7 @@ function ModelSelectRow(props: RowProps): ReactNode {
 					</option>
 				))}
 			</select>
-			<p className={css.hint}>{t(`${def.key}Hint`)}</p>
+			<p title={t(`${def.key}Hint`)} className={cls(css.hint, css.fieldHint)}>{t(`${def.key}Hint`)}</p>
 			{options.length === 0 ? <p className={css.hint}>{t('routeModelsEmpty')}</p> : null}
 		</div>
 	);
@@ -2345,7 +2511,7 @@ function ToolListRow(props: RowProps): ReactNode {
 					{t('toolListAdd')}
 				</button>
 			</div>
-			<p className={css.hint}>{t(`${def.key}Hint`)}</p>
+			<p title={t(`${def.key}Hint`)} className={cls(css.hint, css.fieldHint)}>{t(`${def.key}Hint`)}</p>
 		</div>
 	);
 }
@@ -2453,7 +2619,7 @@ function OrderListRow(props: RowProps): ReactNode {
 					))}
 				</div>
 			) : null}
-			<p className={css.hint}>{t(`${def.key}Hint`)}</p>
+			<p title={t(`${def.key}Hint`)} className={cls(css.hint, css.fieldHint)}>{t(`${def.key}Hint`)}</p>
 		</div>
 	);
 }
@@ -2492,7 +2658,7 @@ function SwitchRow(props: RowProps): ReactNode {	const { def, state, t, disabled
 					</button>
 				</span>
 			</div>
-			<p className={css.hint}>{t(`${def.key}Hint`)}</p>
+			<p title={t(`${def.key}Hint`)} className={cls(css.hint, css.fieldHint)}>{t(`${def.key}Hint`)}</p>
 		</div>
 	);
 }
@@ -2535,7 +2701,7 @@ function SecretRow(props: RowProps): ReactNode {
 					props.onEdit(def.key, event.target.value);
 				}}
 			/>
-			<p className={css.hint}>{t(`${def.key}Hint`)}</p>
+			<p title={t(`${def.key}Hint`)} className={cls(css.hint, css.fieldHint)}>{t(`${def.key}Hint`)}</p>
 		</div>
 	);
 }
@@ -2545,6 +2711,7 @@ function FieldRow(props: RowProps): ReactNode {
 		case 'boolean':
 			return <SwitchRow {...props} />;
 		case 'enum':
+		case 'quoteMode':
 			return <SelectRow {...props} />;
 		case 'secret':
 			return <SecretRow {...props} />;
@@ -2608,12 +2775,48 @@ function ConnectedBadge(props: { t: Translate }): ReactNode {
 }
 
 /**
- * 一张分组折叠卡片（对齐内置 PluginCard）：折叠头（标题 + 简介 + 未保存
- * 角标 + 旋转箭头），展开为字段与卡内保存/放弃。暂存跨折叠保留；保存
- * 成功后**保持展开**（只显示"已保存"回执，用户接着改下一项）。
- *
- * 折叠态由父级持有（open/onOpenChange）：日志卡片的视图状态挂在 section
- * 上，需要知道卡片是否展开来决定是否轮询。
+ * 卡内子分节。长配置（尤其长期记忆）默认只展开第一组，其余折叠，避免为了
+ * 一个参数滚过几十个控件；保存栏独立吸顶，不随折叠内容移动。
+ */
+function FieldSubsection(props: {
+	title: string;
+	count: number;
+	collapsible: boolean;
+	defaultOpen: boolean;
+	children: ReactNode;
+}): ReactNode {
+	const [open, setOpen] = useState(props.defaultOpen);
+	if (!props.collapsible) {
+		return (
+			<section className={css.subsection}>
+				{props.title !== '' ? <h4 className={css.subHead}>{props.title}</h4> : null}
+				<div className={css.subsectionBody}>{props.children}</div>
+			</section>
+		);
+	}
+	return (
+		<details
+			className={css.subsection}
+			open={open}
+			onToggle={(event) => {
+				setOpen(event.currentTarget.open);
+			}}
+		>
+			<summary className={css.subsectionHead}>
+				<span>{props.title}</span>
+				<span className={css.subsectionCount}>{props.count}</span>
+				<svg className={cls(css.chevron, open && css.chevronOpen)} width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+					<path d="M3.5 5.25 7 8.75l3.5-3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+				</svg>
+			</summary>
+			<div className={css.subsectionBody}>{props.children}</div>
+		</details>
+	);
+}
+
+/**
+ * 单张功能域卡片：导航模式下头部常显，卡内保存栏吸顶；子分节可折叠。
+ * 暂存/保存状态由 controller 按卡维护，切换功能域不会丢草稿。
  */
 function GroupCard(
 	props: CardProps & {
@@ -2623,6 +2826,10 @@ function GroupCard(
 		onOpenChange: (id: string, open: boolean) => void;
 		/** 字段之后、保存按钮之前的附加内容（如日志卡片内嵌的日志视图）。 */
 		extra?: ReactNode;
+		/** 字段之前的只读状态区（如长期记忆的本地模型状态）。 */
+		statusBody?: ReactNode;
+		/** 导航模式下卡片头不可折叠，功能域切换由左侧导航负责。 */
+		staticHeader?: boolean;
 		/** 折叠头部的附加角标（如日志条数）。 */
 		extraBadge?: ReactNode;
 		/** 自定义交互卡片（人格库 / 人格与模型）的展开体：替代字段列表与保存栏。 */
@@ -2637,22 +2844,16 @@ function GroupCard(
 	if (!state.available) return null;
 	const disabled = !state.writable || shell.saving;
 	const blocked = !shell.dirty || shell.invalid || shell.saving;
-	// 卡内子分节：同一个标签只在首次出现处插一次小标题（form.ts 约定一张卡
-	// 里同一标签必须连续，若再次出现会渲染第二个小标题）。
-	const rows: ReactNode[] = [];
-	let lastSub: string | undefined;
+	// 卡内子分节：先按 sub 聚成组，长配置可折叠；非记忆卡仍直接铺开，
+	// 子标题只承担信息分组，不增加额外点击。
+	const subsections: Array<{ sub?: string; rows: ReactNode[] }> = [];
 	for (const def of group.fields) {
-		if (def.sub !== undefined && def.sub !== lastSub) {
-			rows.push(
-				<h4 key={`sub:${def.sub}`} className={css.subHead}>
-					{props.t(def.sub)}
-				</h4>,
-			);
-		}
-		lastSub = def.sub;
 		const fieldState = state.fields[def.key];
 		if (fieldState === undefined) continue;
-		rows.push(
+		const last = subsections[subsections.length - 1];
+		const bucket = last !== undefined && last.sub === def.sub ? last : { sub: def.sub, rows: [] };
+		if (bucket !== last) subsections.push(bucket);
+		bucket.rows.push(
 			<FieldRow
 				key={def.key}
 				def={def}
@@ -2668,23 +2869,53 @@ function GroupCard(
 			/>,
 		);
 	}
-	return (
-		<li className={cls(css.card, open && css.cardOpen)}>
-			<button
-				type="button"
-				className={css.header}
-				aria-expanded={open}
-				aria-label={`${props.t(open ? 'collapse' : 'expand')}: ${props.t(group.titleKey)}`}
-				onClick={() => {
-					onOpenChange(group.id, !open);
-				}}
-			>
-				<span className={css.headText}>
-					<span className={css.name}>{props.t(group.titleKey)}</span>
-					<span className={css.description}>{props.t(group.descKey)}</span>
-				</span>
-				{props.extraBadge}
-				{!custom && shell.dirty ? <span className={css.pending}>{props.t('unsaved')}</span> : null}
+	const collapsibleSubsections = group.id === 'memory';
+	const saveBar = (
+		<div className={css.saveBar}>
+			{shell.failed ? (
+				<p className={css.failed} role="status">
+					{props.t('saveFailed')}
+				</p>
+			) : shell.saved ? (
+				<p className={css.saved} role="status">
+					{props.t('savedNotice')}
+				</p>
+			) : (
+				<span className={css.hint}>{shell.dirty ? props.t('unsaved') : ''}</span>
+			)}
+			<span className={css.saveActions}>
+				<button
+					type="button"
+					className={css.discard}
+					disabled={!shell.dirty || shell.saving}
+					onClick={() => {
+						props.discard(group.id);
+					}}
+				>
+					{props.t('discard')}
+				</button>
+				<button
+					type="button"
+					className={css.save}
+					disabled={blocked}
+					onClick={() => {
+						props.save(group.id);
+					}}
+				>
+					{props.t(shell.saving ? 'saving' : 'save')}
+				</button>
+			</span>
+		</div>
+	);
+	const header = (
+		<>
+			<span className={css.headText}>
+				<span className={css.name}>{props.t(group.titleKey)}</span>
+				<span className={css.description} title={props.t(group.descKey)}>{props.t(group.descKey)}</span>
+			</span>
+			{props.extraBadge}
+			{!custom && shell.dirty ? <span className={css.pending}>{props.t('unsaved')}</span> : null}
+			{props.staticHeader !== true ? (
 				<svg
 					className={cls(css.chevron, open && css.chevronOpen)}
 					width="14"
@@ -2701,49 +2932,46 @@ function GroupCard(
 						strokeLinejoin="round"
 					/>
 				</svg>
-			</button>
+			) : null}
+		</>
+	);
+	return (
+		<li className={cls(css.card, open && css.cardOpen)}>
+			{props.staticHeader === true ? (
+				<div className={css.header}>{header}</div>
+			) : (
+				<button
+					type="button"
+					className={css.header}
+					aria-expanded={open}
+					aria-label={`${props.t(open ? 'collapse' : 'expand')}: ${props.t(group.titleKey)}`}
+					onClick={() => {
+						onOpenChange(group.id, !open);
+					}}
+				>
+					{header}
+				</button>
+			)}
 			{open ? (
 				<div className={css.body}>
 					{custom ? (
 						props.customBody
 					) : (
 						<>
-							{rows}
+							{saveBar}
+							{props.statusBody}
+							{subsections.map((bucket, index) => (
+								<FieldSubsection
+									key={bucket.sub ?? `section:${index}`}
+									title={bucket.sub !== undefined ? props.t(bucket.sub) : ''}
+									count={bucket.rows.length}
+									collapsible={collapsibleSubsections && bucket.sub !== undefined}
+									defaultOpen={index === 0}
+								>
+									{bucket.rows}
+								</FieldSubsection>
+							))}
 							{props.extra}
-					<div className={css.footer}>
-						{shell.failed ? (
-							<p className={css.failed} role="status">
-								{props.t('saveFailed')}
-							</p>
-						) : shell.saved ? (
-							// 保存成功的回执就地显示在底部：卡片**不收起**，用户能直接
-							// 接着改下一项（历史行为：保存后卡片自己收起来，容易被当成
-							// "点保存把面板关了"）。
-							<p className={css.saved} role="status">
-								{props.t('savedNotice')}
-							</p>
-						) : null}
-						<button
-							type="button"
-							className={css.discard}
-							disabled={!shell.dirty || shell.saving}
-							onClick={() => {
-								props.discard(group.id);
-							}}
-						>
-							{props.t('discard')}
-						</button>
-						<button
-							type="button"
-							className={css.save}
-							disabled={blocked}
-							onClick={() => {
-								props.save(group.id);
-							}}
-						>
-							{props.t(shell.saving ? 'saving' : 'save')}
-						</button>
-					</div>
 						</>
 					)}
 				</div>
@@ -2763,40 +2991,65 @@ function GroupCard(
  */
 export function DshQQSection(props: CardProps): ReactNode {
 	const state = props.useDshQQCard((snapshot) => snapshot);
-	// 折叠态**不在组件 useState 里**：保存会改 settings 文档、宿主会重渲染
-	// 设置面板，一旦本 section 被重挂载，组件内状态清零 —— 现象就是"点保存
-	// 卡片自己收起来了"。展开态因此存在 client/cards.ts（模块级内存 +
-	// sessionStorage），重挂载与刷新都保持；日志视图状态（过滤词/暂停开关/
-	// 条目）仍随折叠保留在下面这些 hook 里，且只有日志卡片展开时才订阅实时流。
-	const [openCards, setOpenCardsState] = useState<Record<string, boolean>>(readOpenCards);
-	const setCardOpen = useCallback((id: string, next: boolean): void => {
-		writeOpenCard(id, next);
-		setOpenCardsState((prev) => (prev[id] === next ? prev : next ? { ...prev, [id]: true } : { ...prev, [id]: false }));
+	// 导航选中项跨重挂载保留：保存设置会触发宿主重渲染，不能因此跳回第一页。
+	const firstGroupId = FIELD_GROUPS[0]?.id ?? CONNECTION_CARD_ID;
+	const [activeGroupId, setActiveGroupId] = useState<string>(() => readActiveCard(firstGroupId));
+	const selectGroup = useCallback((id: string): void => {
+		writeActiveCard(id);
+		setActiveGroupId(id);
 	}, []);
 	const getRpc = props.getRpc as (() => RpcCaller | undefined) | undefined;
-	// connection 服务缺失（旧宿主/非 web profile）时隐藏日志视图；每次渲染
-	// 惰性解析一次（只是属性读取），兼容服务晚于本插件就绪的情况。
-	// 注意：connection 不在 inject 声明里，index.ts 的取用必须走 .get() 并吞错。
 	const rpcAvailable = getRpc !== undefined && getRpc() !== undefined;
-	const logGroupId = FIELD_GROUPS.find((group) => group.logViewer === true)?.id;
-	const log = useMessageLog(getRpc, rpcAvailable && logGroupId !== undefined && openCards[logGroupId] === true);
-	// 人格库 / 人格与模型共用一份宿主数据；任一张卡片展开时首次拉取。
-	const personaCardsOpen = FIELD_GROUPS.some(
-		(group) => (group.custom === 'personas' || group.custom === 'routes') && openCards[group.id] === true,
-	);
-	const personaData = usePersonaModelData(getRpc, personaCardsOpen);
-	// 模型下拉（modelSelect，长期记忆的蒸馏模型）：选项来自宿主 models/list，
-	// 与「人格与模型」的模型列同源；只在含该控件的卡片展开时拉取。
-	const modelCardsOpen = FIELD_GROUPS.some(
-		(group) => group.fields.some((def) => def.kind === 'modelSelect') && openCards[group.id] === true,
-	);
-	const modelOptions = useModelOptions(getRpc, rpcAvailable && modelCardsOpen);
-	// 定时任务列表独立加载（同样只在卡片展开时拉取）。
-	const tasksCardOpen = FIELD_GROUPS.some((group) => group.custom === 'tasks' && openCards[group.id] === true);
-	const taskData = useTaskData(getRpc, rpcAvailable && tasksCardOpen);
-	// 连接状态角标：不需要展开卡片，折叠态就在头部可见。
+	const activeGroup = FIELD_GROUPS.find((group) => group.id === activeGroupId) ?? FIELD_GROUPS[0];
+	const activeId = activeGroup?.id ?? firstGroupId;
+	const logActive = rpcAvailable && activeGroup?.logViewer === true;
+	const log = useMessageLog(getRpc, logActive);
+	// 自定义数据只在对应功能域可见时拉取，避免后台轮询无谓 RPC。
+	const personaActive = activeGroup?.custom === 'personas' || activeGroup?.custom === 'routes';
+	const personaData = usePersonaModelData(getRpc, personaActive);
+	const modelActive = activeGroup?.fields.some((def) => def.kind === 'modelSelect') === true;
+	const modelOptions = useModelOptions(getRpc, rpcAvailable && modelActive);
+	const tasksActive = activeGroup?.custom === 'tasks';
+	const taskData = useTaskData(getRpc, rpcAvailable && tasksActive);
+	const memoryConfigActive = activeGroup?.id === 'memory';
+	const [memoryStatus] = useMemoryStatus(getRpc, rpcAvailable && memoryConfigActive);
 	const transportConnected = useTransportConnected(getRpc);
-	if (!state.available) return null;
+	if (!state.available || activeGroup === undefined) return null;
+	const navigation: Array<{ section: string; groups: FieldGroup[] }> = [];
+	for (const group of FIELD_GROUPS) {
+		const section = group.sectionKey ?? '';
+		const last = navigation[navigation.length - 1];
+		if (last !== undefined && last.section === section) last.groups.push(group);
+		else navigation.push({ section, groups: [group] });
+	}
+	const customBody =
+		activeGroup.custom === 'personas' ? (
+			<PersonaPanel t={props.t} data={personaData} disabled={!state.writable} />
+		) : activeGroup.custom === 'souls' ? (
+			rpcAvailable ? (
+				<SoulPanel t={props.t} getRpc={getRpc} disabled={!state.writable} />
+			) : (
+				<p className={css.hint}>{props.t('soulRpcUnavailable')}</p>
+			)
+		) : activeGroup.custom === 'routes' ? (
+			<RoutePanel t={props.t} data={personaData} disabled={!state.writable} />
+		) : activeGroup.custom === 'tasks' ? (
+			rpcAvailable ? (
+				<TaskPanel t={props.t} data={taskData} disabled={!state.writable} />
+			) : (
+				<p className={css.hint}>{props.t('taskRpcUnavailable')}</p>
+			)
+		) : activeGroup.custom === 'memory' ? (
+			rpcAvailable ? (
+				<MemoryPanel t={props.t} getRpc={getRpc} disabled={!state.writable} />
+			) : (
+				<p className={css.hint}>{props.t('memoryRpcUnavailable')}</p>
+			)
+		) : undefined;
+	const countBadge =
+		logActive && log.entries.length > 0 ? (
+			<span className={css.pending}>{props.t('logCount').replace('{count}', String(log.entries.length))}</span>
+		) : undefined;
 	return (
 		<div className={css.section}>
 			<h2 className={css.heading}>{props.t('title')}</h2>
@@ -2806,66 +3059,57 @@ export function DshQQSection(props: CardProps): ReactNode {
 					{props.t('readOnly')}
 				</p>
 			) : null}
-			<ul className={css.cards}>
-				{FIELD_GROUPS.map((group, index) => {
-					// 顶层分区标题：只在分区变化处插一次（同一分区的卡片必须
-					// 相邻，见 form.ts 的 FieldGroup.sectionKey）。
-					const prevSection = index > 0 ? FIELD_GROUPS[index - 1]?.sectionKey : undefined;
-					const sectionHead =
-						group.sectionKey !== undefined && group.sectionKey !== prevSection ? (
-							<li key={`section:${group.sectionKey}`} className={css.sectionWrap} role="presentation">
-								<h3 className={css.sectionHead}>{props.t(group.sectionKey)}</h3>
-							</li>
-						) : null;
-					const withViewer = group.logViewer === true && rpcAvailable;
-					// 连接卡片：仅在确实连上 OneBot 对接端时显示"已连接"角标。
-					const connectedBadge = group.id === CONNECTION_CARD_ID && transportConnected ? <ConnectedBadge t={props.t} /> : undefined;
-					const countBadge =
-						withViewer && log.entries.length > 0 ? (
-							<span className={css.pending}>{props.t('logCount').replace('{count}', String(log.entries.length))}</span>
-						) : undefined;
-					const customBody =
-						group.custom === 'personas' ? (
-							<PersonaPanel t={props.t} data={personaData} disabled={!state.writable} />
-						) : group.custom === 'souls' ? (
-							rpcAvailable ? (
-								<SoulPanel t={props.t} getRpc={getRpc} disabled={!state.writable} />
-							) : (
-								<p className={css.hint}>{props.t('soulRpcUnavailable')}</p>
-							)
-						) : group.custom === 'routes' ? (
-							<RoutePanel t={props.t} data={personaData} disabled={!state.writable} />
-						) : group.custom === 'tasks' ? (
-							rpcAvailable ? (
-								<TaskPanel t={props.t} data={taskData} disabled={!state.writable} />
-							) : (
-								<p className={css.hint}>{props.t('taskRpcUnavailable')}</p>
-							)
-						) : group.custom === 'memory' ? (
-							rpcAvailable ? (
-								<MemoryPanel t={props.t} getRpc={getRpc} disabled={!state.writable} />
-							) : (
-								<p className={css.hint}>{props.t('memoryRpcUnavailable')}</p>
-							)
-						) : undefined;
-					return (
-						<Fragment key={group.id}>
-							{sectionHead}
-							<GroupCard
-								{...props}
-								group={group}
-								state={state}
-								open={openCards[group.id] === true}
-								onOpenChange={setCardOpen}
-								extra={withViewer ? <LogViewerPanel t={props.t} log={log} /> : undefined}
-								extraBadge={connectedBadge ?? countBadge}
-								customBody={customBody}
-								modelOptions={modelOptions}
-							/>
-						</Fragment>
-					);
-				})}
-			</ul>
+			<div className={css.layout}>
+				<nav className={css.nav} aria-label={props.t('settingsNav')}>
+					{navigation.map((entry) => (
+						<div key={entry.section} className={css.navSection}>
+							<p className={css.sectionHead}>{props.t(entry.section)}</p>
+							<div className={css.navGroup}>
+								{entry.groups.map((group) => {
+									const shell = state.cards[group.id];
+									const isActive = group.id === activeId;
+									return (
+										<button
+											key={group.id}
+											type="button"
+											className={cls(css.navItem, isActive && css.navItemActive)}
+											aria-current={isActive ? 'page' : undefined}
+											onClick={() => {
+												selectGroup(group.id);
+											}}
+										>
+											<span className={css.navItemText}>{props.t(group.titleKey)}</span>
+											{shell?.dirty === true ? <span className={css.navDot} title={props.t('unsaved')} /> : null}
+											{group.id === CONNECTION_CARD_ID && transportConnected ? <span className={css.connDot} /> : null}
+										</button>
+									);
+								})}
+							</div>
+						</div>
+					))}
+				</nav>
+				<div className={css.content}>
+					<ul className={css.cards}>
+						<GroupCard
+							{...props}
+							group={activeGroup}
+							state={state}
+							open
+							onOpenChange={() => {}}
+							staticHeader
+							extraBadge={
+								activeGroup.id === CONNECTION_CARD_ID && transportConnected ? <ConnectedBadge t={props.t} /> : countBadge
+							}
+							extra={logActive ? <LogViewerPanel t={props.t} log={log} /> : undefined}
+							statusBody={
+								memoryConfigActive ? <MemoryModelStatusPanel t={props.t} status={memoryStatus} /> : undefined
+							}
+							customBody={customBody}
+							modelOptions={modelOptions}
+						/>
+					</ul>
+				</div>
+			</div>
 		</div>
 	);
 }

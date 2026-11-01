@@ -5,7 +5,35 @@
  * 拿不到比例时返回 undefined percent，WebUI 用不确定进度条。
  */
 
-import type { RagProgress } from './types.ts';
+import type { RagDownloadState, RagLoadState, RagModelStatus, RagProgress } from './types.ts';
+
+/** 初始化一个模型的两阶段状态；未启用时两个阶段都明确标为 disabled。 */
+export function createModelStatus(id: string, enabled: boolean): RagModelStatus {
+	return {
+		id,
+		download: enabled ? 'missing' : 'disabled',
+		load: enabled ? 'missing' : 'disabled',
+	};
+}
+
+/** 给进度打上所属模型，页面可分别展示向量/重排下载进度。 */
+export function modelProgress(progress: RagProgress, model: 'embedding' | 'reranker'): RagProgress {
+	return { ...progress, model };
+}
+
+export function setModelDownload(status: RagModelStatus, download: RagDownloadState, error?: string): RagModelStatus {
+	const next: RagModelStatus = { ...status, download };
+	if (error !== undefined && error !== '') next.error = error;
+	else if (download === 'ready') delete next.error;
+	return next;
+}
+
+export function setModelLoad(status: RagModelStatus, load: RagLoadState, error?: string): RagModelStatus {
+	const next: RagModelStatus = { ...status, load };
+	if (error !== undefined && error !== '') next.error = error;
+	else if (load === 'ready') delete next.error;
+	return next;
+}
 
 export interface DownloadProgressInput {
 	status?: unknown;

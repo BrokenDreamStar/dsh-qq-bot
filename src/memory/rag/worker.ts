@@ -10,16 +10,18 @@
 
 import { parentPort } from 'node:worker_threads';
 import { createRequire } from 'node:module';
+import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Logger } from '../../types.ts';
 import { RagDatabase } from './db.ts';
 import { takeChunks, type ChunkMessage } from './chunk.ts';
 import { coverageOf, finalScore, normalizeScores, rrfFuse, recencyScore } from './fusion.ts';
-import { normalizeDownloadProgress } from './progress.ts';
+import { normalizeDownloadProgress, createModelStatus, modelProgress, setModelDownload, setModelLoad } from './progress.ts';
 import { tokenizeQuery } from '../text.ts';
 import type {
 	RagChunkHit,
+	RagModelStatus,
 	RagRecord,
 	RagSkill,
 	RagStatus,
@@ -62,8 +64,11 @@ let runtimeDir = '';
 let modelsDir = '';
 let embedReady = false;
 let rerankReady = false;
-let modelLoading = false;
-let modelError = '';
+let dbError = '';
+let models: { embedding: RagModelStatus; reranker: RagModelStatus } = {
+	embedding: createModelStatus('', false),
+	reranker: createModelStatus('', false),
+};
 let status: RagStatus = {
 	ready: false,
 	db: false,
@@ -73,6 +78,7 @@ let status: RagStatus = {
 	rerank: false,
 	runtime: 'missing',
 	model: 'missing',
+	models,
 	messages: 0,
 	chunks: 0,
 	skills: 0,
@@ -96,6 +102,43 @@ let rerankModel: any;
 
 const BGE_QUERY_PREFIX = '为这个句子生成表示以用于检索相关文章：';
 
+/**
+ * 检查本地缓存是否至少具备可加载的模型文件（配置 + ONNX 权重）。
+ * 这不是“正在加载”的替代品：即使文件齐全，页面仍会单独展示加载状态。
+ */
+function hasModelFiles(modelId: string): boolean {
+	if (modelId === '' || modelsDir === '') return false;
+	const root = join(modelsDir, modelId);
+	if (!existsSync(root)) return false;
+	let hasConfig = false;
+	let hasWeights = false;
+	const walk = (dir: string, depth: number): void => {
+		if (depth > 5 || (hasConfig && hasWeights)) return;
+		let entries: Array<{ name: string; isDirectory(): boolean }>;
+		try {
+			entries = readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const entry of entries) {
+			if (entry.isDirectory()) {
+				walk(join(dir, entry.name), depth + 1);
+				continue;
+			}
+			if (entry.name === 'config.json') hasConfig = true;
+			if (entry.name.endsWith('.onnx') || entry.name.endsWith('.onnx_data')) hasWeights = true;
+		}
+	};
+	walk(root, 0);
+	return hasConfig && hasWeights;
+}
+
+function markCachedModel(model: 'embedding' | 'reranker'): void {
+	const current = models[model];
+	if (current.download === 'disabled' || current.download === 'ready') return;
+	if (hasModelFiles(current.id)) models[model] = setModelDownload(current, 'ready');
+}
+
 function chunkOptions(): { maxMessages: number; maxChars: number; overlap: number } {
 	return {
 		maxMessages: config?.memoryChunkMessages ?? 4,
@@ -106,19 +149,30 @@ function chunkOptions(): { maxMessages: number; maxChars: number; overlap: numbe
 
 function refreshStatus(): RagStatus {
 	const counts = db?.stats() ?? { messages: 0, chunks: 0, skills: 0 };
+	const active = config?.memoryEmbeddingEnabled === true ? models.embedding : models.reranker;
+	const model =
+		active.load === 'ready'
+			? 'ready'
+			: active.download === 'downloading' || active.load === 'loading'
+				? 'downloading'
+				: active.download === 'error' || active.load === 'error'
+					? 'error'
+					: 'missing';
+	const lastError = models.embedding.error ?? models.reranker.error ?? (dbError !== '' ? dbError : undefined);
 	status = {
 		...status,
 		ready: db !== undefined,
 		db: db !== undefined,
 		fts: db !== undefined,
 		vec: db?.vectorReady === true,
-		embed: embedReady,
-		rerank: rerankReady,
+		embed: models.embedding.load === 'ready',
+		rerank: models.reranker.load === 'ready',
 		messages: counts.messages,
 		chunks: counts.chunks,
 		skills: counts.skills,
-		model: embedReady ? 'ready' : modelLoading ? 'downloading' : modelError !== '' ? 'error' : 'missing',
-		...(modelError !== '' ? { lastError: modelError } : {}),
+		model,
+		models,
+		lastError,
 	};
 	return status;
 }
@@ -191,80 +245,119 @@ async function importTransformers(): Promise<AnyModule> {
 	return mod.default ?? mod;
 }
 
-async function loadModels(): Promise<void> {
-	if (config === undefined || db === undefined) return;
-	if (!config.memoryEmbeddingEnabled && !config.memoryRerankEnabled) return;
-	modelLoading = true;
-	modelError = '';
+function modelProgressCallback(model: 'embedding' | 'reranker') {
+	return (progress: { status?: string; file?: string; name?: string; progress?: number; loaded?: number; total?: number }): void => {
+		const normalized = modelProgress(normalizeDownloadProgress(progress), model);
+		if (models[model].download !== 'ready') models[model] = setModelDownload(models[model], 'downloading');
+		sendStatus();
+		post({ event: 'progress', progress: normalized });
+	};
+}
+
+function modelErrorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+async function loadEmbedding(): Promise<void> {
+	if (config === undefined) return;
+	const id = config.memoryEmbeddingModel;
+	const download = models.embedding.download === 'ready' ? 'ready' : 'downloading';
+	models.embedding = { ...setModelDownload(models.embedding, download), id, load: 'loading' };
 	sendStatus();
 	try {
-		transformers = await importTransformers();
-		const { env, AutoTokenizer, AutoModel } = transformers;
+		const { AutoTokenizer, AutoModel, env } = transformers;
 		env.cacheDir = modelsDir;
 		env.allowRemoteModels = true;
 		env.remoteHost = config.memoryHfEndpoint;
-		const progress_callback = (progress: { status?: string; file?: string; name?: string; progress?: number; loaded?: number; total?: number }) => {
-			post({ event: 'progress', progress: normalizeDownloadProgress(progress) });
+		const progress_callback = modelProgressCallback('embedding');
+		const load = async (): Promise<void> => {
+			tokenizer = await AutoTokenizer.from_pretrained(id, { progress_callback });
+			embedModel = await AutoModel.from_pretrained(id, {
+				dtype: config!.memoryEmbeddingDtype || 'int8',
+				progress_callback,
+			});
 		};
-		if (config.memoryEmbeddingEnabled) {
-			const load = async (): Promise<void> => {
-				tokenizer = await AutoTokenizer.from_pretrained(config!.memoryEmbeddingModel, { progress_callback });
-				embedModel = await AutoModel.from_pretrained(config!.memoryEmbeddingModel, {
-					dtype: config!.memoryEmbeddingDtype || 'int8',
-					progress_callback,
-				});
-			};
-			try {
-				await load();
-			} catch (direct) {
-				const message = direct instanceof Error ? direct.message : String(direct);
-				logger.warn(`dsh-qq-bot: 直连 HF 加载失败，切换镜像重试：${message}`);
-				env.remoteHost = config.memoryHfMirror;
-				await load();
-			}
-			embedReady = true;
-			logger.info('dsh-qq-bot: embedding 模型已加载');
-			sendStatus();
-			void backfill();
-			void processEmbeddings();
+		try {
+			await load();
+		} catch (direct) {
+			const message = modelErrorText(direct);
+			logger.warn(`dsh-qq-bot: 直连 HF 加载失败，切换镜像重试：${message}`);
+			env.remoteHost = config.memoryHfMirror;
+			await load();
 		}
-		modelLoading = false;
-		if (config.memoryRerankEnabled) void loadReranker();
+		embedReady = true;
+		models.embedding = setModelLoad(setModelDownload(models.embedding, 'ready'), 'ready');
+		logger.info('dsh-qq-bot: embedding 模型已下载并加载');
+		sendStatus();
+		void backfill();
+		void processEmbeddings();
 	} catch (error) {
 		embedReady = false;
-		modelLoading = false;
-		modelError = error instanceof Error ? error.message : String(error);
-		logger.warn(`dsh-qq-bot: embedding 模型加载失败，继续 FTS-only：${modelError}`);
+		const message = modelErrorText(error);
+		const downloaded = hasModelFiles(id);
+		models.embedding = setModelLoad(setModelDownload(models.embedding, downloaded ? 'ready' : 'error', downloaded ? undefined : message), 'error', message);
+		logger.warn(`dsh-qq-bot: embedding 模型加载失败，继续 FTS-only：${message}`);
 		sendStatus();
 	}
 }
 
 async function loadReranker(): Promise<void> {
 	if (config === undefined) return;
+	const id = config.memoryRerankModel;
+	const download = models.reranker.download === 'ready' ? 'ready' : 'downloading';
+	models.reranker = { ...setModelDownload(models.reranker, download), id, load: 'loading' };
+	sendStatus();
 	try {
-		const { env, AutoTokenizer, AutoModelForSequenceClassification } = transformers;
+		const { AutoTokenizer, AutoModelForSequenceClassification, env } = transformers;
 		env.cacheDir = modelsDir;
 		env.remoteHost = config.memoryHfEndpoint;
+		const progress_callback = modelProgressCallback('reranker');
 		const load = async (): Promise<void> => {
-			rerankTokenizer = await AutoTokenizer.from_pretrained(config!.memoryRerankModel);
-			rerankModel = await AutoModelForSequenceClassification.from_pretrained(config!.memoryRerankModel, {
+			rerankTokenizer = await AutoTokenizer.from_pretrained(id, { progress_callback });
+			rerankModel = await AutoModelForSequenceClassification.from_pretrained(id, {
 				dtype: 'int8',
+				progress_callback,
 			});
 		};
 		try {
 			await load();
-		} catch {
+		} catch (direct) {
+			logger.warn(`dsh-qq-bot: 重排模型直连失败，切换镜像重试：${modelErrorText(direct)}`);
 			env.remoteHost = config.memoryHfMirror;
 			await load();
 		}
 		rerankReady = true;
-		logger.info('dsh-qq-bot: reranker 模型已加载');
+		models.reranker = setModelLoad(setModelDownload(models.reranker, 'ready'), 'ready');
+		logger.info('dsh-qq-bot: reranker 模型已下载并加载');
 		sendStatus();
 	} catch (error) {
 		rerankReady = false;
-		logger.warn(`dsh-qq-bot: reranker 加载失败，重排停用：${error instanceof Error ? error.message : String(error)}`);
+		const message = modelErrorText(error);
+		const downloaded = hasModelFiles(id);
+		models.reranker = setModelLoad(setModelDownload(models.reranker, downloaded ? 'ready' : 'error', downloaded ? undefined : message), 'error', message);
+		logger.warn(`dsh-qq-bot: reranker 加载失败，重排停用：${message}`);
 		sendStatus();
 	}
+}
+
+async function loadModels(): Promise<void> {
+	if (config === undefined || db === undefined) return;
+	if (!config.memoryEmbeddingEnabled && !config.memoryRerankEnabled) return;
+	try {
+		transformers = await importTransformers();
+	} catch (error) {
+		const message = `本地推理运行时不可用：${modelErrorText(error)}`;
+		for (const model of ['embedding', 'reranker'] as const) {
+			if (models[model].download === 'disabled') continue;
+			markCachedModel(model);
+			models[model] = setModelLoad(models[model], 'error', message);
+		}
+		logger.warn(`dsh-qq-bot: ${message}`);
+		sendStatus();
+		return;
+	}
+	if (config.memoryEmbeddingEnabled) await loadEmbedding();
+	if (config.memoryRerankEnabled) await loadReranker();
 }
 
 function normalizeVector(vector: Float32Array): Float32Array {
@@ -419,6 +512,12 @@ async function handleInit(payload: InitPayload): Promise<void> {
 	config = payload.config;
 	runtimeDir = payload.runtimeDir;
 	modelsDir = payload.modelsDir;
+	models = {
+		embedding: createModelStatus(config.memoryEmbeddingModel, config.memoryEmbeddingEnabled),
+		reranker: createModelStatus(config.memoryRerankModel, config.memoryRerankEnabled),
+	};
+	if (config.memoryEmbeddingEnabled) markCachedModel('embedding');
+	if (config.memoryRerankEnabled) markCachedModel('reranker');
 	status.runtime = runtimeDir !== '' ? 'ready' : 'missing';
 	status.runtimeDir = runtimeDir;
 	status.modelDir = modelsDir;
@@ -429,14 +528,17 @@ async function handleInit(payload: InitPayload): Promise<void> {
 		embeddingDim: 512,
 	});
 	if (!result.ok || result.db === undefined) {
-		status = { ...status, ready: false, db: false, lastError: result.reason ?? '打开数据库失败' };
+		dbError = result.reason ?? '打开数据库失败';
+		status = { ...status, ready: false, db: false, models, lastError: dbError };
 		logger.error(`dsh-qq-bot: RAG 数据库打开失败：${result.reason ?? '未知'}`);
 		sendStatus();
 		return;
 	}
 	db = result.db;
+	dbError = '';
 	sendStatus();
-	if (config.memoryEmbeddingEnabled) void loadModels();
+	// 仅启用重排时也必须进入模型加载；旧逻辑只看 embedding，会永远停在 missing。
+	if (config.memoryEmbeddingEnabled || config.memoryRerankEnabled) void loadModels();
 }
 
 async function handleRecord(record: RagRecord): Promise<void> {

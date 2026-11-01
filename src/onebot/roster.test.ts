@@ -206,7 +206,7 @@ describe('RosterService.renderMentions', () => {
 describe('RosterService TTL', () => {
 	it('TTL 内只拉一次全量列表', async () => {
 		const api = fakeApi(MEMBERS);
-		const roster = makeRoster(api, { rosterTtlMs: 60 });
+		const roster = makeRoster(api, { rosterTtlMs: 5000 });
 		roster.touchGroup('888', '11111');
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		roster.touchGroup('888', '22222');
