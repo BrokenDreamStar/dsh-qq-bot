@@ -192,9 +192,6 @@ export async function ensureRuntime(options: {
 					name: 'dsh-qq-bot-rag-runtime',
 					private: true,
 					dependencies: RAG_RUNTIME_VERSIONS,
-					pnpm: {
-						onlyBuiltDependencies: ['onnxruntime-node', 'protobufjs', 'sharp'],
-					},
 				},
 				null,
 				2,
@@ -212,18 +209,19 @@ export async function ensureRuntime(options: {
 		options.onProgress?.({ kind: 'install', message: '正在安装 RAG 运行时依赖…' });
 		const pnpm = bundledPnpm();
 		let result: { ok: boolean; stdout: string; stderr: string };
+		const npmArgs = ['install', '--prefix', tmpDir, '--omit=dev', '--no-audit', '--no-fund', '--ignore-scripts'];
 		if (pnpm !== undefined) {
 			result = await run(
 				pnpm.node,
-				[pnpm.pnpm, '--dir', tmpDir, 'install', '--prod', '--ignore-workspace', '--reporter=append-only', '--store-dir', join(tmpDir, '.store')],
+				[pnpm.pnpm, '--dir', tmpDir, 'install', '--prod', '--ignore-workspace', '--ignore-scripts', '--reporter=append-only', '--store-dir', join(tmpDir, '.store')],
 				{ cwd: tmpDir, env, timeoutMs: 15 * 60_000 },
 			);
+			if (!result.ok) {
+				options.logger.warn(`dsh-qq-bot: pnpm 安装失败，改用 npm 重试：${(result.stderr || result.stdout).slice(-600)}`);
+				result = await run('npm', npmArgs, { cwd: tmpDir, env, timeoutMs: 15 * 60_000 });
+			}
 		} else {
-			result = await run('npm', ['install', '--prefix', tmpDir, '--omit=dev', '--no-audit', '--no-fund'], {
-				cwd: tmpDir,
-				env,
-				timeoutMs: 15 * 60_000,
-			});
+			result = await run('npm', npmArgs, { cwd: tmpDir, env, timeoutMs: 15 * 60_000 });
 		}
 		if (!result.ok) {
 			options.logger.warn(
