@@ -1,0 +1,81 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "dsh-qq-bot 消息处理管线",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "qq", "label": "QQ / napcat" },
+    { "id": "adapter", "label": "适配层（transport / onebot）" },
+    { "id": "pipeline", "label": "分发管线（pipeline/）" },
+    { "id": "gate", "label": "信息过滤" },
+    { "id": "policy", "label": "访问与安全", "variant": "exception" },
+    { "id": "bridge", "label": "会话桥（bridge/）→ dsh agent" }
+  ],
+  "phases": [
+    { "id": "intake", "label": "接入", "fromCol": 0, "toCol": 1 },
+    { "id": "gate", "label": "过滤与准入", "fromCol": 2, "toCol": 3, "variant": "security" },
+    { "id": "respond", "label": "唤醒与应答", "fromCol": 4, "toCol": 5, "variant": "emphasis" }
+  ],
+  "groups": [
+    { "id": "policy_zone", "label": "拒绝 / 熔断路径", "lane": "policy", "fromCol": 2, "toCol": 5, "variant": "security" },
+    { "id": "agent_zone", "label": "dsh agent 轮次", "lane": "bridge", "fromCol": 4, "toCol": 5, "variant": "emphasis" }
+  ],
+  "mainPath": ["event", "onebot", "dispatch", "record_in", "access", "wake", "agent_turn", "chunk", "napcat_send"],
+  "nodes": [
+    { "id": "event", "lane": "qq", "col": 0, "type": "external", "label": "QQ 消息事件", "sublabel": "私聊 / 群聊", "width": 132 },
+    { "id": "napcat_send", "lane": "adapter", "col": 5, "type": "external", "label": "napcat 发送", "sublabel": "OneBot send_msg", "width": 132 },
+    { "id": "onebot", "lane": "adapter", "col": 1, "type": "backend", "label": "OneBot 归一化", "sublabel": "segments / events", "width": 132 },
+    { "id": "dispatch", "lane": "pipeline", "col": 2, "type": "backend", "label": "dispatcher.handle()", "sublabel": "防环 → 去重", "width": 132 },
+    { "id": "filter", "lane": "gate", "col": 2, "type": "backend", "label": "信息过滤前缀", "sublabel": "matchMessageFilter", "width": 132 },
+    { "id": "record_in", "lane": "pipeline", "col": 3, "type": "database", "label": "聊天记录缓冲", "sublabel": "recordInbound", "width": 132 },
+    { "id": "access", "lane": "policy", "col": 3, "type": "security", "label": "访问控制", "sublabel": "三态 + 限速 + 去重", "tag": "白名单空 = 全拒", "width": 132 },
+    { "id": "rejected", "lane": "policy", "col": 4, "type": "security", "label": "拒绝", "sublabel": "私聊记一条 drop", "width": 132 },
+    { "id": "wake", "lane": "pipeline", "col": 4, "type": "backend", "label": "唤醒判定", "sublabel": "@ / 前缀 / 私聊", "width": 132 },
+    { "id": "ask", "lane": "pipeline", "col": 4, "type": "messagebus", "label": "提问应答", "sublabel": "user-questions 抢答", "width": 132, "yOffset": 130 },
+    { "id": "agent_turn", "lane": "bridge", "col": 4, "type": "backend", "label": "dsh agent 轮次", "sublabel": "持久会话 + 工具", "tag": "stall 看门狗", "width": 132 },
+    { "id": "chunk", "lane": "bridge", "col": 5, "type": "backend", "label": "切块 + 折叠转发", "sublabel": "splitText", "width": 132 }
+  ],
+  "edges": [
+    { "id": "e-recv", "from": "event", "to": "onebot", "variant": "default", "role": "main" },
+    { "id": "e-dispatch", "from": "onebot", "to": "dispatch", "variant": "emphasis", "label": "入站", "role": "main" },
+    { "id": "e-filter", "from": "dispatch", "to": "filter", "label": "命中过滤前缀?", "variant": "security" },
+    { "id": "e-record", "from": "dispatch", "to": "record_in", "label": "未命中 → 先记录", "variant": "emphasis", "role": "main" },
+    { "id": "e-access", "from": "record_in", "to": "access", "variant": "emphasis", "role": "main" },
+    { "id": "e-reject", "from": "access", "to": "rejected", "label": "拒绝", "variant": "security", "role": "error" },
+    { "id": "e-wake", "from": "access", "to": "wake", "label": "通过", "variant": "emphasis", "role": "main" },
+    { "id": "e-ask", "from": "wake", "to": "ask", "label": "命中提问中继?", "variant": "default" },
+    { "id": "e-agent", "from": "wake", "to": "agent_turn", "label": "唤醒 → 逐条排队", "variant": "emphasis", "role": "main" },
+    { "id": "e-chunk", "from": "agent_turn", "to": "chunk", "variant": "emphasis", "role": "main" },
+    { "id": "e-send", "from": "chunk", "to": "napcat_send", "variant": "emphasis", "role": "main", "fromSide": "right", "toSide": "right", "route": "outside-right", "channelX": 1210 },
+    { "id": "e-tools", "from": "agent_turn", "to": "ask", "label": "agent 提问", "variant": "dashed", "role": "return" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "架构边界",
+      "items": [
+        "napcat ⇄ transport ⇄ onebot ⇄ pipeline ⇄ bridge ⇄ dsh agent",
+        "对 dsh 内核 API 的调用集中在 bridge/ 与 tools/"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "安全默认",
+      "items": [
+        "allowlist 为空 = 全部拒绝；QQ 是无认证入口",
+        "restrictTools / blockedTools 拦截非管理员工具轮次"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "看门狗与出口",
+      "items": [
+        "无进展看门狗按 session.seq 判定卡死并中断",
+        "/stop = abortTurn，不经过 ensureAgent"
+      ]
+    }
+  ]
+}
