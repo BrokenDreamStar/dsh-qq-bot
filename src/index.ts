@@ -217,7 +217,10 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 		getWeb: () => webSeam,
 	});
 	// 长期记忆：默认关闭；开启时打开 <dataDir>/memory.db（node:sqlite + FTS5）。
-	// 蒸馏走 ctx.llm 的一次性请求（不建 agent），llm 是可选服务，惰性读取。
+	// 技能学习走 ctx.llm 的一次性请求（不建 agent），llm 是可选服务，惰性读取。
+	// `memoryReady` 防止 createMemoryService 启动 worker 时通过 onStatusChange
+	// 回调 syncMemoryTools，而这时 `memory` 还是 TDZ（真实事故：启动即崩）。
+	let memoryReady = false;
 	let llmSeam: { stream?: unknown } | undefined;
 	(ctx as { inject(services: readonly string[], cb: (c: Context) => void): void }).inject(['llm'], (llmCtx) => {
 		llmSeam = getService<{ stream?: unknown }>(llmCtx, 'llm');
@@ -231,7 +234,7 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 		createUserMessage: (text) => createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }),
 		// 存储随总开关热开热关：状态一变就同步工具注册（见 syncMemoryTools）。
 		onStatusChange: () => {
-			syncMemoryTools();
+			if (memoryReady) syncMemoryTools();
 		},
 		// 记忆的关键状态与失败原因进消息日志（WebUI「消息日志与诊断」卡片 + NDJSON）：
 		// dsh 自己的 logger 在部分部署里不落盘，没有这条通道就查不出"为什么记忆不更新"。
@@ -240,6 +243,7 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 		},
 	});
 
+	memoryReady = true;
 	// 定时任务工具是否注册成功（apply 时决定；桥据此决定是否注入任务能力提示）。
 	let taskToolsReady = false;
 	// 聊天记录工具是否注册成功（同上，决定 system prompt 是否提示可读聊天记录）。
