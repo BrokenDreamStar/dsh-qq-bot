@@ -81,6 +81,18 @@ export interface SkillDraft {
 	sourceTo?: number;
 }
 
+/** 下载/安装/嵌入进度（WebUI 进度条用）。 */
+export interface RagProgress {
+	kind: 'install' | 'download' | 'embed' | 'rerank';
+	message?: string;
+	file?: string;
+	/** 0~100；拿不到时 undefined（WebUI 显示不确定进度）。 */
+	percent?: number;
+	loaded?: number;
+	total?: number;
+	at: number;
+}
+
 /** 运行时/模型/数据库状态（WebUI 与日志用）。 */
 export interface RagStatus {
 	ready: boolean;
@@ -98,6 +110,8 @@ export interface RagStatus {
 	/** 运行时目录（仅宿主面展示，不发给模型）。 */
 	runtimeDir?: string;
 	modelDir?: string;
+	/** 当前下载/安装进度；空闲时 undefined。 */
+	progress?: RagProgress;
 }
 
 /** 检索结果（工具/命令用）。 */

@@ -17,7 +17,7 @@ import type { MemoryLlmView } from './llm.ts';
 import { RagClient } from './rag/client.ts';
 import { renderChunkBlock, renderRecallBlock, renderSkillList } from './rag/render.ts';
 import { ensureRuntime, resolveRuntimePaths, resolveVecPath, type RuntimePaths } from './rag/runtime.ts';
-import type { AfterTurnInput, RagRecord, RagSkill, RagStatus, RagWorkerConfig, SkillDraft } from './rag/types.ts';
+import type { AfterTurnInput, RagProgress, RagRecord, RagSkill, RagStatus, RagWorkerConfig, SkillDraft } from './rag/types.ts';
 import { SkillLearner } from './skills/learn.ts';
 
 /** 记忆服务对外暴露的配置视图（由 config.ts 的 DshQQConfig 满足）。 */
@@ -100,6 +100,7 @@ export class MemoryService {
 	private client: RagClient | undefined;
 	private starting: Promise<void> | undefined;
 	private status: RagStatus = { ...EMPTY_STATUS };
+	private installProgress: RagProgress | undefined;
 	private readonly learner: SkillLearner;
 	private lastPruneAt = 0;
 
@@ -133,7 +134,8 @@ export class MemoryService {
 	}
 
 	get currentStatus(): RagStatus {
-		return this.status;
+		const progress = this.status.progress ?? this.installProgress;
+		return { ...this.status, ...(progress !== undefined ? { progress } : {}) };
 	}
 
 	lastSkillError(chatKey: string): string | undefined {
@@ -205,6 +207,7 @@ export class MemoryService {
 			onStatus: status => {
 				const wasReady = this.status.ready;
 				this.status = status;
+				if (status.runtime === 'ready' || status.ready) this.installProgress = undefined;
 				if (wasReady !== status.ready) this.deps.onStatusChange?.();
 			},
 			onLog: (level, message) => {
@@ -212,8 +215,8 @@ export class MemoryService {
 				else if (level === 'error') this.deps.logger.error(message);
 				else this.deps.logger.info(message);
 			},
-			onProgress: (_kind, message) => {
-				this.deps.note?.('memory-progress', message);
+			onProgress: progress => {
+				this.deps.note?.('memory-progress', progress.message ?? progress.file ?? '');
 			},
 		});
 		this.client = client;
@@ -227,15 +230,21 @@ export class MemoryService {
 
 	private async installRuntime(paths: RuntimePaths): Promise<void> {
 		this.deps.logger.info(`dsh-qq-bot: 开始安装 RAG 运行时（${paths.dir}）`);
+		this.installProgress = { kind: 'install', message: '正在安装 RAG 运行时依赖…', at: Date.now() };
 		const installed = await ensureRuntime({
 			dataDir: this.deps.dataDir,
 			logger: this.deps.logger,
-			onProgress: progress => this.deps.note?.('memory-progress', progress.message),
+			onProgress: progress => {
+				this.installProgress = { kind: 'install', message: progress.message, at: Date.now() };
+				this.deps.note?.('memory-progress', progress.message);
+			},
 		});
 		if (!installed.installed) {
+			this.installProgress = undefined;
 			this.deps.note?.('memory-runtime-failed', '运行时安装失败，继续 FTS-only');
 			return;
 		}
+		this.installProgress = undefined;
 		const previous = this.client;
 		this.client = undefined;
 		await previous?.dispose();
@@ -349,10 +358,11 @@ export class MemoryService {
 	}
 
 	async stats(): Promise<RagStatus> {
-		if (this.client === undefined) return this.status;
+		if (this.client === undefined) return this.currentStatus;
 		const status = await this.client.stats();
 		if (status !== undefined) this.status = status;
-		return this.status;
+		const progress = this.status.progress ?? this.installProgress;
+		return { ...this.status, ...(progress !== undefined ? { progress } : {}) };
 	}
 
 	async prune(): Promise<number> {

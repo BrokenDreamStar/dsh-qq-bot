@@ -8,7 +8,7 @@
 
 import { Worker } from 'node:worker_threads';
 import type { Logger } from '../../types.ts';
-import type { RagChunkHit, RagRecord, RagSkill, RagStatus, RagWorkerConfig, SkillDraft } from './types.ts';
+import type { RagChunkHit, RagProgress, RagRecord, RagSkill, RagStatus, RagWorkerConfig, SkillDraft } from './types.ts';
 
 export interface RagClientOptions {
 	dataDir: string;
@@ -19,7 +19,7 @@ export interface RagClientOptions {
 	logger: Logger;
 	onStatus?: (status: RagStatus) => void;
 	onLog?: (level: 'info' | 'warn' | 'error', message: string) => void;
-	onProgress?: (kind: 'install' | 'download' | 'embed' | 'rerank', message: string) => void;
+	onProgress?: (progress: RagProgress) => void;
 }
 
 interface Pending {
@@ -47,6 +47,7 @@ export class RagClient {
 	private readonly pending = new Map<number, Pending>();
 	private nextId = 1;
 	private status: RagStatus = { ...DEFAULT_STATUS };
+	private progress: RagProgress | undefined;
 	private started = false;
 	private closed = false;
 	private restartAttempts = 0;
@@ -56,7 +57,7 @@ export class RagClient {
 	constructor(private readonly options: RagClientOptions) {}
 
 	get currentStatus(): RagStatus {
-		return this.status;
+		return { ...this.status, ...(this.progress !== undefined ? { progress: this.progress } : {}) };
 	}
 
 	get ready(): boolean {
@@ -78,6 +79,7 @@ export class RagClient {
 			return;
 		}
 		const worker = this.worker;
+		this.progress = undefined;
 		worker.on('message', (message: unknown) => this.onMessage(message));
 		worker.on('error', error => {
 			this.options.logger.warn(`dsh-qq-bot: RAG worker 错误：${error instanceof Error ? error.message : String(error)}`);
@@ -133,7 +135,8 @@ export class RagClient {
 		const record = message as Record<string, unknown>;
 		if (record.event === 'status' && record.status !== null && typeof record.status === 'object') {
 			this.status = record.status as RagStatus;
-			this.options.onStatus?.(this.status);
+			if (this.status.model === 'ready' || this.status.model === 'error') this.progress = undefined;
+			this.options.onStatus?.(this.currentStatus);
 			return;
 		}
 		if (record.event === 'log') {
@@ -142,10 +145,11 @@ export class RagClient {
 			if (text !== '') this.options.onLog?.(level, text);
 			return;
 		}
-		if (record.event === 'progress') {
-			const kind = record.kind === 'download' || record.kind === 'embed' || record.kind === 'rerank' ? record.kind : 'install';
-			const text = typeof record.message === 'string' ? record.message : '';
-			this.options.onProgress?.(kind, text);
+		if (record.event === 'progress' && record.progress !== null && typeof record.progress === 'object') {
+			const progress = record.progress as RagProgress;
+			if (typeof progress.at !== 'number') progress.at = Date.now();
+			this.progress = progress;
+			this.options.onProgress?.(progress);
 			return;
 		}
 		const id = typeof record.id === 'number' ? record.id : 0;
@@ -329,11 +333,12 @@ export class RagClient {
 	}
 
 	async stats(): Promise<RagStatus | undefined> {
-		if (!this.ready) return this.status;
+		if (!this.ready) return this.currentStatus;
 		try {
-			return (await this.request('stats', {}, 3000)) as RagStatus;
+			const status = (await this.request('stats', {}, 3000)) as RagStatus;
+			return { ...status, ...(this.progress !== undefined ? { progress: this.progress } : {}) };
 		} catch {
-			return this.status;
+			return this.currentStatus;
 		}
 	}
 

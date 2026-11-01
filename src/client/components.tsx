@@ -79,6 +79,10 @@ const css = {
 	switchOn: 'dshqq-switchOn',
 	thumb: 'dshqq-thumb',
 	logPanel: 'dshqq-logPanel',
+	progressWrap: 'dshqq-progressWrap',
+	progressTrack: 'dshqq-progressTrack',
+	progressBar: 'dshqq-progressBar',
+	progressIndeterminate: 'dshqq-progressIndeterminate',
 	logToolbar: 'dshqq-logToolbar',
 	logAutoOn: 'dshqq-logAutoOn',
 	logStatus: 'dshqq-logStatus',
@@ -1344,6 +1348,15 @@ function useTaskData(getRpc: (() => RpcCaller | undefined) | undefined, active: 
 }
 
 /** 记忆/技能面板的视图类型（宿主 RPC 返回）。 */
+interface RagProgressView {
+	kind: string;
+	message?: string;
+	file?: string;
+	percent?: number;
+	loaded?: number;
+	total?: number;
+}
+
 interface RagStatusView {
 	ready: boolean;
 	db: boolean;
@@ -1357,6 +1370,7 @@ interface RagStatusView {
 	chunks: number;
 	skills: number;
 	lastError?: string;
+	progress?: RagProgressView;
 }
 
 interface RagChunkView {
@@ -1377,6 +1391,20 @@ interface RagSkillView {
 	useCount: number;
 }
 
+function parseRagProgress(value: unknown): RagProgressView | undefined {
+	if (value === null || typeof value !== 'object') return undefined;
+	const row = value as Record<string, unknown>;
+	if (typeof row.kind !== 'string') return undefined;
+	return {
+		kind: row.kind,
+		...(typeof row.message === 'string' ? { message: row.message } : {}),
+		...(typeof row.file === 'string' ? { file: row.file } : {}),
+		...(typeof row.percent === 'number' && Number.isFinite(row.percent) ? { percent: row.percent } : {}),
+		...(typeof row.loaded === 'number' && Number.isFinite(row.loaded) ? { loaded: row.loaded } : {}),
+		...(typeof row.total === 'number' && Number.isFinite(row.total) ? { total: row.total } : {}),
+	};
+}
+
 function parseRagStatus(value: unknown): RagStatusView | null {
 	const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 	if (typeof record.ready !== 'boolean') return null;
@@ -1393,6 +1421,7 @@ function parseRagStatus(value: unknown): RagStatusView | null {
 		chunks: typeof record.chunks === 'number' ? record.chunks : 0,
 		skills: typeof record.skills === 'number' ? record.skills : 0,
 		...(typeof record.lastError === 'string' ? { lastError: record.lastError } : {}),
+		...(parseRagProgress(record.progress) !== undefined ? { progress: parseRagProgress(record.progress)! } : {}),
 	};
 }
 
@@ -1434,6 +1463,14 @@ function parseSkills(value: unknown): RagSkillView[] {
 		});
 	}
 	return items;
+}
+
+function formatBytes(value: number | undefined): string {
+	if (value === undefined || !Number.isFinite(value) || value < 0) return '';
+	if (value < 1024) return `${Math.round(value)} B`;
+	if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+	if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+	return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
 function formatChunkTime(ts: number): string {
@@ -1560,8 +1597,23 @@ function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined
 	}, [call, chatKey, loadSkills, run]);
 
 	useEffect(() => {
-		void refreshStatus();
-	}, [refreshStatus]);
+		if (disabled) return;
+		let cancelled = false;
+		const tick = async (): Promise<void> => {
+			try {
+				const value = await call('memory/status');
+				if (!cancelled) setStatus(parseRagStatus(value));
+			} catch {
+				// 面板打开期间短暂失败不打断用户操作；下一次轮询会恢复。
+			}
+		};
+		void tick();
+		const timer = setInterval(() => void tick(), 1500);
+		return () => {
+			cancelled = true;
+			clearInterval(timer);
+		};
+	}, [call, disabled]);
 
 	return (
 		<div className={css.logPanel}>
@@ -1610,6 +1662,27 @@ function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined
 				<p className={css.failed} role="status">
 					{failed}
 				</p>
+			) : null}
+			{status?.progress !== undefined ? (
+				<div className={css.progressWrap}>
+					<p className={css.hint}>
+						{status.progress.kind === 'install' ? t('memoryInstallingRuntime') : t('memoryDownloading')}
+						{status.progress.percent !== undefined ? ` ${Math.round(status.progress.percent)}%` : ''}
+						{status.progress.file !== undefined ? ` ｜ ${status.progress.file}` : ''}
+					</p>
+					<div className={css.progressTrack}>
+						<div
+							className={cls(css.progressBar, status.progress.percent === undefined ? css.progressIndeterminate : undefined)}
+							style={status.progress.percent !== undefined ? { width: `${Math.max(2, Math.min(100, status.progress.percent))}%` } : undefined}
+						/>
+					</div>
+					{status.progress.loaded !== undefined || status.progress.total !== undefined ? (
+						<p className={css.hint}>
+							{formatBytes(status.progress.loaded)}
+							{status.progress.total !== undefined ? ` / ${formatBytes(status.progress.total)}` : ''}
+						</p>
+					) : null}
+				</div>
 			) : null}
 			{status !== null ? (
 				<div className={css.logPanel}>

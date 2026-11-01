@@ -150,6 +150,11 @@ export const CARD_CSS = `
 .dshqq-routeRowDefault>*,.dshqq-routeRow>*{grid-column:1}
 .dshqq-routeRow .dshqq-routeRemove{grid-column:2;grid-row:1}
 }
+.dshqq-progressWrap{border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-module-platform);margin:8px 0;padding:10px 12px}
+.dshqq-progressTrack{height:6px;background:var(--dsw-alias-border-l2);border-radius:999px;overflow:hidden;margin:8px 0 4px}
+.dshqq-progressBar{height:100%;background:var(--dsw-alias-brand-primary);border-radius:999px;transition:width .35s ease}
+.dshqq-progressIndeterminate{width:35%;animation:dshqq-progressIndeterminate 1.2s ease-in-out infinite}
+@keyframes dshqq-progressIndeterminate{0%{transform:translateX(-120%)}50%{transform:translateX(120%)}100%{transform:translateX(320%)}}
 `;
 
 /** 注入一次页面样式（幂等）。 */

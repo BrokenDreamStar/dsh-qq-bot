@@ -16,6 +16,7 @@ import type { Logger } from '../../types.ts';
 import { RagDatabase } from './db.ts';
 import { takeChunks, type ChunkMessage } from './chunk.ts';
 import { coverageOf, finalScore, normalizeScores, rrfFuse, recencyScore } from './fusion.ts';
+import { normalizeDownloadProgress } from './progress.ts';
 import { tokenizeQuery } from '../text.ts';
 import type {
 	RagChunkHit,
@@ -202,14 +203,8 @@ async function loadModels(): Promise<void> {
 		env.cacheDir = modelsDir;
 		env.allowRemoteModels = true;
 		env.remoteHost = config.memoryHfEndpoint;
-		const progress_callback = (progress: { status?: string; file?: string; progress?: number; loaded?: number; total?: number }) => {
-			post({
-				event: 'progress',
-				kind: 'download',
-				message: `${progress.status ?? 'download'} ${progress.file ?? ''}`,
-				done: progress.loaded ?? 0,
-				total: progress.total ?? 0,
-			});
+		const progress_callback = (progress: { status?: string; file?: string; name?: string; progress?: number; loaded?: number; total?: number }) => {
+			post({ event: 'progress', progress: normalizeDownloadProgress(progress) });
 		};
 		if (config.memoryEmbeddingEnabled) {
 			const load = async (): Promise<void> => {
