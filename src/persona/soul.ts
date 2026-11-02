@@ -49,13 +49,6 @@ function readText(path: string): string | undefined {
 	}
 }
 
-/** 读 SOUL.md 原文；不存在/读失败返回 undefined。 */
-export function readSoulText(sessionDir: string): string | undefined {
-	const path = soulPath(sessionDir);
-	if (!existsSync(path)) return undefined;
-	return readText(path);
-}
-
 /**
  * 写 SOUL.md（原子替换；目录不存在则创建）。
  * 空内容允许写入，但注入时会回退模板（见 `inspectSoul`）。

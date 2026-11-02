@@ -422,11 +422,6 @@ export class ChatBridge {
 		this.lastActivity = Date.now();
 	}
 
-	/** 当前轮次的发起人（工具判定“关于谁”的画像；定时任务为创建者）。 */
-	currentTurn(): { senderId: string; admin: boolean } {
-		return { senderId: this.turnSenderId, admin: this.turnAdmin };
-	}
-
 	/**
 	 * 记录本次触发消息的回复上下文（引用/回 @ 用）。
 	 *

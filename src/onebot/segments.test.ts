@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isAtSelf, parseCQ, replySegmentId, segmentsToCQ, segmentsToPlainText, segmentsToText, stripLeadingAtSelf } from './segments.ts';
+import { isAtSelf, parseCQ, replySegmentId, segmentsToPlainText, segmentsToText, stripLeadingAtSelf } from './segments.ts';
 
 describe('parseCQ', () => {
 	it('解析纯文本', () => {
@@ -28,18 +28,6 @@ describe('parseCQ', () => {
 		const segments = parseCQ('[CQ:face,id=1][CQ:face,id=2]');
 		expect(segments).toHaveLength(2);
 		expect(segments[1]).toMatchObject({ type: 'face', data: { id: '2' } });
-	});
-});
-
-describe('segmentsToCQ', () => {
-	it('往返：段 → CQ → 段 保留语义', () => {
-		const segments = [
-			{ type: 'text' as const, data: { text: 'a[b]&c' } },
-			{ type: 'image' as const, data: { file: 'x.jpg' } },
-		];
-		const parsed = parseCQ(segmentsToCQ(segments));
-		expect(parsed[0]).toEqual({ type: 'text', data: { text: 'a[b]&c' } });
-		expect(parsed[1]).toMatchObject({ type: 'image', data: { file: 'x.jpg' } });
 	});
 });
 

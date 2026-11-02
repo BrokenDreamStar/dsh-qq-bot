@@ -104,16 +104,6 @@ export class OneBotApi {
 		}
 	}
 
-	async getVersion(): Promise<string | undefined> {
-		try {
-			const data = (await this.transport.call('get_version_info')) as { app_name?: string; app_version?: string } | undefined;
-			if (data === undefined) return undefined;
-			return `${data.app_name ?? 'OneBot'} ${data.app_version ?? ''}`.trim();
-		} catch {
-			return undefined;
-		}
-	}
-
 	/** 发送消息段数组；返回 message_id。 */
 	async sendSegments(target: SendTarget, segments: OBSegment[]): Promise<number | null> {
 		const params =

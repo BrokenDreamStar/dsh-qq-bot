@@ -12,13 +12,10 @@
  * "这个后端这次不行"，由 chain.ts 顺延到下一个后端。
  */
 import type { WebSearchResultLike } from '../dsh.ts';
-import { SEARCH_BACKEND_IDS, type SearchBackendId } from './priority.ts';
+import type { SearchBackendId } from './priority.ts';
 
 /** 规范化后的后端标识（配置里允许写别名，见 BACKEND_ALIASES；取值见 priority.ts）。 */
 export type SearchBackend = SearchBackendId;
-
-/** 全部合法后端（配置说明与 WebUI 文案用）。 */
-export const SEARCH_BACKENDS: readonly SearchBackend[] = SEARCH_BACKEND_IDS;
 
 /** 后端展示名（日志、system prompt 提示、错误消息用）。 */
 export const SEARCH_BACKEND_LABELS: Record<SearchBackend, string> = {

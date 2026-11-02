@@ -68,23 +68,12 @@ export type OBSegment =
 	| OBNodeSegment
 	| OBGenericSegment;
 
-const CQ_ESCAPE_TEXT: Record<string, string> = { '&': '&amp;', '[': '&#91;', ']': '&#93;' };
-const CQ_ESCAPE_PARAM: Record<string, string> = { '&': '&amp;', '[': '&#91;', ']': '&#93;', ',': '&#44;' };
-
 function unescapeCQ(value: string): string {
 	return value
 		.replace(/&#44;/g, ',')
 		.replace(/&#91;/g, '[')
 		.replace(/&#93;/g, ']')
 		.replace(/&amp;/g, '&');
-}
-
-function escapeText(value: string): string {
-	return value.replace(/[&[\]]/g, (c) => CQ_ESCAPE_TEXT[c] ?? c);
-}
-
-function escapeParam(value: string): string {
-	return value.replace(/[&[\],]/g, (c) => CQ_ESCAPE_PARAM[c] ?? c);
 }
 
 /** 解析 CQ 码字符串为消息段数组（纯文本段保持原文）。 */
@@ -115,20 +104,6 @@ export function parseCQ(raw: string): OBSegment[] {
 		if (text !== '') segments.push({ type: 'text', data: { text } });
 	}
 	return segments;
-}
-
-/** 序列化消息段为 CQ 码字符串（发送兜底用；正常发送走段数组）。 */
-export function segmentsToCQ(segments: OBSegment[]): string {
-	return segments
-		.map((segment) => {
-			if (segment.type === 'text') return escapeText(String((segment.data as { text?: string }).text ?? ''));
-			const params = Object.entries(segment.data)
-				.filter(([, value]) => value !== undefined && value !== null)
-				.map(([key, value]) => `${key}=${escapeParam(String(value))}`)
-				.join(',');
-			return `[CQ:${segment.type}${params === '' ? '' : ','}${params}]`;
-		})
-		.join('');
 }
 
 const PLACEHOLDER_LABELS: Record<string, string> = {
