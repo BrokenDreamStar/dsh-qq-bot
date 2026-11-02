@@ -1464,7 +1464,8 @@ export class ChatBridge {
 	 *
 	 * 引用有两个来源：`replyWithQuote`（一律引用）与 `replyQuoteOnMention`
 	 * （群聊里被 @ 触发时引用那条 @ 消息，QQ 的引用回复——群里一眼看清在回哪句）。
-	 * 被 @ 触发时默认不再追加 @ 段：引用气泡已经带上了"回复 谁"，再 @ 一次是重复。
+	 * `replyWithMention` 与引用互不排斥：用户要求"已引用消息时也要 @"，
+	 * 所以引用命中时仍然追加 @ 段（顺序是 引用 → @ → 正文）。
 	 */
 	private decorated(text: string, withDecoration: boolean): OBSegment[] {
 		const segments: OBSegment[] = [];
@@ -1474,7 +1475,7 @@ export class ChatBridge {
 			if (quote) {
 				segments.push({ type: 'reply', data: { id: String(this.replyMessageId) } });
 			}
-			if (this.scope === 'group' && this.options.config.replyWithMention && this.replySenderId !== '' && !quote) {
+			if (this.scope === 'group' && this.options.config.replyWithMention && this.replySenderId !== '') {
 				segments.push({ type: 'at', data: { qq: this.replySenderId } });
 			}
 		}

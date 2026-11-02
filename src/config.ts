@@ -164,7 +164,7 @@ export interface DshQQConfig {
 	replyQuoteOnMention: boolean;
 	/** 引用回复反查原文的最大长度（字符） */
 	quoteMaxChars: number;
-	/** 群聊回复时 @ 触发者 */
+	/** 群聊回复时 @ 触发者（引用回复时也会一并 @） */
 	replyWithMention: boolean;
 
 	// 群成员识别（卡片「群成员识别」）
@@ -406,7 +406,7 @@ export const ConfigSchema = Schema.object({
 	replyWithQuote: Schema.boolean().default(false).description('回复时一律引用触发消息（含唤醒前缀/任意消息触发）'),
 	replyQuoteOnMention: Schema.boolean().default(true).description('群聊里被 @ 触发时引用那条 @ 消息（QQ 的引用回复，让群里看清在回哪句）；关闭后与普通消息一样只在 replyWithQuote 开启时引用'),
 	quoteMaxChars: Schema.number().step(1).min(50).max(2000).default(500).description('引用回复反查原文的最大长度（字符）'),
-	replyWithMention: Schema.boolean().default(false).description('群聊回复时 @ 触发者（被 @ 触发且已引用时不再重复 @）'),
+	replyWithMention: Schema.boolean().default(false).description('群聊回复时 @ 触发者；引用该消息时也会一并 @'),
 
 	rosterEnabled: Schema.boolean().default(true).description('注入群成员列表 system prompt（每轮动态求值），让 agent 分清群成员身份'),
 	rosterTtlMs: Schema.number().step(1).min(60000).max(604800000).default(21600000).description('群成员列表全量刷新间隔（ms），默认 6 小时'),

@@ -1,6 +1,7 @@
 /**
  * 出站装饰回归：**群聊里被 @ 触发时用 QQ 的引用回复引用那条 @ 消息**
- * （用户明确要求），并且不再重复 @ 一次；定时任务的主动消息不带引用。
+ * （用户明确要求）；开启 `replyWithMention` 时引用与 @ 同时出现（用户要求
+ * "已引用消息时也要 @"）；定时任务的主动消息不带引用。
  *
  * 用最小桥 + 假 api 验证实际发出去的段数组：装饰只加在第一块上。
  */
@@ -81,12 +82,15 @@ describe('出站装饰：被 @ 触发时引用原消息', () => {
 		]);
 	});
 
-	it('开启「回复 @ 触发者」时，被 @ 触发也只引用、不重复 @', async () => {
+	it('开启「回复 @ 触发者」时，被 @ 触发先引用再 @（已引用也 @）', async () => {
 		const { bridge, sent } = harness({ replyWithMention: true });
 		bridge.setReplyContext(4242, '2043598920', 'mention');
 		await bridge.reply('好');
-		expect(replySegments(sent).some((segment) => segment.type === 'at')).toBe(false);
-		expect(replySegments(sent)[0]).toEqual({ type: 'reply', data: { id: '4242' } });
+		expect(replySegments(sent)).toEqual([
+			{ type: 'reply', data: { id: '4242' } },
+			{ type: 'at', data: { qq: '2043598920' } },
+			{ type: 'text', data: { text: '好' } },
+		]);
 	});
 
 	it('关掉 replyQuoteOnMention 后，@ 触发不再引用（回到旧行为）', async () => {
@@ -118,6 +122,24 @@ describe('出站装饰：被 @ 触发时引用原消息', () => {
 		bridge.setReplyContext(4242, '2043598920', 'other');
 		await bridge.reply('好');
 		expect(replySegments(sent)[0]).toEqual({ type: 'reply', data: { id: '4242' } });
+	});
+
+	it('replyWithQuote + replyWithMention 同时开启时，引用与 @ 一起发（已引用也 @）', async () => {
+		const { bridge, sent } = harness({ replyWithQuote: true, replyWithMention: true });
+		bridge.setReplyContext(4242, '2043598920', 'other');
+		await bridge.reply('好');
+		expect(replySegments(sent)).toEqual([
+			{ type: 'reply', data: { id: '4242' } },
+			{ type: 'at', data: { qq: '2043598920' } },
+			{ type: 'text', data: { text: '好' } },
+		]);
+	});
+
+	it('私聊开启 replyWithMention 也不 @（私聊没有 @ 语义）', async () => {
+		const { bridge, sent } = harness({ replyWithMention: true }, 'private');
+		bridge.setReplyContext(4242, '2043598920', 'other');
+		await bridge.reply('好');
+		expect(replySegments(sent)).toEqual([{ type: 'text', data: { text: '好' } }]);
 	});
 
 	it('私聊不因 @ 引用（私聊没有 @ 语义）', async () => {
