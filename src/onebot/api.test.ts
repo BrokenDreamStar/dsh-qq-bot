@@ -62,3 +62,57 @@ describe('OneBotApi 历史消息', () => {
 		expect(await unknown.getGroupMsgHistory('888', 5)).toBeUndefined();
 	});
 });
+
+describe('OneBotApi 群 / 好友清单（会话下拉用）', () => {
+	it('get_group_list：号码转字符串，缺 group_name 时留空，缺号码的条目丢弃', async () => {
+		const { transport, calls } = fakeTransport([
+			{ group_id: 648399497, group_name: '摸鱼群' },
+			{ group_id: '123', group_name: undefined },
+			{ group_name: '没有号码' },
+		]);
+		const api = new OneBotApi(transport, logger);
+		expect(await api.listGroups()).toEqual([
+			{ id: '648399497', name: '摸鱼群' },
+			{ id: '123', name: '' },
+		]);
+		expect(calls[0]?.action).toBe('get_group_list');
+	});
+
+	it('get_friend_list：备注优先、其次昵称', async () => {
+		const { transport } = fakeTransport([
+			{ user_id: 1, nickname: '小明', remark: '同事' },
+			{ user_id: 2, nickname: '小红', remark: '  ' },
+		]);
+		const api = new OneBotApi(transport, logger);
+		expect(await api.listFriends()).toEqual([
+			{ id: '1', name: '同事' },
+			{ id: '2', name: '小红' },
+		]);
+	});
+
+	it('对接端不支持 / 调用失败时返回 undefined（设置页退化为本地清单）', async () => {
+		const failing = new OneBotApi(fakeTransport(undefined, new Error('unsupported action')).transport, logger);
+		expect(await failing.listGroups()).toBeUndefined();
+		expect(await failing.listFriends()).toBeUndefined();
+		const unknown = new OneBotApi(fakeTransport({ ok: true }).transport, logger);
+		expect(await unknown.listGroups()).toBeUndefined();
+	});
+
+	it('未连接时不发 action（离线打开设置页是常态）', async () => {
+		const calls: string[] = [];
+		const transport: OneBotTransport = {
+			kind: 'forward',
+			connected: false,
+			start: () => {},
+			stop: () => {},
+			call: (action) => {
+				calls.push(action);
+				return Promise.reject(new Error('onebot not connected'));
+			},
+		};
+		const api = new OneBotApi(transport, logger);
+		expect(await api.listGroups()).toBeUndefined();
+		expect(await api.listFriends()).toBeUndefined();
+		expect(calls).toEqual([]);
+	});
+});

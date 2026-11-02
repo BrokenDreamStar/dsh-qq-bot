@@ -9,6 +9,8 @@
  *  - 新表全部 `IF NOT EXISTS`，可重复执行。
  */
 
+import { EMBEDDING_DIM } from './modelOptions.ts';
+
 export interface SqliteLike {
 	exec(sql: string): void;
 	prepare(sql: string): {
@@ -146,16 +148,19 @@ CREATE TABLE IF NOT EXISTS rag_skill_tombstones (
 );
 `;
 
-/** 向量表单独建：sqlite-vec 未加载时不能执行。 */
+/**
+ * 向量表单独建：sqlite-vec 未加载时不能执行。
+ * 维度来自 `EMBEDDING_DIM`——它必须与 `EMBEDDING_MODEL` 的输出维度一致（见 modelOptions.ts）。
+ */
 export const RAG_VEC_SCHEMA_SQL = `
 CREATE VIRTUAL TABLE IF NOT EXISTS rag_chunk_vec USING vec0(
   chat_key TEXT PARTITION KEY,
   chunk_id INTEGER PRIMARY KEY,
-  embedding float[512] distance_metric=cosine
+  embedding float[${EMBEDDING_DIM}] distance_metric=cosine
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS rag_skill_vec USING vec0(
   skill_id INTEGER PRIMARY KEY,
-  embedding float[512] distance_metric=cosine
+  embedding float[${EMBEDDING_DIM}] distance_metric=cosine
 );
 `;
 

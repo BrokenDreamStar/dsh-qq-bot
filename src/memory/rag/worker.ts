@@ -18,6 +18,7 @@ import { RagDatabase } from './db.ts';
 import { takeChunks, type ChunkMessage } from './chunk.ts';
 import { coverageOf, finalScore, normalizeScores, rrfFuse, recencyScore } from './fusion.ts';
 import { normalizeDownloadProgress, createModelStatus, modelProgress, setModelDownload, setModelLoad } from './progress.ts';
+import { EMBEDDING_DIM, EMBEDDING_MODEL, downloadHost, embeddingDtype, mirrorHost } from './modelOptions.ts';
 import { tokenizeQuery } from '../text.ts';
 import type {
 	RagChunkHit,
@@ -214,12 +215,10 @@ async function processEmbeddings(): Promise<void> {
 				for (let index = 0; index < batch.length; index += 1) {
 					const item = batch[index]!;
 					const vector = vectors[index];
-					if (vector !== undefined) {
-						db.upsertChunkVector(item.id, item.chatKey, vector);
-						db.markChunkEmbedded(item.id, 1);
-					} else {
-						db.markChunkEmbedded(item.id, 2);
-					}
+					// 写入成功才标记"已嵌入"：维度不符/磁盘失败必须留待重试，
+					// 无条件 mark(1) 会让向量召回静默消失且永远不补。
+					const saved = vector !== undefined && db.upsertChunkVector(item.id, item.chatKey, vector);
+					db.markChunkEmbedded(item.id, saved ? 1 : 2);
 				}
 			} catch (error) {
 				logger.warn(`dsh-qq-bot: 批量嵌入失败：${error instanceof Error ? error.message : String(error)}`);
@@ -260,7 +259,8 @@ function modelErrorText(error: unknown): string {
 
 async function loadEmbedding(): Promise<void> {
 	if (config === undefined) return;
-	const id = config.memoryEmbeddingModel;
+	const id = EMBEDDING_MODEL;
+	const dtype = embeddingDtype(config.memoryEmbeddingDtype);
 	const download = models.embedding.download === 'ready' ? 'ready' : 'downloading';
 	models.embedding = { ...setModelDownload(models.embedding, download), id, load: 'loading' };
 	sendStatus();
@@ -268,21 +268,25 @@ async function loadEmbedding(): Promise<void> {
 		const { AutoTokenizer, AutoModel, env } = transformers;
 		env.cacheDir = modelsDir;
 		env.allowRemoteModels = true;
-		env.remoteHost = config.memoryHfEndpoint;
+		const directHost = downloadHost(config.memoryHfEndpoint);
+		const mirror = mirrorHost(config.memoryHfMirror);
+		env.remoteHost = directHost;
 		const progress_callback = modelProgressCallback('embedding');
 		const load = async (): Promise<void> => {
 			tokenizer = await AutoTokenizer.from_pretrained(id, { progress_callback });
 			embedModel = await AutoModel.from_pretrained(id, {
-				dtype: config!.memoryEmbeddingDtype || 'int8',
+				dtype,
 				progress_callback,
 			});
 		};
 		try {
 			await load();
 		} catch (direct) {
+			// 没配镜像（或镜像就是直连）时不再重试一次，直接把错误交给外层降级。
+			if (mirror === '' || mirror === directHost) throw direct;
 			const message = modelErrorText(direct);
 			logger.warn(`dsh-qq-bot: 直连 HF 加载失败，切换镜像重试：${message}`);
-			env.remoteHost = config.memoryHfMirror;
+			env.remoteHost = mirror;
 			await load();
 		}
 		embedReady = true;
@@ -296,7 +300,8 @@ async function loadEmbedding(): Promise<void> {
 		const message = modelErrorText(error);
 		const downloaded = hasModelFiles(id);
 		models.embedding = setModelLoad(setModelDownload(models.embedding, downloaded ? 'ready' : 'error', downloaded ? undefined : message), 'error', message);
-		logger.warn(`dsh-qq-bot: embedding 模型加载失败，继续 FTS-only：${message}`);
+		const hint = dtype === 'int8' ? '' : `（当前精度 ${dtype}；若该模型没有这个精度版本，把 memoryEmbeddingDtype 改成 fp32 再试）`;
+		logger.warn(`dsh-qq-bot: embedding 模型加载失败，继续 FTS-only：${message}${hint}`);
 		sendStatus();
 	}
 }
@@ -310,7 +315,9 @@ async function loadReranker(): Promise<void> {
 	try {
 		const { AutoTokenizer, AutoModelForSequenceClassification, env } = transformers;
 		env.cacheDir = modelsDir;
-		env.remoteHost = config.memoryHfEndpoint;
+		const directHost = downloadHost(config.memoryHfEndpoint);
+		const mirror = mirrorHost(config.memoryHfMirror);
+		env.remoteHost = directHost;
 		const progress_callback = modelProgressCallback('reranker');
 		const load = async (): Promise<void> => {
 			rerankTokenizer = await AutoTokenizer.from_pretrained(id, { progress_callback });
@@ -322,8 +329,9 @@ async function loadReranker(): Promise<void> {
 		try {
 			await load();
 		} catch (direct) {
+			if (mirror === '' || mirror === directHost) throw direct;
 			logger.warn(`dsh-qq-bot: 重排模型直连失败，切换镜像重试：${modelErrorText(direct)}`);
-			env.remoteHost = config.memoryHfMirror;
+			env.remoteHost = mirror;
 			await load();
 		}
 		rerankReady = true;
@@ -376,6 +384,11 @@ async function embedTexts(texts: string[]): Promise<Float32Array[]> {
 	const dims = hidden.dims as number[];
 	const data = hidden.data as Float32Array;
 	const dim = dims[dims.length - 1]!;
+	if (dim !== EMBEDDING_DIM) {
+		throw new Error(
+			`embedding 维度不一致：模型 ${EMBEDDING_MODEL} 输出 ${dim} 维，向量表是 ${EMBEDDING_DIM} 维；改模型时 EMBEDDING_MODEL 与 EMBEDDING_DIM（以及 RAG_VEC_SCHEMA_SQL）必须一起改`,
+		);
+	}
 	const seq = dims[dims.length - 2]!;
 	const batch = dims[0]!;
 	const vectors: Float32Array[] = [];
@@ -513,7 +526,7 @@ async function handleInit(payload: InitPayload): Promise<void> {
 	runtimeDir = payload.runtimeDir;
 	modelsDir = payload.modelsDir;
 	models = {
-		embedding: createModelStatus(config.memoryEmbeddingModel, config.memoryEmbeddingEnabled),
+		embedding: createModelStatus(EMBEDDING_MODEL, config.memoryEmbeddingEnabled),
 		reranker: createModelStatus(config.memoryRerankModel, config.memoryRerankEnabled),
 	};
 	if (config.memoryEmbeddingEnabled) markCachedModel('embedding');
@@ -525,7 +538,7 @@ async function handleInit(payload: InitPayload): Promise<void> {
 		filePath: join(payload.dataDir, 'memory.db'),
 		logger,
 		...(payload.vecPath !== undefined ? { vecPath: payload.vecPath } : {}),
-		embeddingDim: 512,
+		embeddingDim: EMBEDDING_DIM,
 	});
 	if (!result.ok || result.db === undefined) {
 		dbError = result.reason ?? '打开数据库失败';

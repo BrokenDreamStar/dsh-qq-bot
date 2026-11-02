@@ -157,6 +157,28 @@ describe('handlePersonaRpc', () => {
 		expect(result).toMatchObject({ ok: true, value: { rows: [{ chat: 'group_9', model: 'a/b' }] } });
 	});
 
+	it('routes/list 与 routes/save 带会话下拉选项，未接线时为空', async () => {
+		const plain = await handlePersonaRpc('routes/list', undefined, makeDeps().deps);
+		expect(plain).toMatchObject({ ok: true, value: { chats: [] } });
+
+		const chats = [{ chat: 'group_9', kind: 'group', id: '9', name: '摸鱼群' }];
+		const { deps } = makeDeps({ listChats: async () => chats });
+		const listed = await handlePersonaRpc('routes/list', undefined, deps);
+		expect(listed).toMatchObject({ ok: true, value: { chats } });
+		const saved = await handlePersonaRpc('routes/save', { rows: [{ chat: 'group_9', model: 'a/b' }] }, deps);
+		expect(saved).toMatchObject({ ok: true, value: { chats } });
+	});
+
+	it('会话下拉枚举失败不影响表格本身', async () => {
+		const { deps } = makeDeps({
+			listChats: async () => {
+				throw new Error('boom');
+			},
+		});
+		const result = await handlePersonaRpc('routes/list', undefined, deps);
+		expect(result).toMatchObject({ ok: true, value: { chats: [], rows: [] } });
+	});
+
 	it('routes/save 的默认会话行落到 default 保留键并即时生效（模型 + 思考强度）', async () => {
 		const { deps, store, refresh } = makeDeps();
 		const saved = await handlePersonaRpc('routes/save', { rows: [], default: { model: 'dsh/base', effort: 'high' } }, deps);

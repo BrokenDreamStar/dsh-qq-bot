@@ -5,11 +5,17 @@
  * （<style data-plugin-css> 去重）。
  */
 export const CARD_CSS = `
-.dshqq-section{max-width:980px;color:var(--dsw-alias-label-primary);flex-direction:column;display:flex}
+/* 宿主设置页的滚动容器（.VOzbGW_options）是 overflow-y:auto —— 横向只要多出 1px，
+   整页就会出现横向滚动条（还会随触控板的斜向滚动左右抖）。所以本页所有盒子统一
+   border-box：卡片头（div 形态的 .dshqq-header）用 width:100% + 左右 padding 时
+   才不会被撑出 32px。button/select/input 在 UA 样式里本来就是 border-box，
+   这里补的是 div/p/li 这些元素。 */
+.dshqq-section,.dshqq-section *,.dshqq-section *:before,.dshqq-section *:after{box-sizing:border-box}
+.dshqq-section{max-width:980px;width:100%;color:var(--dsw-alias-label-primary);flex-direction:column;display:flex}
 .dshqq-heading{margin:0;font-size:18px;font-weight:600}
 .dshqq-intro{color:var(--dsw-alias-label-tertiary);margin:6px 0 0;font-size:13px;line-height:1.5}
-.dshqq-readOnly{color:var(--dsw-alias-label-tertiary);margin:12px 0 0;font-size:12px;line-height:1.5}
-.dshqq-layout{grid-template-columns:148px minmax(0,1fr);align-items:start;gap:14px;margin-top:16px;display:grid}
+.dshqq-readOnly{color:var(--dsw-alias-label-tertiary);margin:12px 0 0;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.dshqq-layout{grid-template-columns:148px minmax(0,1fr);align-items:start;gap:14px;margin-top:16px;min-width:0;display:grid}
 .dshqq-nav{flex-direction:column;gap:16px;max-height:calc(100vh - 150px);padding:2px 4px 12px 0;display:flex;position:sticky;top:12px;overflow-y:auto;scrollbar-width:thin}
 .dshqq-navSection{flex-direction:column;gap:4px;display:flex}
 .dshqq-navGroup{flex-direction:column;gap:2px;display:flex}
@@ -21,7 +27,7 @@ export const CARD_CSS = `
 .dshqq-navItemHint{color:var(--dsw-alias-label-tertiary);font-size:12px}
 .dshqq-navDot{background:var(--dsw-alias-brand-primary);border-radius:50%;flex:none;width:6px;height:6px}
 .dshqq-content{min-width:0}
-.dshqq-cards{flex-direction:column;gap:10px;margin:0;padding:0;list-style:none;display:flex}
+.dshqq-cards{flex-direction:column;gap:10px;margin:0;padding:0;list-style:none;min-width:0;display:flex}
 .dshqq-sectionWrap{margin:14px 0 -2px;list-style:none}
 .dshqq-sectionWrap:first-child{margin-top:4px}
 .dshqq-sectionHead{color:var(--dsw-alias-label-tertiary);margin:0 0 2px;font-size:11px;font-weight:600;letter-spacing:.06em;line-height:1.5;padding:0 9px;text-transform:uppercase}
@@ -34,7 +40,7 @@ export const CARD_CSS = `
 .dshqq-subsectionCount{corner-shape:round;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-tertiary);border-radius:999px;padding:0 7px;font-size:10px;line-height:18px;font-variant-numeric:tabular-nums}
 .dshqq-subsectionBody{padding-bottom:2px}
 .dshqq-panelStack{flex-direction:column;gap:10px;display:flex}
-.dshqq-card{border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-3);border-radius:16px;list-style:none;transition:border-color .16s,background .16s}
+.dshqq-card{border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-3);border-radius:16px;list-style:none;min-width:0;transition:border-color .16s,background .16s}
 .dshqq-card:hover{border-color:var(--dsw-alias-label-dimmed)}
 .dshqq-cardOpen{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}
 .dshqq-header{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:default;background:0 0;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}
@@ -82,6 +88,8 @@ button.dshqq-header{cursor:pointer}
 .dshqq-reset{font:inherit;color:var(--dsw-alias-label-secondary);cursor:pointer;background:0 0;border:none;padding:0;font-size:12px;line-height:1.5}
 .dshqq-reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
 .dshqq-reset:disabled{cursor:default}
+/* 只读展示值（模型 id 这类"代码决定、用户不能改"的参数）：等宽、可复制、不显输入框。 */
+.dshqq-readonlyValue{background:var(--dsw-alias-bg-layer-2);border:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);border-radius:8px;padding:7px 12px;font-family:var(--dsw-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px;line-height:1.5;overflow-wrap:anywhere;user-select:text;display:block}
 .dshqq-input{border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}
 .dshqq-input:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}
 .dshqq-input:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}
@@ -91,7 +99,8 @@ button.dshqq-header{cursor:pointer}
    把箭头往内推 --dshqq-select-inset，与左侧 12px 内边距呼应；整圈描边改由 box-shadow 补回。 */
 .dshqq-select{width:100%;cursor:pointer;--dshqq-select-inset:8px;border:0;border-right:var(--dshqq-select-inset) solid #0000;box-shadow:0 0 0 .5px var(--dsw-alias-border-l4)}
 .dshqq-select:focus-visible{border-right-color:#0000;box-shadow:0 0 0 .5px var(--dsw-alias-brand-primary)}
-.dshqq-checkGrid{border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-3);border-radius:8px;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:0 16px;align-content:start;max-height:190px;padding:6px 12px;margin:2px 0;overflow-y:auto;display:grid}
+/* min() 兜底：容器比 170px 还窄时（窄窗口 + 长中文标签）轨道也不会顶出横向滚动条。 */
+.dshqq-checkGrid{border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-3);border-radius:8px;grid-template-columns:repeat(auto-fill,minmax(min(170px,100%),1fr));gap:0 16px;align-content:start;max-height:190px;padding:6px 12px;margin:2px 0;overflow-y:auto;display:grid}
 .dshqq-checkItem{align-items:center;gap:8px;min-width:0;color:var(--dsw-alias-label-primary);font-size:13px;line-height:2;cursor:pointer;display:flex}
 .dshqq-checkItem input{accent-color:var(--dsw-alias-brand-primary);flex:none;margin:0;cursor:pointer}
 .dshqq-checkItem input:disabled{cursor:default}
@@ -123,8 +132,8 @@ button.dshqq-header{cursor:pointer}
 .dshqq-orderAdd:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
 .dshqq-orderAdd:disabled{cursor:default;opacity:.5}
 .dshqq-orderAdd:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
-.dshqq-invalid{color:var(--dsw-alias-label-error);margin:0;font-size:12px;line-height:1.5}
-.dshqq-hint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:1.5}
+.dshqq-invalid{color:var(--dsw-alias-label-error);margin:0;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.dshqq-hint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
 .dshqq-fieldHint{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dshqq-saveBar>.dshqq-hint{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dshqq-toggleRow{color:var(--dsw-alias-label-primary);justify-content:space-between;align-items:flex-start;gap:16px;font-size:13px;line-height:1.5;display:flex}
@@ -168,6 +177,8 @@ button.dshqq-header{cursor:pointer}
 .dshqq-routeLine .dshqq-input,.dshqq-routeLine .dshqq-select{flex:1;min-width:0}
 /* 思考强度取词很短，按内容定宽，把余量留给模型列。 */
 .dshqq-routeLine .dshqq-select:last-of-type{flex:0 1 auto;width:auto;max-width:46%}
+/* 会话下拉占满整行（它常是这一行唯一的 select，不能被上面那条「思考强度」规则压窄）。 */
+.dshqq-routeLine .dshqq-routeChat{flex:1 1 auto;width:100%;max-width:none}
 .dshqq-routeFieldLabel{color:var(--dsw-alias-label-tertiary);flex:none;font-size:12px;line-height:1.5}
 .dshqq-routeDefaultLabel{background:var(--dsw-alias-bg-module-platform);height:34px;color:var(--dsw-alias-label-secondary);border-radius:8px;align-items:center;padding:0 12px;font-size:13px;font-weight:500;line-height:1.5;display:flex;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dshqq-routeRemove{appearance:none;font:inherit;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:none;border-radius:6px;justify-self:center;width:26px;height:26px;font-size:15px;line-height:1}

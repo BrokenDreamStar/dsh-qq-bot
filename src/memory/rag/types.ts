@@ -153,7 +153,6 @@ export interface AfterTurnInput {
 /** worker 初始化配置（只传 RAG 相关字段）。 */
 export interface RagWorkerConfig {
 	memoryEmbeddingEnabled: boolean;
-	memoryEmbeddingModel: string;
 	memoryEmbeddingDtype: string;
 	memoryHfEndpoint: string;
 	memoryHfMirror: string;

@@ -50,6 +50,16 @@ export interface ForwardNode {
 	content: string;
 }
 
+/** 群 / 好友清单条目（WebUI「会话模型设置」的会话下拉用）。 */
+export interface ChatDirectoryEntry {
+	id: string;
+	/** 群名 / 好友备注或昵称；对接端不给时为空串。 */
+	name: string;
+}
+
+/** 枚举类 action 的超时：设置页要即时出结果，不能等满 ACTION_TIMEOUT_MS。 */
+const DIRECTORY_TIMEOUT_MS = 5_000;
+
 /**
  * 历史接口的消息数组：不同实现返回 `{ messages: [...] }`（OneBot 11 扩展约定）、
  * `{ message: [...] }` 或裸数组，这里统一取出。
@@ -261,6 +271,53 @@ export class OneBotApi {
 				}));
 		} catch (error) {
 			this.logger.warn(`dsh-qq-bot: get_group_member_list failed: ${error instanceof Error ? error.message : String(error)}`);
+			return undefined;
+		}
+	}
+
+	/**
+	 * 机器人所在的群清单（`get_group_list`）。
+	 *
+	 * 只给 WebUI 的「会话模型设置」下拉用：用户不必再手抄群号。枚举类调用给
+	 * 更短的超时（5s），慢/不支持的对接端返回 undefined，调用方回退到本地
+	 * 会话目录。名字可能为空串（部分实现不给 group_name）。
+	 */
+	async listGroups(): Promise<ChatDirectoryEntry[] | undefined> {
+		// 未连接是常态（机器人离线时打开设置页），不当成错误记日志。
+		if (!this.transport.connected) return undefined;
+		try {
+			const data = (await this.transport.call('get_group_list', {}, DIRECTORY_TIMEOUT_MS)) as
+				| Array<{ group_id?: number | string; group_name?: string }>
+				| undefined;
+			if (!Array.isArray(data)) return undefined;
+			return data.flatMap((entry) => {
+				const id = entry?.group_id === undefined ? '' : String(entry.group_id);
+				if (!/^\d+$/.test(id)) return [];
+				return [{ id, name: typeof entry.group_name === 'string' ? entry.group_name : '' }];
+			});
+		} catch (error) {
+			this.logger.warn(`dsh-qq-bot: get_group_list failed: ${error instanceof Error ? error.message : String(error)}`);
+			return undefined;
+		}
+	}
+
+	/** 好友清单（`get_friend_list`）；名称优先用备注，其次昵称。 */
+	async listFriends(): Promise<ChatDirectoryEntry[] | undefined> {
+		if (!this.transport.connected) return undefined;
+		try {
+			const data = (await this.transport.call('get_friend_list', {}, DIRECTORY_TIMEOUT_MS)) as
+				| Array<{ user_id?: number | string; nickname?: string; remark?: string }>
+				| undefined;
+			if (!Array.isArray(data)) return undefined;
+			return data.flatMap((entry) => {
+				const id = entry?.user_id === undefined ? '' : String(entry.user_id);
+				if (!/^\d+$/.test(id)) return [];
+				const remark = typeof entry.remark === 'string' ? entry.remark.trim() : '';
+				const nickname = typeof entry.nickname === 'string' ? entry.nickname.trim() : '';
+				return [{ id, name: remark !== '' ? remark : nickname }];
+			});
+		} catch (error) {
+			this.logger.warn(`dsh-qq-bot: get_friend_list failed: ${error instanceof Error ? error.message : String(error)}`);
 			return undefined;
 		}
 	}

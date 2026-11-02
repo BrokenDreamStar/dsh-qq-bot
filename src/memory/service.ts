@@ -26,7 +26,6 @@ export interface MemoryConfigView {
 	memoryEnabled: boolean;
 	memoryRuntimeAutoInstall: boolean;
 	memoryEmbeddingEnabled: boolean;
-	memoryEmbeddingModel: string;
 	memoryEmbeddingDtype: string;
 	memoryHfEndpoint: string;
 	memoryHfMirror: string;
@@ -160,7 +159,6 @@ export class MemoryService {
 		const config = this.deps.config;
 		return {
 			memoryEmbeddingEnabled: config.memoryEmbeddingEnabled,
-			memoryEmbeddingModel: config.memoryEmbeddingModel,
 			memoryEmbeddingDtype: config.memoryEmbeddingDtype,
 			memoryHfEndpoint: config.memoryHfEndpoint,
 			memoryHfMirror: config.memoryHfMirror,

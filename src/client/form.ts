@@ -14,6 +14,7 @@ import type { ConfigForm, SettingsDescribeFaceLike, SettingsPathOp, SnapshotStor
 import { createSnapshotStore } from './store.ts';
 import { readToolOptions } from '../toolOptions.ts';
 import { SEARCH_BACKEND_IDS } from '../search/priority.ts';
+import { EMBEDDING_MODEL } from '../memory/rag/modelOptions.ts';
 
 /** settings 命名空间（dsh 0.2.1 起 = profile entry id = settings.section id）。 */
 export const SETTINGS_NS = 'dsh-qq-bot';
@@ -51,7 +52,13 @@ export type FieldKind =
 	 * **一次选择写两个路径**：`path` 是模型 id，`extraPaths[0]` 是 provider
 	 * （见 `planModelWrite`），所以界面上不再需要单独的 provider 输入框。
 	 */
-	| 'modelSelect';
+	| 'modelSelect'
+	/**
+	 * 只读展示：值由代码或配置文件决定，界面上**能看不能改**（不暂存、不写配置）。
+	 * 用于和存储格式绑死、改了会静默坏的参数——embedding 模型 id 与向量表维度
+	 * （`float[EMBEDDING_DIM]`）是一对，换模型要重建索引，所以只展示。
+	 */
+	| 'readonly';
 
 export interface FieldDef {
 	/** 字段态/暂存的稳定键（嵌套字段用点号）。 */
@@ -66,6 +73,11 @@ export interface FieldDef {
 	kind: FieldKind;
 	/** enum 的可选取值。 */
 	options?: readonly string[];
+	/**
+	 * 只读展示项的固定文本（不来自配置）：值由代码决定、但要让用户看见时用
+	 * （如 embedding 模型 id）。缺省 = 读 `path` 指向的配置值。
+	 */
+	readonlyText?: string;
 	/**
 	 * 卡内子分节标签（locale key）：同一张卡里再按"私聊 / 群聊 / 限速"等
 	 * 分块渲染。渲染器只在标签变化处插一次小标题，所以同一张卡里同一个
@@ -329,10 +341,7 @@ export const FIELD_GROUPS: FieldGroup[] = [
 				f('memoryEnabled', 'boolean'),
 				f('memoryRuntimeAutoInstall', 'boolean'),
 				f('memoryEmbeddingEnabled', 'boolean'),
-				f('memoryEmbeddingModel', 'string'),
-				f('memoryEmbeddingDtype', 'string'),
-				f('memoryHfEndpoint', 'string'),
-				f('memoryHfMirror', 'string'),
+				{ ...f('memoryEmbeddingModel', 'readonly'), readonlyText: EMBEDDING_MODEL },
 			]),
 			...withSub('subMemoryRecall', [
 				f('memoryRecallEnabled', 'boolean'),
@@ -355,7 +364,7 @@ export const FIELD_GROUPS: FieldGroup[] = [
 			]),
 			...withSub('subMemoryRerank', [
 				f('memoryRerankEnabled', 'boolean'),
-				f('memoryRerankModel', 'string'),
+				f('memoryRerankModel', 'readonly'),
 				f('memoryRerankTopN', 'number'),
 				f('memoryRerankTimeoutMs', 'number'),
 				f('memoryWorkerSearchTimeoutMs', 'number'),
@@ -675,6 +684,8 @@ export class DshQQCardController {
 	}
 
 	private stage(key: string, staged: Staged): void {
+		// 只读展示项没有可写路径：即便某个手势误触也不产生草稿。
+		if (this.def(key).kind === 'readonly') return;
 		this.staged.set(key, staged);
 		const cardId = GROUP_OF_FIELD.get(key);
 		if (cardId !== undefined) {
@@ -691,6 +702,7 @@ export class DshQQCardController {
 
 	/** 聚合控件的显示值由多个旧键合成，普通控件仍只读取自己的路径。 */
 	private fieldText(def: FieldDef, layer: 'value' | 'base'): string {
+		if (def.readonlyText !== undefined) return def.readonlyText;
 		if (def.kind === 'modelSelect') return this.modelSpec(def, layer);
 		const root = this.snapshot()[layer];
 		if (def.kind === 'quoteMode') {
@@ -896,7 +908,7 @@ export class DshQQCardController {
 				checked: current === true,
 				options,
 				values: (def.kind === 'toolList' || def.kind === 'orderList') && Array.isArray(current) ? current.map(String) : undefined,
-				overridden: this.overridden(key),
+				overridden: def.kind === 'readonly' ? false : this.overridden(key),
 				invalid: false,
 				clearStaged: false,
 			};

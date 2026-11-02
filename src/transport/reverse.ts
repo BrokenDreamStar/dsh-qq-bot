@@ -74,8 +74,8 @@ export class ReverseTransport implements OneBotTransport {
 		this.options.onStatus?.({ connected: false });
 	}
 
-	call(action: string, params?: Record<string, unknown>): Promise<unknown> {
-		return this.channel.call(action, params);
+	call(action: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
+		return this.channel.call(action, params, timeoutMs);
 	}
 
 	private authorized(request: IncomingMessage, url: URL): boolean {

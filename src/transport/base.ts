@@ -38,8 +38,12 @@ export interface OneBotTransport {
 	readonly connected: boolean;
 	start(): void;
 	stop(): void;
-	/** 发送一个 action 并等待 echo 响应，返回 data 字段。 */
-	call(action: string, params?: Record<string, unknown>): Promise<unknown>;
+	/**
+	 * 发送一个 action 并等待 echo 响应，返回 data 字段。
+	 * `timeoutMs` 省略时用 ACTION_TIMEOUT_MS；WebUI 的枚举类调用会传更短的
+	 * 预算，免得一个慢接口把设置页一起拖住。
+	 */
+	call(action: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
 }
 
 interface PendingEntry {

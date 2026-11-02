@@ -29,6 +29,7 @@ import { Dispatcher } from './pipeline/dispatcher.ts';
 import { ChatBridgeManager } from './bridge/chat.ts';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { PersonaStore } from './persona/store.ts';
+import { ChatDirectory } from './persona/chatList.ts';
 import { handlePersonaRpc, type PersonaRpcDeps } from './persona/rpc.ts';
 import { handleMemoryRpc, type MemoryRpcDeps } from './memory/rpc.ts';
 import { TaskStore, type ScheduledTask } from './tasks/store.ts';
@@ -475,6 +476,16 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 		{ prepend: true },
 	);
 
+	// 「会话模型设置」的会话下拉：QQ 群 / 好友清单（带名字）+ 本地会话目录 +
+	// 已保存的号码行。用户不必再手抄群号；未连接时自动退化为本地清单。
+	const chatDirectory = new ChatDirectory({
+		sessionsRoot,
+		savedKeys: () => store.mappings().map((row) => row.key),
+		listGroups: () => api.listGroups(),
+		listFriends: () => api.listFriends(),
+		logger,
+	});
+
 	// WebUI 的宿主 RPC（connection / webServer 缺失 = 旧宿主或非 web profile）：
 	// 日志查看 + 日志实时流 + 人格库与「会话模型设置」表格 + 定时任务列表（见
 	// persona/rpc.ts 与 tasks/rpc.ts）。
@@ -495,6 +506,7 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 				sessionsRoot,
 				getLlm: () => getService<LlmServiceLike>(ctx, 'llm'),
 				getDefaultModel: () => agentDefaultModel.currentSelection(),
+				listChats: () => chatDirectory.list(),
 				refreshBridges: () => manager.rebuildAll(),
 				logger,
 			};

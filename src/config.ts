@@ -205,13 +205,11 @@ export interface DshQQConfig {
 	memoryRuntimeAutoInstall: boolean;
 	/** 启用 embedding（bge-small-zh-v1.5 int8）；关闭则纯 FTS。 */
 	memoryEmbeddingEnabled: boolean;
-	/** embedding 模型 id（transformers.js 的 ONNX 移植）。 */
-	memoryEmbeddingModel: string;
-	/** ONNX 精度：int8 / fp16 / fp32。 */
+	/** ONNX 精度（只在配置文件里配）：int8 / fp16 / fp32，非法值回落 int8。 */
 	memoryEmbeddingDtype: string;
-	/** HF 直连地址；失败自动切镜像。 */
+	/** HF 直连地址（只在配置文件里配；留空 = 官方地址）；失败自动切镜像。 */
 	memoryHfEndpoint: string;
-	/** HF 镜像地址（默认 hf-mirror.com）。 */
+	/** HF 镜像地址（只在配置文件里配；默认 hf-mirror.com，留空 = 不重试镜像）。 */
 	memoryHfMirror: string;
 	/** 启用本地 reranker（bge-reranker-base int8）；默认关闭。 */
 	memoryRerankEnabled: boolean;
@@ -427,11 +425,12 @@ export const ConfigSchema = Schema.object({
 	// ── 长期记忆 / RAG（卡片「长期记忆」）──
 	memoryEnabled: Schema.boolean().default(false).description('长期记忆总开关（默认关闭）：把聊天写入本地 RAG 库（<数据目录>/memory.db），每轮注入相关历史，并注册 qq_recall_memory / qq_use_skill / qq_list_skills 工具。首次开启会后台安装运行时并下载 embedding 模型；运行时未就绪时先跑 FTS-only。工具默认仅管理员可用，普通用户要用得在「工具权限」卡片加进 userTools'),
 	memoryRuntimeAutoInstall: Schema.boolean().default(true).description('首次开启时后台安装 RAG 运行时（@huggingface/transformers + sqlite-vec 到 <数据目录>/runtime/，不写插件依赖树）'),
-	memoryEmbeddingEnabled: Schema.boolean().default(true).description('启用 embedding（bge-small-zh-v1.5 int8）：关闭则只用 FTS5 关键词检索'),
-	memoryEmbeddingModel: Schema.string().default('Xenova/bge-small-zh-v1.5').description('embedding 模型 id（transformers.js 的 ONNX 移植；首次启用时下载到 <数据目录>/models/）'),
-	memoryEmbeddingDtype: Schema.string().default('int8').description('ONNX 精度：int8（默认，约 24MB）/ fp16 / fp32'),
-	memoryHfEndpoint: Schema.string().default('https://huggingface.co').description('HuggingFace 直连地址；下载失败会自动切换到下面的镜像重试'),
-	memoryHfMirror: Schema.string().default('https://hf-mirror.com').description('HuggingFace 镜像地址（直连失败时自动使用）'),
+	memoryEmbeddingEnabled: Schema.boolean().default(true).description('启用 embedding（bge-small-zh-v1.5 int8，约 24MB，首次启用下载到 <数据目录>/models/）：关闭则只用 FTS5 关键词检索。模型 id 与输出维度绑定向量表（float[512]），不是配置项，换模型要改代码并重建索引'),
+	memoryEmbeddingDtype: Schema.string().default('int8').description('embedding 模型的 ONNX 精度（只在配置文件里改，设置页不暴露）：int8（默认，约 24MB）/ fp16 / fp32；非法值回落 int8'),
+	// 下载源是部署/网络属性，不占设置页：官方地址是常量，镜像默认值已覆盖国内网络，
+	// 真要换（内网代理、镜像换域名）在 profile 的 cordis.patch.yml 里按 id 覆盖。
+	memoryHfEndpoint: Schema.string().default('https://huggingface.co').description('HuggingFace 直连地址（只在配置文件里改，设置页不暴露；留空 = 官方地址）；下载失败会自动切换到下面的镜像重试'),
+	memoryHfMirror: Schema.string().default('https://hf-mirror.com').description('HuggingFace 镜像地址（只在配置文件里改；直连失败时自动使用，留空 = 不重试镜像）'),
 	memoryRerankEnabled: Schema.boolean().default(false).description('启用本地 reranker（bge-reranker-base int8）：对融合 top-N 重新打分。默认关闭（首次启用会下载约 280MB 模型，CPU 推理有延迟）'),
 	memoryRerankModel: Schema.string().default('Xenova/bge-reranker-base').description('reranker 模型 id'),
 	memoryRerankTopN: Schema.number().step(5).min(5).max(100).default(50).description('重排候选数：从融合结果里取前 N 条做 (query, document) 打分'),

@@ -73,6 +73,17 @@ describe('字段定义与文案字典', () => {
 	it('配置项全覆盖（含 workspaceMode）：interface 键都出现在某分组里，且分组 id 唯一', () => {
 		const all = FIELD_GROUPS.flatMap((group) => group.fields.map((def) => def.key));
 		const known = new Set(all);
+		// 只在配置文件里出现的部署/网络类键：它们没有"用户可操作"的语义（直连地址是
+		// 常量、镜像是国内部署的默认兜底），不占设置页，改 profile 的 cordis.patch.yml 生效。
+		const configOnly = ['memoryHfEndpoint', 'memoryHfMirror', 'memoryEmbeddingDtype'];
+		for (const key of configOnly) expect(known.has(key), key).toBe(false);
+		// 只读展示项：出现在卡片里但不可编辑、不写配置（embedding 模型 id 与向量表
+		// 维度绑死，换模型要重建索引）。它们不是配置键，所以不参与下面的配置覆盖比对。
+		const displayOnly = ['memoryEmbeddingModel'];
+		for (const key of displayOnly) {
+			expect(known.has(key), key).toBe(true);
+			expect(FIELD_GROUPS.flatMap((group) => group.fields).find((def) => def.key === key)?.kind).toBe('readonly');
+		}
 		const expected = [
 			'transport', 'url', 'reversePort', 'reversePath', 'accessToken', 'reconnectDelayMs', 'httpTimeoutMs',
 			'privateMode', 'groupMode', 'allowedUsers', 'allowedGroups', 'blockedUsers', 'blockedGroups',
@@ -81,7 +92,7 @@ describe('字段定义与文案字典', () => {
 			'historyEnabled', 'historyMaxMessages', 'historyBufferPerChat', 'historyRemoteFetch',
 			'askUserEnabled', 'askUserWaitMs',
 			'memoryEnabled', 'memoryRuntimeAutoInstall',
-			'memoryEmbeddingEnabled', 'memoryEmbeddingModel', 'memoryEmbeddingDtype', 'memoryHfEndpoint', 'memoryHfMirror',
+			'memoryEmbeddingEnabled',
 			'memoryRerankEnabled', 'memoryRerankModel', 'memoryRerankTopN', 'memoryRerankTimeoutMs',
 			'memoryRecallEnabled', 'memoryRecallTopK', 'memoryRecallMaxChars',
 			'memoryPrefetch', 'memoryPrefetchMinScore', 'memoryPrefetchMaxItems', 'memoryInjectMaxChars', 'memoryRecencyHalfLifeDays',
@@ -102,8 +113,9 @@ describe('字段定义与文案字典', () => {
 			'messageLog', 'messageLogMax', 'messageLogToFile', 'debug',
 		];
 		for (const key of expected) expect(known.has(key), key).toBe(true);
-		// 反向也要成立：没有"字典里有、config 里没有"的野生字段。
-		expect([...known].sort()).toEqual([...expected].sort());
+		// 反向也要成立：没有"字典里有、config 里没有"的野生字段（只读展示项除外）。
+		const configKeys = [...known].filter((key) => !displayOnly.includes(key));
+		expect(configKeys.sort()).toEqual([...expected].sort());
 		expect(new Set(FIELD_GROUPS.map((group) => group.id)).size).toBe(FIELD_GROUPS.length);
 	});
 

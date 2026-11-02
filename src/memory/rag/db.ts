@@ -10,6 +10,7 @@ import { dirname } from 'node:path';
 import type { Logger } from '../../types.ts';
 import { contentHash, segmentText, tokenizeQuery } from '../text.ts';
 import { migrateLegacyRagSchema, RAG_SCHEMA_SQL, RAG_SCHEMA_VERSION, RAG_VEC_SCHEMA_SQL, type SqliteLike } from './schema.ts';
+import { EMBEDDING_DIM } from './modelOptions.ts';
 import type { RagChunkHit, RagRecord, RagSkill, SkillDraft } from './types.ts';
 
 interface SqliteStatement {
@@ -37,7 +38,7 @@ export interface RagDatabaseOptions {
 	logger: Logger;
 	/** sqlite-vec 的 dylib/so/dll 路径；undefined = 不启用向量。 */
 	vecPath?: string;
-	/** 每个 chunk 的维度（bge-small-zh-v1.5 = 512）。 */
+	/** 每个 chunk 的维度；默认 `EMBEDDING_DIM`（与 `EMBEDDING_MODEL` 输出维度一致）。 */
 	embeddingDim?: number;
 }
 
@@ -176,7 +177,7 @@ export class RagDatabase {
 			}
 			db.exec(RAG_SCHEMA_SQL);
 			db.prepare('INSERT OR REPLACE INTO rag_meta(key, value) VALUES (?, ?)').run('schema_version', RAG_SCHEMA_VERSION);
-			const database = new RagDatabase(db, options.logger, Math.max(1, options.embeddingDim ?? 512));
+			const database = new RagDatabase(db, options.logger, Math.max(1, options.embeddingDim ?? EMBEDDING_DIM));
 			database.vecReady = database.tryLoadVec(options.vecPath);
 			if (database.vecReady) database.ensureVecSchema();
 			db.prepare('INSERT OR REPLACE INTO rag_meta(key, value) VALUES (?, ?)').run('vec_ready', database.vecReady ? '1' : '0');
@@ -472,8 +473,9 @@ export class RagDatabase {
 		}
 	}
 
-	upsertChunkVector(chunkId: number, chatKey: string, vector: Float32Array): void {
-		if (!this.vecReady) return;
+	/** 写入/覆盖一条 chunk 向量；返回是否真的写进去了（失败时调用方不能标记"已嵌入"）。 */
+	upsertChunkVector(chunkId: number, chatKey: string, vector: Float32Array): boolean {
+		if (!this.vecReady) return false;
 		try {
 			const blob = vectorBlob(vector);
 			if (this.vecPartitioned) {
@@ -483,8 +485,10 @@ export class RagDatabase {
 				this.db.prepare('DELETE FROM rag_chunk_vec WHERE chunk_id = ?').run(chunkId);
 				this.db.prepare('INSERT INTO rag_chunk_vec(chunk_id, embedding) VALUES (?, ?)').run(BigInt(chunkId), blob);
 			}
+			return true;
 		} catch (error) {
 			this.logger.warn(`dsh-qq-bot: 写入 chunk 向量失败：${error instanceof Error ? error.message : String(error)}`);
+			return false;
 		}
 	}
 
@@ -672,13 +676,16 @@ export class RagDatabase {
 		}
 	}
 
-	upsertSkillVector(skillId: number, vector: Float32Array): void {
-		if (!this.vecReady) return;
+	/** 写入/覆盖一条技能向量；返回是否真的写进去了。 */
+	upsertSkillVector(skillId: number, vector: Float32Array): boolean {
+		if (!this.vecReady) return false;
 		try {
 			this.db.prepare('DELETE FROM rag_skill_vec WHERE skill_id = ?').run(skillId);
 			this.db.prepare('INSERT INTO rag_skill_vec(skill_id, embedding) VALUES (?, ?)').run(BigInt(skillId), vectorBlob(vector));
+			return true;
 		} catch (error) {
 			this.logger.warn(`dsh-qq-bot: 写入技能向量失败：${error instanceof Error ? error.message : String(error)}`);
+			return false;
 		}
 	}
 

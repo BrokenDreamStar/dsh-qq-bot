@@ -5,6 +5,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { readActiveCard, writeActiveCard } from './cards.ts';
+import { chatFieldMode, chatOptionText, MANUAL_CHAT_OPTION, parseChatOptions, type ChatOptionView } from './chatPicker.ts';
 import type { ReactNode } from 'react';
 import type { FieldDef, FieldGroup, FieldState, CardShell, CardState } from './form.ts';
 import { FIELD_GROUPS, CONNECTION_CARD_ID } from './form.ts';
@@ -76,6 +77,7 @@ const css = {
 	badgeMuted: 'dshqq-badgeMuted',
 	conn: 'dshqq-conn',
 	connDot: 'dshqq-connDot',
+	readonlyValue: 'dshqq-readonlyValue',
 	reset: 'dshqq-reset',
 	input: 'dshqq-input',
 	inputInvalid: 'dshqq-inputInvalid',
@@ -134,6 +136,7 @@ const css = {
 	routeFieldLabel: 'dshqq-routeFieldLabel',
 	routeDefaultLabel: 'dshqq-routeDefaultLabel',
 	routeRemove: 'dshqq-routeRemove',
+	routeChat: 'dshqq-routeChat',
 	taskHead: 'dshqq-taskHead',
 	taskChat: 'dshqq-taskChat',
 	taskSchedule: 'dshqq-taskSchedule',
@@ -515,11 +518,12 @@ function parsePersonaList(value: unknown): PersonaRecordView[] {
 		.map((entry) => ({ name: asString(entry.name), prompt: asString(entry.prompt) }));
 }
 
-/** routes/list 应答 → 号码行 + 「默认会话」行 + 人格库默认名。 */
+/** routes/list 应答 → 号码行 + 「默认会话」行 + 人格库默认名 + 会话下拉选项。 */
 interface RouteViews {
 	rows: RouteRowView[];
 	defaultRow: DefaultRowView;
 	libraryDefault: string;
+	chats: ChatOptionView[];
 }
 
 function parseRouteViews(value: unknown): RouteViews {
@@ -538,7 +542,7 @@ function parseRouteViews(value: unknown): RouteViews {
 	const defaultRow: DefaultRowView = {};
 	if (asString(source.model) !== '') defaultRow.model = asString(source.model);
 	if (asString(source.effort) !== '') defaultRow.effort = asString(source.effort);
-	return { rows, defaultRow, libraryDefault: asString(raw.libraryDefault) };
+	return { rows, defaultRow, libraryDefault: asString(raw.libraryDefault), chats: parseChatOptions(value) };
 }
 
 
@@ -581,6 +585,8 @@ interface PersonaModelData {
 	rows: RouteRowView[];
 	defaultRow: DefaultRowView;
 	models: ModelOptionView[];
+	/** 「会话模型设置」的会话下拉（群 / 好友 + 已有会话）。 */
+	chats: ChatOptionView[];
 	reload: () => void;
 	savePersonas: (personas: PersonaRecordView[]) => Promise<{ ok: boolean; error?: string }>;
 	saveRows: (rows: RouteRowView[], defaultRow: DefaultRowView) => Promise<{ ok: boolean; error?: string }>;
@@ -599,6 +605,7 @@ function usePersonaModelData(getRpc: (() => RpcCaller | undefined) | undefined, 
 	const [rows, setRows] = useState<RouteRowView[]>([]);
 	const [defaultRow, setDefaultRow] = useState<DefaultRowView>({});
 	const [models, setModels] = useState<ModelOptionView[]>([]);
+	const [chats, setChats] = useState<ChatOptionView[]>([]);
 	const loaded = useRef(false);
 
 	const load = useCallback(async (): Promise<void> => {
@@ -622,6 +629,7 @@ function usePersonaModelData(getRpc: (() => RpcCaller | undefined) | undefined, 
 			setRows(routes.rows);
 			setDefaultRow(routes.defaultRow);
 			setLibraryDefault(routes.libraryDefault);
+			setChats(routes.chats);
 			setModels(modelsAnswer.ok ? parseModelViews(modelsAnswer.value) : []);
 			setFailed(null);
 			setStatus('ready');
@@ -675,13 +683,14 @@ function usePersonaModelData(getRpc: (() => RpcCaller | undefined) | undefined, 
 			setRows(routes.rows);
 			setDefaultRow(routes.defaultRow);
 			setLibraryDefault(routes.libraryDefault);
+			setChats(routes.chats);
 			setFailed(null);
 			return { ok: true };
 		},
 		[getRpc],
 	);
 
-	return { status, failed, personas, libraryDefault, rows, defaultRow, models, reload, savePersonas, saveRows };
+	return { status, failed, personas, libraryDefault, rows, defaultRow, models, chats, reload, savePersonas, saveRows };
 }
 
 /**
@@ -861,14 +870,22 @@ function normalizeDefaultRow(row: DefaultRowView): DefaultRowView {
 	return out;
 }
 
+/** 草稿行：`manual` 只是界面态（下拉 ↔ 手填切换），不落盘、不参与脏检查。 */
+interface RouteDraftRow extends RouteRowView {
+	manual?: boolean;
+}
+
 /**
- * 「会话模型设置」表格面板：第一行固定「默认会话」，其余每行左填会话、
+ * 「会话模型设置」表格面板：第一行固定「默认会话」，其余每行左选会话、
  * 中选模型、右选思考强度。人格不在这一列——每个会话的人格是「人格」卡里的
  * SOUL.md，这里只管模型与推理强度。
+ *
+ * 会话从下拉里选（群名 / 好友备注 + 号码，见宿主 persona/chatList.ts），
+ * 不再要求用户手抄号码；清单里没有的会话仍可切到「手动输入」。
  */
 function RoutePanel(props: { t: Translate; data: PersonaModelData; disabled: boolean }): ReactNode {
 	const { t, data, disabled } = props;
-	const [draft, setDraft] = useState<RouteRowView[]>([]);
+	const [draft, setDraft] = useState<RouteDraftRow[]>([]);
 	const [defaultDraft, setDefaultDraft] = useState<DefaultRowView>({});
 	const [saving, setSaving] = useState(false);
 	const [failed, setFailed] = useState<string | null>(null);
@@ -907,7 +924,7 @@ function RoutePanel(props: { t: Translate; data: PersonaModelData; disabled: boo
 		);
 	}
 
-	const patch = (index: number, next: Partial<RouteRowView>): void => {
+	const patch = (index: number, next: Partial<RouteDraftRow>): void => {
 		setDraft((prev) => prev.map((row, at) => (at === index ? { ...row, ...next } : row)));
 	};
 
@@ -922,6 +939,17 @@ function RoutePanel(props: { t: Translate; data: PersonaModelData; disabled: boo
 	};
 
 	const invalidMessage = badChat ? 'routeInvalidChat' : missingChat ? 'routeChatRequired' : duplicate ? 'routeDuplicateChat' : 'routePanelHint';
+
+	/** 会话下拉：群 / 好友分两组，名字在前号码在后（没有名字时显示原始选择器）。 */
+	const knownChats = new Set(data.chats.map((option) => option.chat));
+	const groupOptions = data.chats.filter((option) => option.kind === 'group');
+	const privateOptions = data.chats.filter((option) => option.kind === 'private');
+	const chatOptions = (options: readonly ChatOptionView[]): ReactNode =>
+		options.map((option) => (
+			<option key={option.chat} value={option.chat}>
+				{chatOptionText(option)}
+			</option>
+		));
 
 	/** 某行模型可选的思考强度；模型留空 = 跟随部署默认模型。 */
 	const effortsOf = (model: string): ModelEffortView[] => {
@@ -1000,20 +1028,55 @@ function RoutePanel(props: { t: Translate; data: PersonaModelData; disabled: boo
 			{draft.length === 0 ? <p className={css.hint}>{t('routeEmpty')}</p> : null}
 			{draft.map((row, index) => {
 				const modelValue = row.model ?? '';
+				const picker = chatFieldMode(row, knownChats) === 'picker';
 				return (
 					<div className={css.routeRow} key={index}>
 						<div className={css.routeLine}>
-							<input
-								className={parseChatSelector(row.chat) === null && row.chat.trim() !== '' ? cls(css.input, css.inputInvalid) : css.input}
-								type="text"
-								value={row.chat}
-								placeholder={t('routeChatPlaceholder')}
-								aria-label={t('routeColChat')}
-								disabled={disabled || saving}
-								onChange={(event) => {
-									patch(index, { chat: event.target.value });
-								}}
-							/>
+							{picker ? (
+								<select
+									className={cls(css.input, css.select, css.routeChat)}
+									value={knownChats.has(row.chat.trim()) ? row.chat.trim() : ''}
+									aria-label={t('routeColChat')}
+									disabled={disabled || saving}
+									onChange={(event) => {
+										const value = event.target.value;
+										if (value === MANUAL_CHAT_OPTION) patch(index, { manual: true });
+										else patch(index, { chat: value, manual: false });
+									}}
+								>
+									<option value="">{t('routeChatPick')}</option>
+									{groupOptions.length > 0 ? <optgroup label={t('routeChatGroups')}>{chatOptions(groupOptions)}</optgroup> : null}
+									{privateOptions.length > 0 ? <optgroup label={t('routeChatFriends')}>{chatOptions(privateOptions)}</optgroup> : null}
+									<option value={MANUAL_CHAT_OPTION}>{t('routeChatManual')}</option>
+								</select>
+							) : (
+								<>
+									<input
+										className={parseChatSelector(row.chat) === null && row.chat.trim() !== '' ? cls(css.input, css.inputInvalid) : css.input}
+										type="text"
+										value={row.chat}
+										placeholder={t('routeChatPlaceholder')}
+										aria-label={t('routeColChat')}
+										disabled={disabled || saving}
+										onChange={(event) => {
+											patch(index, { chat: event.target.value });
+										}}
+									/>
+									{knownChats.size > 0 ? (
+										<button
+											type="button"
+											className={css.reset}
+											disabled={disabled || saving}
+											onClick={() => {
+												// 回到下拉：已填的值不在清单里就清空，避免留下看不见的号码。
+												patch(index, { manual: false, chat: knownChats.has(row.chat.trim()) ? row.chat.trim() : '' });
+											}}
+										>
+											{t('routeChatFromList')}
+										</button>
+									) : null}
+								</>
+							)}
 							<button
 								type="button"
 								className={css.routeRemove}
@@ -2807,8 +2870,31 @@ function SecretRow(props: RowProps): ReactNode {
 	);
 }
 
+/**
+ * 只读展示行：值由代码或配置文件决定，界面上能看不能改。
+ * 用于和存储格式绑死的参数（embedding 模型 id ↔ 向量表维度），
+ * 避免给用户一个"改了会静默坏"的输入框，同时保留可见性。
+ */
+function ReadonlyRow(props: RowProps): ReactNode {
+	const { def, state, t } = props;
+	return (
+		<div className={css.field}>
+			<div className={css.head}>
+				<span className={css.label}>{t(`${def.key}Label`)}</span>
+				<span className={css.badges}>
+					<span className={css.badgeMuted}>{t('readonlyBadge')}</span>
+				</span>
+			</div>
+			<code className={css.readonlyValue}>{state.text}</code>
+			<p title={t(`${def.key}Hint`)} className={cls(css.hint, css.fieldHint)}>{t(`${def.key}Hint`)}</p>
+		</div>
+	);
+}
+
 function FieldRow(props: RowProps): ReactNode {
 	switch (props.def.kind) {
+		case 'readonly':
+			return <ReadonlyRow {...props} />;
 		case 'boolean':
 			return <SwitchRow {...props} />;
 		case 'enum':

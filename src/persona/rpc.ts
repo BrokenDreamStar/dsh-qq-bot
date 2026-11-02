@@ -13,6 +13,7 @@ import type { Logger } from '../types.ts';
 import type { LlmServiceLike } from '../dsh.ts';
 import { providerId } from '../dsh.ts';
 import { formatChatSelector, parseChatSelector } from './routes.ts';
+import type { ChatOption } from './chatList.ts';
 import { DEFAULT_MAPPING_KEY } from './store.ts';
 import type { ChatMapping, PersonaRecord, PersonaStore } from './store.ts';
 import { MAX_SOUL_CHARS, inspectSoul, soulPath, writeSoulText } from './soul.ts';
@@ -50,6 +51,8 @@ export interface PersonaRpcDeps {
 	getLlm?: () => LlmServiceLike | undefined;
 	/** 部署默认模型（清单里补一项并置顶）。 */
 	getDefaultModel?: () => { provider?: string; model?: string };
+	/** 「会话模型设置」的会话下拉（群 / 好友 + 已有会话）；缺省 = 只能手填号码。 */
+	listChats?: () => Promise<ChatOption[]>;
 	/** 保存后重建所有会话桥（保留历史，下一轮以新配置实例化）。 */
 	refreshBridges: () => Promise<void>;
 	logger: Logger;
@@ -206,6 +209,17 @@ function defaultPersona(store: PersonaStore): PersonaRecord | undefined {
 	return records.find((record) => record.name === name) ?? records[0];
 }
 
+/** 会话下拉选项：取不到（未连接 / 扫描失败）不影响表格本身。 */
+async function chatOptions(deps: PersonaRpcDeps): Promise<ChatOption[]> {
+	if (deps.listChats === undefined) return [];
+	try {
+		return await deps.listChats();
+	} catch (error) {
+		deps.logger.warn(`dsh-qq-bot: 枚举会话下拉选项失败: ${error instanceof Error ? error.message : String(error)}`);
+		return [];
+	}
+}
+
 interface SoulTarget {
 	chat: string;
 	key: string;
@@ -300,6 +314,8 @@ export async function handlePersonaRpc(
 				default: toDefaultView(deps.store.defaultMapping()),
 				// 人格留空时的回落值（人格库默认人格），供下拉标签显示。
 				libraryDefault: deps.store.defaultPersonaName(),
+				// 会话下拉：群 / 好友 + 已有会话目录 + 已保存的号码行（见 chatList.ts）。
+				chats: await chatOptions(deps),
 			});
 		}
 		if (endpoint === 'routes/save') {
@@ -311,7 +327,12 @@ export async function handlePersonaRpc(
 			if (body.default !== undefined) deps.store.setDefaultMapping(parseDefaultMapping(body.default));
 			await deps.refreshBridges();
 			deps.logger.info(`dsh-qq-bot: 会话模型设置已更新（${rows.length} 行 + 默认会话行）`);
-			return ok({ rows: toRowViews(deps.store.mappings()), default: toDefaultView(deps.store.defaultMapping()), libraryDefault: deps.store.defaultPersonaName() });
+			return ok({
+				rows: toRowViews(deps.store.mappings()),
+				default: toDefaultView(deps.store.defaultMapping()),
+				libraryDefault: deps.store.defaultPersonaName(),
+				chats: await chatOptions(deps),
+			});
 		}
 		if (endpoint === 'models/list') {
 			return ok({ models: await listModelOptions(deps) });
