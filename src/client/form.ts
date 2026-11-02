@@ -14,7 +14,6 @@ import type { ConfigForm, SettingsDescribeFaceLike, SettingsPathOp, SnapshotStor
 import { createSnapshotStore } from './store.ts';
 import { readToolOptions } from '../toolOptions.ts';
 import { SEARCH_BACKEND_IDS } from '../search/priority.ts';
-import { EMBEDDING_MODEL } from '../memory/rag/modelOptions.ts';
 
 /** settings 命名空间（dsh 0.2.1 起 = profile entry id = settings.section id）。 */
 export const SETTINGS_NS = 'dsh-qq-bot';
@@ -52,13 +51,7 @@ export type FieldKind =
 	 * **一次选择写两个路径**：`path` 是模型 id，`extraPaths[0]` 是 provider
 	 * （见 `planModelWrite`），所以界面上不再需要单独的 provider 输入框。
 	 */
-	| 'modelSelect'
-	/**
-	 * 只读展示：值由代码或配置文件决定，界面上**能看不能改**（不暂存、不写配置）。
-	 * 用于和存储格式绑死、改了会静默坏的参数——embedding 模型 id 与向量表维度
-	 * （`float[EMBEDDING_DIM]`）是一对，换模型要重建索引，所以只展示。
-	 */
-	| 'readonly';
+	| 'modelSelect';
 
 export interface FieldDef {
 	/** 字段态/暂存的稳定键（嵌套字段用点号）。 */
@@ -73,11 +66,6 @@ export interface FieldDef {
 	kind: FieldKind;
 	/** enum 的可选取值。 */
 	options?: readonly string[];
-	/**
-	 * 只读展示项的固定文本（不来自配置）：值由代码决定、但要让用户看见时用
-	 * （如 embedding 模型 id）。缺省 = 读 `path` 指向的配置值。
-	 */
-	readonlyText?: string;
 	/**
 	 * 卡内子分节标签（locale key）：同一张卡里再按"私聊 / 群聊 / 限速"等
 	 * 分块渲染。渲染器只在标签变化处插一次小标题，所以同一张卡里同一个
@@ -105,9 +93,9 @@ export interface FieldGroup {
 	logViewer?: boolean;
 	/**
 	 * 自定义交互卡片：不走 settings schema，展开体由 RPC 驱动
-	 * （人格 / 会话模型设置 / 定时任务 / 记忆库）。此类卡片没有 fields，保存栏由面板自持。
+	 * （人格 / 会话模型设置 / 定时任务）。此类卡片没有 fields，保存栏由面板自持。
 	 */
-	custom?: 'personas' | 'routes' | 'tasks' | 'memory';
+	custom?: 'personas' | 'routes' | 'tasks';
 }
 
 function f(key: string, kind: FieldKind, options?: readonly string[]): FieldDef {
@@ -228,19 +216,35 @@ export const FIELD_GROUPS: FieldGroup[] = [
 
 	// ── 对话体验 ──
 	{
-		id: 'wake',
+		// 唤醒、回复形态、媒体与互动、提问与问答合并成一张卡（用户要求）：
+		// 它们都是"机器人怎么参与一段对话"。卡内四个子分节就是原来的四张卡，
+		// 顺序 = 何时响应 → 怎么回 → 收图/戳一戳 → agent 提问的往返。
+		id: 'behavior',
 		sectionKey: 'sectionChat',
-		titleKey: 'groupWake',
-		descKey: 'groupWakeDesc',
+		titleKey: 'groupBehavior',
+		descKey: 'groupBehaviorDesc',
 		fields: [
-			...withSub('subPrivate', [f('privateNeedsWake', 'boolean')]),
-			...withSub('subGroup', [
+			// 唤醒与过滤：什么消息能唤醒（@ / 前缀 / 私聊免唤醒），什么消息整条忽略。
+			...withSub('subWake', [
 				f('groupMentionOnly', 'boolean'),
 				f('wakePrefixes', 'lineList'),
+				f('privateNeedsWake', 'boolean'),
+				f('messageFilter', 'lineList'),
 			]),
-			// 信息过滤同属"机器人何时回应"这个功能域：与唤醒前缀一样是前缀匹配，
-			// 但方向相反（命中即丢弃），所以放在同一张卡里相邻。
-			...withSub('subFilter', [f('messageFilter', 'lineList')]),
+			// 回复形态：切块、超长折叠、引用（含被 @ 默认引用）与 @ 触发者。
+			...withSub('subShape', [
+				f('replyMaxChars', 'number'),
+				{ ...f('foldThreshold', 'foldThreshold'), extraPaths: [['foldForward']] },
+				{ ...f('quoteMode', 'quoteMode', ['none', 'mention', 'always']), path: ['replyWithQuote'], extraPaths: [['replyQuoteOnMention']] },
+				f('quoteMaxChars', 'number'),
+				f('replyWithMention', 'boolean'),
+			]),
+			...withSub('subImages', [
+				f('mediaEnabled', 'boolean'),
+				f('mediaMaxMB', 'number'),
+				f('pokeReply', 'string'),
+			]),
+			...withSub('subAsk', [f('askUserEnabled', 'boolean'), f('askUserWaitMs', 'number')]),
 		],
 	},
 	{
@@ -271,67 +275,37 @@ export const FIELD_GROUPS: FieldGroup[] = [
 		],
 	},
 	{
-		id: 'reply',
-		sectionKey: 'sectionChat',
-		titleKey: 'groupReply',
-		descKey: 'groupReplyDesc',
-		fields: [
-			...withSub('subShape', [
-				f('replyMaxChars', 'number'),
-				{ ...f('foldThreshold', 'foldThreshold'), extraPaths: [['foldForward']] },
-			]),
-			...withSub('subQuote', [
-				{ ...f('quoteMode', 'quoteMode', ['none', 'mention', 'always']), path: ['replyWithQuote'], extraPaths: [['replyQuoteOnMention']] },
-				f('quoteMaxChars', 'number'),
-			]),
-			...withSub('subMention', [f('replyWithMention', 'boolean')]),
-		],
-	},
-	{
-		// 群成员名单从「群聊配置」杂项里独立出来：它是一个自洽的功能域。
+		// 成员与信息：群成员名单（谁在说话）+ 近期聊天记录（刚才说了什么）。
+		// 两者都是"当前对话的即时信息"：默认开、零成本、不落盘（聊天记录只在
+		// 内存缓冲 + 远端补读），所以同卡；长期记忆是持久化 RAG（memory.db、
+		// 语义召回、默认关），仍在后面的「长期记忆」卡。
 		id: 'roster',
 		sectionKey: 'sectionChat',
 		titleKey: 'groupRoster',
 		descKey: 'groupRosterDesc',
 		fields: [
-			f('rosterEnabled', 'boolean'),
-			f('rosterTtlMs', 'number'),
-			f('rosterMaxMembers', 'number'),
-		],
-	},
-	{
-		// 聊天记录：agent 主动读取"刚才大家在聊什么"（qq_read_history 工具 +
-		// 未被唤醒消息的本地缓冲）。与群成员识别相邻——都是"给 agent 上下文"。
-		id: 'history',
-		sectionKey: 'sectionChat',
-		titleKey: 'groupHistory',
-		descKey: 'groupHistoryDesc',
-		fields: [
-			...withSub('subHistoryRead', [
+			...withSub('subRoster', [
+				f('rosterEnabled', 'boolean'),
+				f('rosterTtlMs', 'number'),
+				f('rosterMaxMembers', 'number'),
+			]),
+			// 聊天记录（qq_read_history）：独立开关，不依赖长期记忆。
+			...withSub('subHistory', [
 				f('historyEnabled', 'boolean'),
 				f('historyMaxMessages', 'number'),
-			]),
-			...withSub('subHistorySource', [
 				f('historyBufferPerChat', 'number'),
 				f('historyRemoteFetch', 'boolean'),
 			]),
 		],
 	},
 	{
-		// 提问与回答：agent 需要用户拍板时（ask_user_question / 计划确认）把问题
-		// 发到 QQ 并接受 QQ 回复作为答案。与「聊天记录」相邻——都是"agent 与用户
-		// 之间的上下文往返"，只是方向相反。
-		id: 'ask',
-		sectionKey: 'sectionChat',
-		titleKey: 'groupAsk',
-		descKey: 'groupAskDesc',
-		fields: [f('askUserEnabled', 'boolean'), f('askUserWaitMs', 'number')],
-	},
-	{
-		// 长期记忆：跨会话记住人物、群规与长期事项（卡片 + 会话档案检索 + 蒸馏）。
-		// 默认关闭；开启后会按会话持久记录消息正文（<数据目录>/memory.db）。
-		// 记忆工具（qq_recall_memory / qq_memorize）不在 CHAT_TOOLS 里，默认仅管理员可用，
-		// 普通用户要用得在「工具权限」卡片加进 userTools。
+		// 长期记忆：本地 RAG（聊天原文切块检索）+ 自演进技能。默认关闭；
+		// 开启后会按会话持久记录消息正文（<数据目录>/memory.db）。
+		// 与上面的「成员与信息」是两层：聊天记录重启即空、零成本；这里持久化、
+		// 语义召回、要装 runtime，所以设置也分卡。
+		//
+		// 记忆工具（qq_recall_memory / qq_use_skill / qq_list_skills）不在 CHAT_TOOLS 里，
+		// 默认仅管理员可用，普通用户要用得在「工具权限」卡片加进 userTools。
 		id: 'memory',
 		sectionKey: 'sectionChat',
 		titleKey: 'groupMemory',
@@ -339,9 +313,11 @@ export const FIELD_GROUPS: FieldGroup[] = [
 		fields: [
 			...withSub('subMemoryBasic', [
 				f('memoryEnabled', 'boolean'),
-				f('memoryRuntimeAutoInstall', 'boolean'),
 				f('memoryEmbeddingEnabled', 'boolean'),
-				{ ...f('memoryEmbeddingModel', 'readonly'), readonlyText: EMBEDDING_MODEL },
+				f('memoryRerankEnabled', 'boolean'),
+				f('memoryRerankTopN', 'number'),
+				f('memoryRerankTimeoutMs', 'number'),
+				f('memoryWorkerSearchTimeoutMs', 'number'),
 			]),
 			...withSub('subMemoryRecall', [
 				f('memoryRecallEnabled', 'boolean'),
@@ -362,13 +338,6 @@ export const FIELD_GROUPS: FieldGroup[] = [
 				f('memoryMaxChunksPerChat', 'number'),
 				f('memoryEmbedBatch', 'number'),
 			]),
-			...withSub('subMemoryRerank', [
-				f('memoryRerankEnabled', 'boolean'),
-				f('memoryRerankModel', 'readonly'),
-				f('memoryRerankTopN', 'number'),
-				f('memoryRerankTimeoutMs', 'number'),
-				f('memoryWorkerSearchTimeoutMs', 'number'),
-			]),
 			...withSub('subMemorySkill', [
 				f('memorySkillEnabled', 'boolean'),
 				f('memorySkillAutoLearn', 'boolean'),
@@ -385,29 +354,6 @@ export const FIELD_GROUPS: FieldGroup[] = [
 				f('memorySensitiveFilter', 'boolean'),
 				f('memoryInjectLog', 'boolean'),
 			]),
-		],
-	},
-	{
-		// 记忆库（RPC 驱动）：查看/搜索/编辑/删除/测试召回/立即蒸馏。
-		// 配置项仍在上一张「长期记忆」卡里；这张卡只操作记忆内容。
-		id: 'memoryItems',
-		sectionKey: 'sectionChat',
-		titleKey: 'groupMemoryItems',
-		descKey: 'groupMemoryItemsDesc',
-		custom: 'memory',
-		fields: [],
-	},
-	{
-		id: 'media',
-		sectionKey: 'sectionChat',
-		titleKey: 'groupMedia',
-		descKey: 'groupMediaDesc',
-		fields: [
-			...withSub('subImages', [
-				f('mediaEnabled', 'boolean'),
-				f('mediaMaxMB', 'number'),
-			]),
-			...withSub('subInteraction', [f('pokeReply', 'string')]),
 		],
 	},
 	{
@@ -680,8 +626,6 @@ export class DshQQCardController {
 	}
 
 	private stage(key: string, staged: Staged): void {
-		// 只读展示项没有可写路径：即便某个手势误触也不产生草稿。
-		if (this.def(key).kind === 'readonly') return;
 		this.staged.set(key, staged);
 		const cardId = GROUP_OF_FIELD.get(key);
 		if (cardId !== undefined) {
@@ -698,7 +642,6 @@ export class DshQQCardController {
 
 	/** 聚合控件的显示值由多个旧键合成，普通控件仍只读取自己的路径。 */
 	private fieldText(def: FieldDef, layer: 'value' | 'base'): string {
-		if (def.readonlyText !== undefined) return def.readonlyText;
 		if (def.kind === 'modelSelect') return this.modelSpec(def, layer);
 		const root = this.snapshot()[layer];
 		if (def.kind === 'quoteMode') {
@@ -904,7 +847,7 @@ export class DshQQCardController {
 				checked: current === true,
 				options,
 				values: (def.kind === 'toolList' || def.kind === 'orderList') && Array.isArray(current) ? current.map(String) : undefined,
-				overridden: def.kind === 'readonly' ? false : this.overridden(key),
+				overridden: this.overridden(key),
 				invalid: false,
 				clearStaged: false,
 			};

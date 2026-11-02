@@ -36,8 +36,6 @@ describe('字段定义与文案字典', () => {
 			expect(zh[group.descKey], `group ${group.descKey}`).toBeTruthy();
 			for (const def of group.fields) {
 				expect(zh[`${def.key}Label`], `${def.key}Label`).toBeTruthy();
-				// 只读项只是"给人看一眼的值"，按用户要求不显示解释性说明，因此没有 Hint。
-				if (def.kind === 'readonly') continue;
 				expect(zh[`${def.key}Hint`], `${def.key}Hint`).toBeTruthy();
 			}
 		}
@@ -46,7 +44,6 @@ describe('字段定义与文案字典', () => {
 	it('每项说明都是单行一句话，避免长段落把控件撑高', () => {
 		for (const group of FIELD_GROUPS) {
 			for (const def of group.fields) {
-				if (def.kind === 'readonly') continue;
 				const hint = zh[`${def.key}Hint`] ?? '';
 				expect(hint, `${def.key}Hint`).not.toContain('\n');
 				expect((hint.match(/。/g) ?? []).length, `${def.key}Hint 应为一句`).toBeLessThanOrEqual(1);
@@ -72,15 +69,10 @@ describe('字段定义与文案字典', () => {
 		const known = new Set(all);
 		// 只在配置文件里出现的部署/网络类键：它们没有"用户可操作"的语义（直连地址是
 		// 常量、镜像是国内部署的默认兜底），不占设置页，改 profile 的 cordis.patch.yml 生效。
-		const configOnly = ['memoryHfEndpoint', 'memoryHfMirror', 'memoryEmbeddingDtype'];
+		// memoryRerankModel 与下载源/精度一样只在配置文件里改（模型 id 与缓存目录绑定），
+		// 设置页不出现；模型卡片展示的是运行时状态，不是可编辑项。
+		const configOnly = ['memoryHfEndpoint', 'memoryHfMirror', 'memoryEmbeddingDtype', 'memoryRerankModel'];
 		for (const key of configOnly) expect(known.has(key), key).toBe(false);
-		// 只读展示项：出现在卡片里但不可编辑、不写配置（embedding 模型 id 与向量表
-		// 维度绑死，换模型要重建索引）。它们不是配置键，所以不参与下面的配置覆盖比对。
-		const displayOnly = ['memoryEmbeddingModel'];
-		for (const key of displayOnly) {
-			expect(known.has(key), key).toBe(true);
-			expect(FIELD_GROUPS.flatMap((group) => group.fields).find((def) => def.key === key)?.kind).toBe('readonly');
-		}
 		const expected = [
 			'transport', 'url', 'reversePort', 'reversePath', 'accessToken', 'reconnectDelayMs', 'httpTimeoutMs',
 			'privateMode', 'groupMode', 'allowedUsers', 'allowedGroups', 'blockedUsers', 'blockedGroups',
@@ -88,9 +80,9 @@ describe('字段定义与文案字典', () => {
 			'rateLimit.windowMs', 'rateLimit.max', 'rosterEnabled', 'rosterTtlMs', 'rosterMaxMembers', 'quoteMaxChars',
 			'historyEnabled', 'historyMaxMessages', 'historyBufferPerChat', 'historyRemoteFetch',
 			'askUserEnabled', 'askUserWaitMs',
-			'memoryEnabled', 'memoryRuntimeAutoInstall',
+			'memoryEnabled',
 			'memoryEmbeddingEnabled',
-			'memoryRerankEnabled', 'memoryRerankModel', 'memoryRerankTopN', 'memoryRerankTimeoutMs',
+			'memoryRerankEnabled', 'memoryRerankTopN', 'memoryRerankTimeoutMs',
 			'memoryRecallEnabled', 'memoryRecallTopK', 'memoryRecallMaxChars',
 			'memoryPrefetch', 'memoryPrefetchMinScore', 'memoryPrefetchMaxItems', 'memoryInjectMaxChars', 'memoryRecencyHalfLifeDays',
 			'memoryChunkMessages', 'memoryChunkMaxChars', 'memoryChunkOverlap', 'memoryRetentionDays',
@@ -110,9 +102,8 @@ describe('字段定义与文案字典', () => {
 			'messageLog', 'messageLogMax', 'messageLogToFile', 'debug',
 		];
 		for (const key of expected) expect(known.has(key), key).toBe(true);
-		// 反向也要成立：没有"字典里有、config 里没有"的野生字段（只读展示项除外）。
-		const configKeys = [...known].filter((key) => !displayOnly.includes(key));
-		expect(configKeys.sort()).toEqual([...expected].sort());
+		// 反向也要成立：没有"字典里有、config 里没有"的野生字段。
+		expect([...known].sort()).toEqual([...expected].sort());
 		expect(new Set(FIELD_GROUPS.map((group) => group.id)).size).toBe(FIELD_GROUPS.length);
 	});
 
@@ -154,7 +145,7 @@ describe('字段定义与文案字典', () => {
 	it('一张卡 = 一个功能域：私聊/群聊的差异是卡内子分节，不再各占一张卡', () => {
 		expect(FIELD_GROUPS.map((group) => group.id)).toEqual([
 			'connection', 'access', 'tools', 'search',
-			'wake', 'session', 'reply', 'roster', 'history', 'ask', 'memory', 'memoryItems', 'media', 'tasks', 'personas', 'routes',
+			'behavior', 'session', 'roster', 'memory', 'tasks', 'personas', 'routes',
 			'logging', 'agent',
 		]);
 		// 曾经的「私聊配置」「群聊配置」两张卡已消失。
@@ -173,19 +164,53 @@ describe('字段定义与文案字典', () => {
 			'subBlockedAdmins', 'subBlockedAdmins', 'subBlockedAdmins', 'subRequests',
 		]);
 
-		// 同一功能域的项不再跨卡：唤醒、回复形态、会话、工具都各自在一张卡里。
+		// 唤醒、回复形态、媒体与互动、提问与问答合并成一张「对话与互动」卡：
+		// 左侧导航不再被 2~5 项的小卡片切碎，卡内按子分节分域。
+		const behavior = FIELD_GROUPS.find((group) => group.id === 'behavior');
+		expect(behavior?.fields.map((def) => def.key)).toEqual([
+			'groupMentionOnly', 'wakePrefixes', 'privateNeedsWake', 'messageFilter',
+			'replyMaxChars', 'foldThreshold', 'quoteMode', 'quoteMaxChars', 'replyWithMention',
+			'mediaEnabled', 'mediaMaxMB', 'pokeReply', 'askUserEnabled', 'askUserWaitMs',
+		]);
+		expect(behavior?.fields.map((def) => def.sub)).toEqual([
+			'subWake', 'subWake', 'subWake', 'subWake',
+			'subShape', 'subShape', 'subShape', 'subShape', 'subShape',
+			'subImages', 'subImages', 'subImages', 'subAsk', 'subAsk',
+		]);
+		for (const id of ['wake', 'reply', 'media', 'ask']) {
+			expect(FIELD_GROUPS.some((group) => group.id === id), id).toBe(false);
+		}
+
+		// 聊天记录并入「成员与信息」（roster）：群成员名单 + 近期聊天记录都是
+		// 当前对话的即时信息，各占一个子分节；长期记忆卡不再带聊天记录。
+		const contextCard = FIELD_GROUPS.find((group) => group.id === 'roster');
+		expect(contextCard?.fields.map((def) => def.key)).toEqual([
+			'rosterEnabled', 'rosterTtlMs', 'rosterMaxMembers',
+			'historyEnabled', 'historyMaxMessages', 'historyBufferPerChat', 'historyRemoteFetch',
+		]);
+		expect(contextCard?.fields.map((def) => def.sub)).toEqual([
+			'subRoster', 'subRoster', 'subRoster',
+			'subHistory', 'subHistory', 'subHistory', 'subHistory',
+		]);
+		expect(FIELD_GROUPS.some((group) => group.id === 'history')).toBe(false);
+		const memoryCard = FIELD_GROUPS.find((group) => group.id === 'memory');
+		expect(memoryCard?.fields.some((def) => def.key === 'historyEnabled')).toBe(false);
+
+		// 同一功能域的项不再跨卡；会话与工具各在一张卡里。
 		const cardOf = (key: string): string | undefined =>
 			FIELD_GROUPS.find((group) => group.fields.some((def) => def.key === key))?.id;
 		const subOf = (key: string): string | undefined =>
 			FIELD_GROUPS.flatMap((group) => group.fields).find((def) => def.key === key)?.sub;
-		expect(cardOf('groupMentionOnly')).toBe(cardOf('wakePrefixes'));
-		expect(cardOf('privateNeedsWake')).toBe(cardOf('wakePrefixes'));
-		expect(cardOf('quoteMode')).toBe(cardOf('replyWithMention'));
-		expect(cardOf('quoteMaxChars')).toBe(cardOf('quoteMode'));
+		expect(cardOf('groupMentionOnly')).toBe('behavior');
+		expect(cardOf('privateNeedsWake')).toBe('behavior');
+		expect(cardOf('quoteMode')).toBe('behavior');
+		expect(cardOf('replyWithMention')).toBe('behavior');
+		expect(cardOf('quoteMaxChars')).toBe('behavior');
 		// 引用双开关与折叠双开关已聚合，但仍写回原配置键。
-		expect(cardOf('quoteMode')).toBe('reply');
-		expect(subOf('quoteMode')).toBe('subQuote');
-		expect(cardOf('foldThreshold')).toBe('reply');
+		expect(subOf('quoteMode')).toBe('subShape');
+		expect(cardOf('foldThreshold')).toBe('behavior');
+		expect(cardOf('historyEnabled')).toBe('roster');
+		expect(subOf('historyEnabled')).toBe('subHistory');
 		expect(cardOf('groupSession')).toBe(cardOf('sessionIdleTimeoutMs'));
 		expect(cardOf('registerSendTools')).toBe(cardOf('restrictTools'));
 		// 名单三项与准入模式同卡（保存/放弃以卡为单位，名单不该另存一张）。
@@ -205,10 +230,12 @@ describe('字段定义与文案字典', () => {
 		expect(hosts[0]?.fields.map((def) => def.key)).toEqual(['messageLog', 'messageLogMax', 'messageLogToFile', 'debug']);
 	});
 
-	it('人格、会话模型设置、定时任务、记忆库是四张自定义卡片，位于 Agent 之前且没有 schema 字段', () => {
+	it('人格、会话模型设置、定时任务是三张自定义卡片，位于 Agent 之前且没有 schema 字段', () => {
 		const custom = FIELD_GROUPS.filter((group) => group.custom !== undefined);
-		expect(custom.map((group) => group.id)).toEqual(['memoryItems', 'tasks', 'personas', 'routes']);
-		expect(custom.map((group) => group.custom)).toEqual(['memory', 'tasks', 'personas', 'routes']);
+		expect(custom.map((group) => group.id)).toEqual(['tasks', 'personas', 'routes']);
+		expect(custom.map((group) => group.custom)).toEqual(['tasks', 'personas', 'routes']);
+		// 「记忆库与技能」管理卡已按用户要求删除：长期记忆内容改用 /memory 命令查看。
+		expect(FIELD_GROUPS.some((group) => group.id === 'memoryItems')).toBe(false);
 		expect(custom.every((group) => group.fields.length === 0)).toBe(true);
 		// 「会话人格」已并入「人格」卡（卡内两个子分节），不再单独占一张卡。
 		expect(FIELD_GROUPS.some((group) => group.id === 'souls')).toBe(false);
@@ -259,7 +286,7 @@ describe('formatField / parseField', () => {
 	});
 
 	it('唤醒前缀与信息过滤都是单行列表（lineList），同类白名单仍是多行 list', () => {
-		const card = FIELD_GROUPS.find((group) => group.id === 'wake');
+		const card = FIELD_GROUPS.find((group) => group.id === 'behavior');
 		const kindOf = (key: string): string | undefined => card?.fields.find((def) => def.key === key)?.kind;
 		expect(kindOf('wakePrefixes')).toBe('lineList');
 		expect(kindOf('messageFilter')).toBe('lineList');
@@ -424,9 +451,9 @@ describe('DshQQCardController（按卡暂存/保存）', () => {
 		expect(fake.committed).toHaveLength(1);
 		expect(fake.committed[0]).toEqual([{ op: 'set', path: ['url'], value: 'ws://b' }]);
 		const state = face.hooks.dshQQCard.getSnapshot();
-		expect(state.cards.reply.dirty).toBe(true);
+		expect(state.cards.behavior.dirty).toBe(true);
 		expect(state.fields.replyMaxChars.text).toBe('3000');
-		face.save('reply');
+		face.save('behavior');
 		await settle();
 		expect(fake.committed[1]).toEqual([{ op: 'set', path: ['replyMaxChars'], value: 3000 }]);
 	});
@@ -436,8 +463,8 @@ describe('DshQQCardController（按卡暂存/保存）', () => {
 		const face = new DshQQCardController(fake.scope).inject() as unknown as CardFace;
 		face.edit('replyMaxChars', 'abc');
 		let state = face.hooks.dshQQCard.getSnapshot();
-		expect(state.cards.reply.invalid).toBe(true);
-		face.save('reply');
+		expect(state.cards.behavior.invalid).toBe(true);
+		face.save('behavior');
 		await settle();
 		expect(fake.committed).toHaveLength(0);
 		state = face.hooks.dshQQCard.getSnapshot();
@@ -450,7 +477,7 @@ describe('DshQQCardController（按卡暂存/保存）', () => {
 		expect(face.hooks.dshQQCard.getSnapshot().fields.replyMaxChars.overridden).toBe(true);
 		face.stageClear('replyMaxChars');
 		face.edit('url', 'ws://b');
-		face.save('reply');
+		face.save('behavior');
 		await settle();
 		expect(fake.committed[0]).toEqual([{ op: 'unset', path: ['replyMaxChars'] }]);
 	});
@@ -720,7 +747,7 @@ describe('DshQQCardController（按卡暂存/保存）', () => {
 		const face = new DshQQCardController(fake.scope).inject() as unknown as CardFace;
 		expect(face.hooks.dshQQCard.getSnapshot().fields.quoteMode.text).toBe('mention');
 		face.stageValue('quoteMode', 'always');
-		face.save('reply');
+		face.save('behavior');
 		await settle();
 		expect(fake.committed[0]).toEqual([{ op: 'set', path: ['replyWithQuote'], value: true }]);
 	});
@@ -729,14 +756,14 @@ describe('DshQQCardController（按卡暂存/保存）', () => {
 		const fake = fakeScope({ value: { foldForward: true, foldThreshold: 4000 } });
 		const face = new DshQQCardController(fake.scope).inject() as unknown as CardFace;
 		face.edit('foldThreshold', '2500');
-		face.save('reply');
+		face.save('behavior');
 		await settle();
 		expect(fake.committed[0]).toEqual([{ op: 'set', path: ['foldThreshold'], value: 2500 }]);
 
 		const off = fakeScope({ value: { foldForward: true, foldThreshold: 4000 } });
 		const face2 = new DshQQCardController(off.scope).inject() as unknown as CardFace;
 		face2.edit('foldThreshold', '0');
-		face2.save('reply');
+		face2.save('behavior');
 		await settle();
 		expect(off.committed[0]).toEqual([
 			{ op: 'set', path: ['foldThreshold'], value: 0 },

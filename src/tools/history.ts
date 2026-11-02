@@ -59,7 +59,7 @@ export function registerHistoryTool(
 				const bridge = requireBridge(services, manager);
 				// 工具注册需重启，但开关是热应用的：关掉后即便工具还在也拒绝读取，
 				// 避免"关了还能读"的意外。
-				if (!history.enabled) throw new Error('dsh-qq-bot: 聊天记录读取已在 WebUI 关闭（设置 → qq-bot 配置 → 聊天记录）');
+				if (!history.enabled) throw new Error('dsh-qq-bot: 聊天记录读取已在 WebUI 关闭（设置 → qq-bot 配置 → 成员与信息 → 近期聊天记录）');
 				const result = await history.read({
 					chatType: bridge.scope,
 					chatId: bridge.chatId,

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ACTIVE_CARD_KEY, OPEN_CARDS_KEY } from './cards.ts';
+import { ACTIVE_CARD_KEY } from './cards.ts';
 
 type CardsModule = typeof import('./cards.ts');
 
@@ -34,38 +34,19 @@ afterEach(() => {
 	delete (globalThis as { window?: unknown }).window;
 });
 
-describe('设置页卡片展开态', () => {
+describe('设置页导航选中项', () => {
 	it('没有 window（node/旧宿主）时不抛错，退化为进程内状态', () => {
-		expect(cards.readOpenCards()).toEqual({});
-		cards.writeOpenCard('wake', true);
-		expect(cards.readOpenCards().wake).toBe(true);
-		cards.writeOpenCard('wake', false);
-		expect(cards.readOpenCards().wake).toBeUndefined();
+		expect(cards.readActiveCard()).toBe('connection');
+		cards.writeActiveCard('memory');
+		expect(cards.readActiveCard()).toBe('memory');
 	});
 
-	it('写入会落 sessionStorage，重新读取（模拟刷新/重挂载）仍保持展开', () => {
+	it('写入会落 sessionStorage，重新读取（模拟刷新/重挂载）仍保持', () => {
 		const storage = fakeStorage();
 		installWindow(storage);
-		cards.writeOpenCard('wake', true);
-		expect(JSON.parse(storage.data.get(OPEN_CARDS_KEY) ?? '{}')).toEqual({ wake: true });
-		expect(cards.readOpenCards()).toEqual({ wake: true });
-		// 折叠即从存储里移除（不留 false 残键）。
-		cards.writeOpenCard('wake', false);
-		expect(JSON.parse(storage.data.get(OPEN_CARDS_KEY) ?? '{}')).toEqual({});
-	});
-
-	it('只认 FIELD_GROUPS 里的卡片 id 与 true，脏数据被丢弃', () => {
-		const storage = fakeStorage({
-			[OPEN_CARDS_KEY]: JSON.stringify({ wake: true, notACard: true, connection: false, tools: 'yes' }),
-		});
-		installWindow(storage);
-		expect(cards.readOpenCards()).toEqual({ wake: true });
-	});
-
-	it('存储里是非法 JSON 时不影响渲染', () => {
-		const storage = fakeStorage({ [OPEN_CARDS_KEY]: '{oops' });
-		installWindow(storage);
-		expect(cards.readOpenCards()).toEqual({});
+		cards.writeActiveCard('session');
+		expect(storage.data.get(ACTIVE_CARD_KEY)).toBe('session');
+		expect(cards.readActiveCard()).toBe('session');
 	});
 
 	it('sessionStorage 抛错（隐私模式）时仍可用', () => {
@@ -77,9 +58,9 @@ describe('设置页卡片展开态', () => {
 				throw new Error('denied');
 			},
 		});
-		expect(cards.readOpenCards()).toEqual({});
-		cards.writeOpenCard('reply', true);
-		expect(cards.readOpenCards()).toEqual({ reply: true });
+		expect(cards.readActiveCard()).toBe('connection');
+		cards.writeActiveCard('roster');
+		expect(cards.readActiveCard()).toBe('roster');
 	});
 
 	it('导航选中项跨刷新保留，未知 id 回退到第一张卡片', () => {
@@ -90,12 +71,29 @@ describe('设置页卡片展开态', () => {
 		expect(storage.data.get(ACTIVE_CARD_KEY)).toBe('memory');
 		expect(cards.readActiveCard()).toBe('memory');
 		storage.data.set(ACTIVE_CARD_KEY, 'notACard');
-		expect(cards.readActiveCard('wake')).toBe('wake');
+		expect(cards.readActiveCard('session')).toBe('session');
 	});
 
 	it('旧卡片 id 迁移到合并后的卡片：souls → personas', () => {
 		const storage = fakeStorage({ [ACTIVE_CARD_KEY]: 'souls' });
 		installWindow(storage);
 		expect(cards.readActiveCard()).toBe('personas');
+	});
+
+	it('四张旧卡片迁移到「对话与互动」：wake/reply/media/ask → behavior', () => {
+		for (const legacy of ['wake', 'reply', 'media', 'ask']) {
+			installWindow(fakeStorage({ [ACTIVE_CARD_KEY]: legacy }));
+			expect(cards.readActiveCard(), legacy).toBe('behavior');
+		}
+	});
+
+	it('「聊天记录」迁移到「成员与信息」：history → roster', () => {
+		installWindow(fakeStorage({ [ACTIVE_CARD_KEY]: 'history' }));
+		expect(cards.readActiveCard()).toBe('roster');
+	});
+
+	it('已删除的「记忆库与技能」卡迁移到「长期记忆」：memoryItems → memory', () => {
+		installWindow(fakeStorage({ [ACTIVE_CARD_KEY]: 'memoryItems' }));
+		expect(cards.readActiveCard()).toBe('memory');
 	});
 });

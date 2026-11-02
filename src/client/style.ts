@@ -15,7 +15,7 @@ export const CARD_CSS = `
 .dshqq-heading{margin:0;font-size:18px;font-weight:600}
 .dshqq-intro{color:var(--dsw-alias-label-tertiary);margin:6px 0 0;font-size:13px;line-height:1.5}
 .dshqq-readOnly{color:var(--dsw-alias-label-tertiary);margin:12px 0 0;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
-.dshqq-layout{grid-template-columns:148px minmax(0,1fr);align-items:start;gap:14px;margin-top:16px;min-width:0;display:grid}
+.dshqq-layout{grid-template-columns:120px minmax(0,1fr);align-items:start;gap:8px;margin-top:16px;min-width:0;display:grid}
 .dshqq-nav{flex-direction:column;gap:16px;max-height:calc(100vh - 150px);padding:2px 4px 12px 0;display:flex;position:sticky;top:12px;overflow-y:auto;scrollbar-width:thin}
 .dshqq-navSection{flex-direction:column;gap:4px;display:flex}
 .dshqq-navGroup{flex-direction:column;gap:2px;display:flex}
@@ -57,6 +57,8 @@ button.dshqq-header{cursor:pointer}
 .dshqq-modelGrid{border:.5px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0 2px;padding:10px 12px;display:grid}
 .dshqq-modelGridHead{grid-column:1/-1;justify-content:space-between;align-items:center;gap:12px;display:flex}
 .dshqq-modelCard{border:.5px solid var(--dsw-alias-border-l2);border-radius:9px;min-width:0;padding:8px 10px}
+/* 运行时卡片独立一行：两个模型卡仍并排两列。 */
+.dshqq-modelCardWide{grid-column:1/-1}
 .dshqq-modelTitle{min-width:0;color:var(--dsw-alias-label-primary);justify-content:space-between;align-items:center;gap:8px;font-size:12px;font-weight:600;line-height:1.5;display:flex}
 /* 「向量模型」「重排模型」四个字必须横排：卡片变窄时不折成两行。 */
 .dshqq-modelTitle>span:first-child{white-space:nowrap;flex:none}
@@ -100,7 +102,6 @@ button.dshqq-header{cursor:pointer}
 .dshqq-reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
 .dshqq-reset:disabled{cursor:default}
 /* 只读展示值（模型 id 这类"代码决定、用户不能改"的参数）：等宽、可复制、不显输入框。 */
-.dshqq-readonlyValue{background:var(--dsw-alias-bg-layer-2);border:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);border-radius:8px;padding:7px 12px;font-family:var(--dsw-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px;line-height:1.5;overflow-wrap:anywhere;user-select:text;display:block}
 .dshqq-input{border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}
 .dshqq-input:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}
 .dshqq-input:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}

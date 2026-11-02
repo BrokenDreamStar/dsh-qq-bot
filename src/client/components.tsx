@@ -45,6 +45,7 @@ const css = {
 	modelGrid: 'dshqq-modelGrid',
 	modelGridHead: 'dshqq-modelGridHead',
 	modelCard: 'dshqq-modelCard',
+	modelCardWide: 'dshqq-modelCardWide',
 	modelTitle: 'dshqq-modelTitle',
 	modelAction: 'dshqq-modelAction',
 	modelName: 'dshqq-modelName',
@@ -84,7 +85,6 @@ const css = {
 	badgeMuted: 'dshqq-badgeMuted',
 	conn: 'dshqq-conn',
 	connDot: 'dshqq-connDot',
-	readonlyValue: 'dshqq-readonlyValue',
 	reset: 'dshqq-reset',
 	input: 'dshqq-input',
 	inputInvalid: 'dshqq-inputInvalid',
@@ -701,11 +701,11 @@ function usePersonaModelData(getRpc: (() => RpcCaller | undefined) | undefined, 
 
 /**
  * 模型清单（宿主 `models/list`）：与「会话模型设置」的模型列同源，供 settings
- * 卡片里的模型下拉（modelSelect，如「长期记忆」的蒸馏模型）使用。只在含该
+ * 卡片里的模型下拉（modelSelect，如「长期记忆」的技能学习模型）使用。只在含该
  * 控件的卡片展开时拉一次；失败不算已加载，下次展开重试。
  *
  * 刻意不复用 usePersonaModelData 的 models：那个 hook 要 personas/list 与
- * routes/list 都成功才算 ready，人格库文件出问题时不该把蒸馏模型下拉一起
+ * routes/list 都成功才算 ready，人格库文件出问题时不该把技能学习模型下拉一起
  * 降级成空清单。
  */
 function useModelOptions(getRpc: (() => RpcCaller | undefined) | undefined, active: boolean): ModelOptionView[] {
@@ -1577,24 +1577,6 @@ interface RagStatusView {
 	progress?: RagProgressView;
 }
 
-interface RagChunkView {
-	id: number;
-	ts: number;
-	text: string;
-	score: number;
-}
-
-interface RagSkillView {
-	id: number;
-	name: string;
-	description: string;
-	whenToUse: string;
-	body: string;
-	status: string;
-	scope: string;
-	useCount: number;
-}
-
 function parseRagProgress(value: unknown): RagProgressView | undefined {
 	if (value === null || typeof value !== 'object') return undefined;
 	const row = value as Record<string, unknown>;
@@ -1663,62 +1645,7 @@ function parseRagStatus(value: unknown): RagStatusView | null {
 	};
 }
 
-function parseChunks(value: unknown): RagChunkView[] {
-	const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
-	const raw = Array.isArray(record.items) ? record.items : [];
-	const items: RagChunkView[] = [];
-	for (const entry of raw) {
-		if (entry === null || typeof entry !== 'object') continue;
-		const row = entry as Record<string, unknown>;
-		if (typeof row.id !== 'number' || typeof row.text !== 'string') continue;
-		items.push({
-			id: row.id,
-			ts: typeof row.ts === 'number' ? row.ts : 0,
-			text: row.text,
-			score: typeof row.score === 'number' ? row.score : 0,
-		});
-	}
-	return items;
-}
-
-function parseSkills(value: unknown): RagSkillView[] {
-	const record = value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : {};
-	const raw = Array.isArray(record.items) ? record.items : [];
-	const items: RagSkillView[] = [];
-	for (const entry of raw) {
-		if (entry === null || typeof entry !== 'object') continue;
-		const row = entry as Record<string, unknown>;
-		if (typeof row.id !== 'number' || typeof row.name !== 'string') continue;
-		items.push({
-			id: row.id,
-			name: row.name,
-			description: typeof row.description === 'string' ? row.description : '',
-			whenToUse: typeof row.whenToUse === 'string' ? row.whenToUse : '',
-			body: typeof row.body === 'string' ? row.body : '',
-			status: typeof row.status === 'string' ? row.status : 'active',
-			scope: row.scope === 'global' ? 'global' : 'chat',
-			useCount: typeof row.useCount === 'number' ? row.useCount : 0,
-		});
-	}
-	return items;
-}
-
-function formatBytes(value: number | undefined): string {
-	if (value === undefined || !Number.isFinite(value) || value < 0) return '';
-	if (value < 1024) return `${Math.round(value)} B`;
-	if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-	if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-	return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
-
-function formatChunkTime(ts: number): string {
-	if (!Number.isFinite(ts) || ts <= 0) return '';
-	const date = new Date(ts);
-	const pad = (value: number): string => String(value).padStart(2, '0');
-	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-/** 记忆状态轮询：配置卡与记忆库共用，1.5s 只在对应面板可见时运行。 */
+/** 记忆状态轮询：只在「长期记忆」卡可见时运行，1.5s 一次。 */
 function useMemoryStatus(
 	getRpc: (() => RpcCaller | undefined) | undefined,
 	enabled: boolean,
@@ -1748,58 +1675,35 @@ function useMemoryStatus(
 	return [status, setStatus];
 }
 
-function modelStateLabel(t: Translate, kind: 'download' | 'load' | 'runtime', value: string): string {
-	const base = kind === 'download' ? 'memoryStateDownload' : kind === 'load' ? 'memoryStateLoad' : 'memoryStateRuntime';
-	const suffix =
-		value === 'ready'
-			? 'Ready'
-			: value === 'downloading' || value === 'loading' || value === 'installing'
-				? 'Busy'
-				: value === 'error'
-					? 'Error'
-					: value === 'disabled'
-						? 'Disabled'
-						: 'Missing';
-	return t(`${base}${suffix}`);
-}
-
-function modelStateClass(value: string): string {
-	if (value === 'ready') return css.modelStateOk;
-	if (value === 'downloading' || value === 'loading' || value === 'installing') return css.modelStateBusy;
-	if (value === 'error') return css.modelStateError;
-	return css.modelStateOff;
-}
-
-function ModelStatusCard(props: {
+/**
+ * 运行时卡片：与模型卡同一套操作区——未安装显示「安装」，安装中显示进度条，
+ * 就绪显示「已就绪」。运行时只手动安装（用户要求，启动时不再自动装）。
+ */
+function RuntimeStatusCard(props: {
 	t: Translate;
-	title: string;
-	status: RagModelStatusView;
+	runtime: string;
 	progress?: RagProgressView;
-	onDownload?: () => Promise<void> | void;
+	onInstall?: () => Promise<void> | void;
 }): ReactNode {
-	const { t, title, status, progress, onDownload } = props;
+	const { t, runtime, progress, onInstall } = props;
 	const [pending, setPending] = useState(false);
 	const [failed, setFailed] = useState<string | null>(null);
-	const downloading = status.download === 'downloading' || status.load === 'loading';
-	const installed = status.download === 'ready' && status.load === 'ready';
-	const broken = status.download === 'error' || status.load === 'error';
-	const percent = progress?.percent;
+	const installing = runtime === 'installing' || pending;
+	const percent = progress?.kind === 'install' ? progress.percent : undefined;
 	const start = useCallback((): void => {
-		if (onDownload === undefined || pending) return;
+		if (onInstall === undefined || pending) return;
 		setPending(true);
 		setFailed(null);
-		void Promise.resolve(onDownload())
+		void Promise.resolve(onInstall())
 			.catch((error: unknown) => {
 				setFailed(error instanceof Error ? error.message : String(error));
 			})
 			.finally(() => {
 				setPending(false);
 			});
-	}, [onDownload, pending]);
-	const busy = downloading || pending;
+	}, [onInstall, pending]);
 	let action: ReactNode;
-	if (busy) {
-		// 用户明确要求：下载中把按钮换成进度条（拿不到百分比时走不确定态动画）。
+	if (installing) {
 		action = (
 			<span className={css.modelProgress}>
 				<span className={css.modelBar}>
@@ -1811,16 +1715,73 @@ function ModelStatusCard(props: {
 				<span className={css.modelPercent}>{percent === undefined ? null : `${Math.round(percent)}%`}</span>
 			</span>
 		);
+	} else if (runtime === 'ready') {
+		action = <span className={css.modelInstalled}>{t('memoryReady')}</span>;
+	} else if (runtime === 'disabled') {
+		action = <span className={cls(css.modelState, css.modelStateOff)}>{t('memoryStateRuntimeDisabled')}</span>;
+	} else {
+		action = (
+			<button type="button" className={css.discard} disabled={onInstall === undefined} onClick={start}>
+				{t('memoryInstall')}
+			</button>
+		);
+	}
+	return (
+		<div className={cls(css.modelCard, css.modelCardWide)}>
+			<div className={css.modelTitle}>
+				<span>{t('memoryRuntime')}</span>
+				<span className={css.modelAction}>{action}</span>
+			</div>
+			<p className={css.modelName}>{t('memoryRuntimeDesc')}</p>
+			{failed !== null ? <p className={css.failed}>{failed}</p> : null}
+		</div>
+	);
+}
+
+function ModelStatusCard(props: {
+	t: Translate;
+	title: string;
+	status: RagModelStatusView;
+	progress?: RagProgressView;
+}): ReactNode {
+	const { t, title, status, progress } = props;
+	const downloading = status.download === 'downloading';
+	const loading = status.load === 'loading';
+	// 已就绪 = 文件已下载且模型加载成功；只有文件、还没加载成功时仍显示「已安装」。
+	const ready = status.download === 'ready' && status.load === 'ready';
+	const installed = status.download === 'ready' && status.load !== 'ready' && status.load !== 'error';
+	const broken = status.download === 'error' || status.load === 'error';
+	const errorText = broken
+		? status.error ?? (status.load === 'error' ? t('memoryModelLoadFailed') : t('memoryModelDownloadFailed'))
+		: undefined;
+	const percent = progress?.percent;
+	let action: ReactNode;
+	if (downloading) {
+		// 启用后自动下载：进度条就是「下载中」的唯一操作区（没有按钮可点）。
+		action = (
+			<span className={css.modelProgress}>
+				<span className={css.modelBar}>
+					<span
+						className={cls(css.modelBarFill, percent === undefined ? css.modelBarFillBusy : undefined)}
+						style={percent === undefined ? undefined : { width: `${Math.max(2, Math.min(100, percent))}%` }}
+					/>
+				</span>
+				<span className={css.modelPercent}>{percent === undefined ? null : `${Math.round(percent)}%`}</span>
+			</span>
+		);
+	} else if (loading) {
+		// 加载本地文件不是下载：不显示进度条，避免误以为又在下载。
+		action = <span className={cls(css.modelState, css.modelStateBusy)}>{t('memoryModelLoading')}</span>;
+	} else if (ready) {
+		action = <span className={css.modelInstalled}>{t('memoryReady')}</span>;
 	} else if (installed) {
 		action = <span className={css.modelInstalled}>{t('memoryModelInstalled')}</span>;
 	} else if (status.download === 'disabled') {
 		action = <span className={cls(css.modelState, css.modelStateOff)}>{t('memoryStateDownloadDisabled')}</span>;
+	} else if (broken) {
+		action = <span className={cls(css.modelState, css.modelStateError)}>{t('memoryModelFailed')}</span>;
 	} else {
-		action = (
-			<button type="button" className={css.discard} disabled={onDownload === undefined} onClick={start}>
-				{broken ? t('memoryModelRetry') : t('memoryModelDownload')}
-			</button>
-		);
+		action = <span className={cls(css.modelState, css.modelStateBusy)}>{t('memoryModelWaiting')}</span>;
 	}
 	return (
 		<div className={css.modelCard}>
@@ -1831,21 +1792,20 @@ function ModelStatusCard(props: {
 			<p className={css.modelName} title={status.id}>
 				{status.id === '' ? '—' : status.id}
 			</p>
-			{failed !== null ? <p className={css.failed}>{failed}</p> : null}
-			{broken && status.error !== undefined ? <p className={css.failed}>{status.error}</p> : null}
+			{errorText !== undefined ? <p className={css.failed}>{errorText}</p> : null}
 		</div>
 	);
 }
 
 /**
- * 本地模型状态：两个模型各一张卡，卡片右侧就是操作区——
- * 未下载显示「下载」，下载中显示进度条，就绪显示「已安装」。
+ * 本地模型状态：两个模型各一张卡，右侧只展示状态——
+ * 下载中进度条、加载中、已就绪；启用即自动下载，没有手动下载按钮。
  * 状态来自 worker 的真实加载流程（模型 id 另起一行显示）。
  */
 function MemoryModelStatusPanel(props: {
 	t: Translate;
 	status: RagStatusView | null;
-	onDownload?: (model: 'embedding' | 'reranker') => Promise<void> | void;
+	onInstallRuntime?: () => Promise<void> | void;
 }): ReactNode {
 	const { t, status } = props;
 	if (status === null) return <p className={css.hint}>{t('loading')}</p>;
@@ -1865,281 +1825,11 @@ function MemoryModelStatusPanel(props: {
 		<div className={css.modelGrid}>
 			<div className={css.modelGridHead}>
 				<span className={css.label}>{t('memoryModelStatus')}</span>
-				<span className={cls(css.modelState, modelStateClass(runtime))}>
-					{modelStateLabel(t, 'runtime', runtime)}
-					{runtime === 'installing' && status.progress?.percent !== undefined
-						? ` ${Math.round(status.progress.percent)}%`
-						: ''}
-				</span>
 			</div>
-			<ModelStatusCard
-				t={t}
-				title={t('memoryEmbeddingModelShort')}
-				status={models.embedding}
-				progress={progressOf('embedding')}
-				onDownload={props.onDownload === undefined ? undefined : () => props.onDownload?.('embedding')}
-			/>
-			<ModelStatusCard
-				t={t}
-				title={t('memoryRerankModelShort')}
-				status={models.reranker}
-				progress={progressOf('reranker')}
-				onDownload={props.onDownload === undefined ? undefined : () => props.onDownload?.('reranker')}
-			/>
+			<RuntimeStatusCard t={t} runtime={runtime} progress={status.progress} onInstall={props.onInstallRuntime} />
+			<ModelStatusCard t={t} title={t('memoryEmbeddingModelShort')} status={models.embedding} progress={progressOf('embedding')} />
+			<ModelStatusCard t={t} title={t('memoryRerankModelShort')} status={models.reranker} progress={progressOf('reranker')} />
 			{status.lastError !== undefined ? <p className={css.failed}>{status.lastError}</p> : null}
-		</div>
-	);
-}
-
-/**
- * 记忆库与技能面板：状态、检索测试、最近片段、运行时安装、技能管理。
- * 配置项仍在上一张「长期记忆」卡。
- */
-function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined) | undefined; disabled: boolean }): ReactNode {
-	const { t, getRpc, disabled } = props;
-	const [chatKey, setChatKey] = useState('');
-	const [query, setQuery] = useState('');
-	const [status, setStatus] = useMemoryStatus(getRpc, true);
-	const [chunks, setChunks] = useState<RagChunkView[]>([]);
-	const [skills, setSkills] = useState<RagSkillView[]>([]);
-	const [selected, setSelected] = useState<RagSkillView | null>(null);
-	const [busy, setBusy] = useState(false);
-	const [failed, setFailed] = useState<string | null>(null);
-
-	const call = useCallback(async (endpoint: string, payload: Record<string, unknown> = {}): Promise<unknown> => {
-		const rpc = getRpc?.();
-		if (rpc === undefined) throw new Error(t('memoryRpcUnavailable'));
-		const result = await rpc(endpoint, payload);
-		if (!result.ok) throw new Error(result.error?.message ?? 'RPC 失败');
-		return result.value;
-	}, [getRpc, t]);
-
-	const run = useCallback(async (task: () => Promise<void>): Promise<void> => {
-		if (disabled) return;
-		setBusy(true);
-		setFailed(null);
-		try {
-			await task();
-		} catch (error) {
-			setFailed(error instanceof Error ? error.message : String(error));
-		} finally {
-			setBusy(false);
-		}
-	}, [disabled]);
-
-	const refreshStatus = useCallback(async (): Promise<void> => {
-		await run(async () => {
-			setStatus(parseRagStatus(await call('memory/status')));
-		});
-	}, [call, run]);
-
-	const search = useCallback(async (): Promise<void> => {
-		await run(async () => {
-			if (chatKey.trim() === '' || query.trim() === '') throw new Error(t('memoryChatRequired'));
-			const value = (await call('memory/search', { chatKey: chatKey.trim(), query: query.trim(), limit: 10 })) as { items?: unknown };
-			setChunks(parseChunks(value));
-		});
-	}, [call, chatKey, query, run, t]);
-
-	const loadRecent = useCallback(async (): Promise<void> => {
-		await run(async () => {
-			if (chatKey.trim() === '') throw new Error(t('memoryChatRequired'));
-			const value = (await call('memory/recent', { chatKey: chatKey.trim(), limit: 20 })) as { items?: unknown };
-			setChunks(parseChunks(value));
-		});
-	}, [call, chatKey, run, t]);
-
-	const loadSkills = useCallback(async (): Promise<void> => {
-		await run(async () => {
-			if (chatKey.trim() === '') throw new Error(t('memoryChatRequired'));
-			const value = (await call('skills/list', { chatKey: chatKey.trim(), includeInactive: true })) as { items?: unknown };
-			setSkills(parseSkills(value));
-		});
-	}, [call, chatKey, run, t]);
-
-	const setup = useCallback(async (): Promise<void> => {
-		await run(async () => {
-			await call('memory/setup');
-			setStatus(parseRagStatus(await call('memory/status')));
-		});
-	}, [call, run]);
-
-	const reindex = useCallback(async (): Promise<void> => {
-		await run(async () => {
-			if (chatKey.trim() === '') throw new Error(t('memoryChatRequired'));
-			await call('memory/reindex', { chatKey: chatKey.trim() });
-			await refreshStatus();
-		});
-	}, [call, chatKey, refreshStatus, run, t]);
-
-	const prune = useCallback(async (): Promise<void> => {
-		await run(async () => {
-			await call('memory/prune');
-			await refreshStatus();
-		});
-	}, [call, refreshStatus, run]);
-
-	const deleteChunk = useCallback(async (id: number): Promise<void> => {
-		await run(async () => {
-			await call('memory/delete', { id });
-			setChunks((prev) => prev.filter((item) => item.id !== id));
-		});
-	}, [call, run]);
-
-	const toggleSkill = useCallback(async (skill: RagSkillView): Promise<void> => {
-		await run(async () => {
-			await call('skills/toggle', { id: skill.id, status: skill.status === 'active' ? 'disabled' : 'active' });
-			await loadSkills();
-		});
-	}, [call, loadSkills, run]);
-
-	const deleteSkill = useCallback(async (skill: RagSkillView): Promise<void> => {
-		await run(async () => {
-			await call('skills/delete', { chatKey: chatKey.trim(), id: skill.id });
-			await loadSkills();
-		});
-	}, [call, chatKey, loadSkills, run]);
-
-	const promoteSkill = useCallback(async (skill: RagSkillView): Promise<void> => {
-		await run(async () => {
-			await call('skills/promote', { chatKey: chatKey.trim(), id: skill.id });
-			await loadSkills();
-		});
-	}, [call, chatKey, loadSkills, run]);
-
-	return (
-		<div className={css.logPanel}>
-			<div className={css.taskHead}>
-				<input
-					className={css.input}
-					type="text"
-					value={chatKey}
-					placeholder={t('memoryChatPlaceholder')}
-					disabled={disabled || busy}
-					onChange={(event) => setChatKey(event.target.value)}
-				/>
-				<input
-					className={css.input}
-					type="text"
-					value={query}
-					placeholder={t('memorySearchPlaceholder')}
-					disabled={disabled || busy}
-					onChange={(event) => setQuery(event.target.value)}
-				/>
-			</div>
-			<div className={css.footer}>
-				<button type="button" className={css.save} disabled={disabled || busy} onClick={() => void refreshStatus()}>
-					{t('memoryStatus')}
-				</button>
-				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void search()}>
-					{t('memoryPreview')}
-				</button>
-				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void loadRecent()}>
-					{t('memoryRecent')}
-				</button>
-				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void loadSkills()}>
-					{t('memorySkills')}
-				</button>
-				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void setup()}>
-					{t('memorySetup')}
-				</button>
-				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void reindex()}>
-					{t('memoryReindex')}
-				</button>
-				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void prune()}>
-					{t('memoryPrune')}
-				</button>
-			</div>
-			{failed !== null ? (
-				<p className={css.failed} role="status">
-					{failed}
-				</p>
-			) : null}
-			{status?.progress !== undefined ? (
-				<div className={css.progressWrap}>
-					<p className={css.hint}>
-						{status.progress.kind === 'install' ? t('memoryInstallingRuntime') : t('memoryDownloading')}
-						{status.progress.percent !== undefined ? ` ${Math.round(status.progress.percent)}%` : ''}
-						{status.progress.file !== undefined ? ` ｜ ${status.progress.file}` : ''}
-					</p>
-					<div className={css.progressTrack}>
-						<div
-							className={cls(css.progressBar, status.progress.percent === undefined ? css.progressIndeterminate : undefined)}
-							style={status.progress.percent !== undefined ? { width: `${Math.max(2, Math.min(100, status.progress.percent))}%` } : undefined}
-						/>
-					</div>
-					{status.progress.loaded !== undefined || status.progress.total !== undefined ? (
-						<p className={css.hint}>
-							{formatBytes(status.progress.loaded)}
-							{status.progress.total !== undefined ? ` / ${formatBytes(status.progress.total)}` : ''}
-						</p>
-					) : null}
-				</div>
-			) : null}
-			{status !== null ? (
-				<div className={css.logPanel}>
-					<MemoryModelStatusPanel
-						t={t}
-						status={status}
-						onDownload={async (model) => {
-							await call('memory/models/download', { model });
-							setStatus(parseRagStatus(await call('memory/status')));
-						}}
-					/>
-					<p className={css.hint}>
-						消息 {status.messages} ｜ 片段 {status.chunks} ｜ 技能 {status.skills} ｜ DB={status.db ? '✓' : '✗'} ｜ FTS={status.fts ? '✓' : '✗'} ｜ vec={status.vec ? '✓' : '✗'}
-					</p>
-				</div>
-			) : null}
-			{chunks.length > 0 ? (
-				<div className={css.logPanel}>
-					<p className={css.hint}>{t('memoryRecent')}</p>
-					{chunks.map((item) => (
-						<div key={item.id} className={css.logPanel}>
-							<p className={css.hint}>
-								#{item.id} ｜ {formatChunkTime(item.ts)} ｜ 分数={item.score.toFixed(3)}
-							</p>
-							<pre className={css.hint}>{item.text}</pre>
-							<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void deleteChunk(item.id)}>
-								{t('memoryDelete')}
-							</button>
-						</div>
-					))}
-				</div>
-			) : null}
-			{skills.length > 0 ? (
-				<div className={css.logPanel}>
-					<p className={css.hint}>{t('memorySkills')}</p>
-					{skills.map((skill) => (
-						<div key={skill.id} className={css.logPanel}>
-							<p className={css.hint}>
-								{skill.name}（{skill.scope === 'global' ? 'global' : 'chat'}，{skill.status}，used {skill.useCount}）
-							</p>
-							<p className={css.hint}>{skill.description}</p>
-							<div className={css.footer}>
-								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => setSelected(skill)}>
-									{t('memoryView')}
-								</button>
-								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void toggleSkill(skill)}>
-									{skill.status === 'active' ? t('memoryDisable') : t('memoryEnable')}
-								</button>
-								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void promoteSkill(skill)}>
-									{t('memoryPromote')}
-								</button>
-								<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void deleteSkill(skill)}>
-									{t('memoryDelete')}
-								</button>
-							</div>
-						</div>
-					))}
-				</div>
-			) : null}
-			{selected !== null ? (
-				<div className={css.logPanel}>
-					<p className={css.hint}>{selected.name}</p>
-					<pre className={css.hint}>{selected.body}</pre>
-				</div>
-			) : null}
 		</div>
 	);
 }
@@ -2897,28 +2587,8 @@ function SecretRow(props: RowProps): ReactNode {
 	);
 }
 
-/**
- * 只读展示行：值由代码或配置文件决定，界面上能看不能改。
- * 用于和存储格式绑死的参数（embedding 模型 id ↔ 向量表维度），
- * 避免给用户一个"改了会静默坏"的输入框，同时保留可见性。
- * 用户明确要求不显示「只读」角标和解释性说明，所以这里只有 label + 值。
- */
-function ReadonlyRow(props: RowProps): ReactNode {
-	const { def, state, t } = props;
-	return (
-		<div className={css.field}>
-			<div className={css.head}>
-				<span className={css.label}>{t(`${def.key}Label`)}</span>
-			</div>
-			<code className={css.readonlyValue}>{state.text}</code>
-		</div>
-	);
-}
-
 function FieldRow(props: RowProps): ReactNode {
 	switch (props.def.kind) {
-		case 'readonly':
-			return <ReadonlyRow {...props} />;
 		case 'boolean':
 			return <SwitchRow {...props} />;
 		case 'enum':
@@ -3199,7 +2869,7 @@ function GroupCard(
  * settings surface 的约定一致。页面是一列折叠卡片，按 FIELD_GROUPS 的
  * sectionKey 分成「接入与安全 / 对话体验 / 运行与维护」三段；一张卡 = 一个
  * 功能域，私聊/群聊的差异是卡内子分节（h4 小标题），不再各占一张卡。
- * 「消息日志与诊断」卡片的展开体里内嵌只读日志视图（宿主提供 connection RPC 时）。
+ * 「消息日志」卡片的展开体里内嵌只读日志视图（宿主提供 connection RPC 时）。
  */
 export function DshQQSection(props: CardProps): ReactNode {
 	const state = props.useDshQQCard((snapshot) => snapshot);
@@ -3264,12 +2934,6 @@ export function DshQQSection(props: CardProps): ReactNode {
 			) : (
 				<p className={css.hint}>{props.t('taskRpcUnavailable')}</p>
 			)
-		) : activeGroup.custom === 'memory' ? (
-			rpcAvailable ? (
-				<MemoryPanel t={props.t} getRpc={getRpc} disabled={!state.writable} />
-			) : (
-				<p className={css.hint}>{props.t('memoryRpcUnavailable')}</p>
-			)
 		) : undefined;
 	const countBadge =
 		logActive && log.entries.length > 0 ? (
@@ -3333,10 +2997,10 @@ export function DshQQSection(props: CardProps): ReactNode {
 									<MemoryModelStatusPanel
 										t={props.t}
 										status={memoryStatus}
-										onDownload={async (model) => {
+										onInstallRuntime={async () => {
 											const rpc = getRpc?.();
 											if (rpc === undefined) throw new Error(props.t('memoryRpcUnavailable'));
-											const answer = await rpc('memory/models/download', { model });
+											const answer = await rpc('memory/setup', {});
 											if (!answer.ok) throw new Error(answer.error?.message ?? '操作失败');
 											const next = await rpc('memory/status', {});
 											if (next.ok) setMemoryStatus(parseRagStatus(next.value));

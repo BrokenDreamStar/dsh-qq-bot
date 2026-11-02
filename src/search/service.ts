@@ -34,7 +34,7 @@ export interface SearchServiceOptions {
 	/** 运行中的插件配置（热应用会原地合并，必须惰性读取）。 */
 	config: DshQQConfig;
 	logger: Logger;
-	/** 消息日志（WebUI「消息日志与诊断」卡片）：每次搜索记一条。 */
+	/** 消息日志（WebUI「消息日志」卡片）：每次搜索记一条。 */
 	logs?: MessageLogService;
 	/** 惰性解析 ctx.web（该服务可能晚于本插件装载；缺省 = 宿主没有）。 */
 	getWeb?: () => WebSearchSeamLike | undefined;

@@ -291,8 +291,8 @@ export interface DshQQConfig {
 	pokeReply: string;
 
 	// ── 运行与维护 ──────────────────────────────────────────────
-	// 消息日志与诊断（卡片「消息日志与诊断」）
-	/** 记录 OneBot 收发与 dsh 回复（内存环形缓冲，WebUI「消息日志与诊断」卡片内嵌视图 / /logs 命令查看） */
+	// 消息日志（卡片「消息日志」）
+	/** 记录 OneBot 收发与 dsh 回复（内存环形缓冲，WebUI「消息日志」卡片内嵌视图 / /logs 命令查看） */
 	messageLog: boolean;
 	/** 内存日志条数上限 */
 	messageLogMax: number;
@@ -301,7 +301,7 @@ export interface DshQQConfig {
 	/** 调试日志 */
 	debug: boolean;
 
-	// Agent 与工作目录（卡片「Agent 与工作目录」）
+	// Agent 与目录（卡片「Agent 与目录」）
 	/** 挂载的 Agent 预设 id；空 = 部署默认 */
 	preset: string;
 	/** 未显式 /cwd 切换时的 agent 工作目录：chat = 会话目录；home = 用户主目录（网关模式） */
@@ -472,7 +472,7 @@ export const ConfigSchema = Schema.object({
 	pokeReply: Schema.string().default('').description('戳一戳自动回复文本；空 = 不响应'),
 
 	// ── 运行与维护 ──
-	messageLog: Schema.boolean().default(true).description('启用消息日志：记录 OneBot 收发与 dsh 回复（内存环形缓冲，WebUI「消息日志与诊断」卡片内嵌视图与 /logs 命令查看）'),
+	messageLog: Schema.boolean().default(true).description('启用消息日志：记录 OneBot 收发与 dsh 回复（内存环形缓冲，WebUI「消息日志」卡片内嵌视图与 /logs 命令查看）'),
 	messageLogMax: Schema.number().step(1).min(50).max(10000).default(500).description('内存日志条数上限（超出丢弃最旧条目）'),
 	messageLogToFile: Schema.boolean().default(false).description('消息日志追加落盘到 <dataDir>/message-log.ndjson（NDJSON，超 5MB 轮转），重启后保留'),
 	debug: Schema.boolean().default(false).description('调试日志'),

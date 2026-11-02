@@ -148,7 +148,7 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 	const taskStore = new TaskStore(dataDir, logger);
 	taskStore.init();
 
-	// 消息日志：OneBot 收发 + dsh 回复（WebUI「消息日志与诊断」卡片内嵌视图与 /logs 命令查看）。
+	// 消息日志：OneBot 收发 + dsh 回复（WebUI「消息日志」卡片内嵌视图与 /logs 命令查看）。
 	const logs = new MessageLogService({ logger, dataDir });
 	logs.reconfigure(config);
 
@@ -237,7 +237,7 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 		onStatusChange: () => {
 			if (memoryReady) syncMemoryTools();
 		},
-		// 记忆的关键状态与失败原因进消息日志（WebUI「消息日志与诊断」卡片 + NDJSON）：
+		// 记忆的关键状态与失败原因进消息日志（WebUI「消息日志」卡片 + NDJSON）：
 		// dsh 自己的 logger 在部分部署里不落盘，没有这条通道就查不出"为什么记忆不更新"。
 		note: (event, detail) => {
 			logs.record({ dir: 'sys', scope: 'dsh', event, senderName: '长期记忆', text: detail });
