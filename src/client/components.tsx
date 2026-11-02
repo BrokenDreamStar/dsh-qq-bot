@@ -46,7 +46,14 @@ const css = {
 	modelGridHead: 'dshqq-modelGridHead',
 	modelCard: 'dshqq-modelCard',
 	modelTitle: 'dshqq-modelTitle',
-	modelStates: 'dshqq-modelStates',
+	modelAction: 'dshqq-modelAction',
+	modelName: 'dshqq-modelName',
+	modelInstalled: 'dshqq-modelInstalled',
+	modelProgress: 'dshqq-modelProgress',
+	modelBar: 'dshqq-modelBar',
+	modelBarFill: 'dshqq-modelBarFill',
+	modelBarFillBusy: 'dshqq-modelBarFillBusy',
+	modelPercent: 'dshqq-modelPercent',
 	modelState: 'dshqq-modelState',
 	modelStateOk: 'dshqq-modelStateOk',
 	modelStateBusy: 'dshqq-modelStateBusy',
@@ -1768,36 +1775,78 @@ function ModelStatusCard(props: {
 	title: string;
 	status: RagModelStatusView;
 	progress?: RagProgressView;
+	onDownload?: () => Promise<void> | void;
 }): ReactNode {
-	const { t, title, status } = props;
-	const failed = status.download === 'error' || status.load === 'error';
+	const { t, title, status, progress, onDownload } = props;
+	const [pending, setPending] = useState(false);
+	const [failed, setFailed] = useState<string | null>(null);
+	const downloading = status.download === 'downloading' || status.load === 'loading';
+	const installed = status.download === 'ready' && status.load === 'ready';
+	const broken = status.download === 'error' || status.load === 'error';
+	const percent = progress?.percent;
+	const start = useCallback((): void => {
+		if (onDownload === undefined || pending) return;
+		setPending(true);
+		setFailed(null);
+		void Promise.resolve(onDownload())
+			.catch((error: unknown) => {
+				setFailed(error instanceof Error ? error.message : String(error));
+			})
+			.finally(() => {
+				setPending(false);
+			});
+	}, [onDownload, pending]);
+	const busy = downloading || pending;
+	let action: ReactNode;
+	if (busy) {
+		// 用户明确要求：下载中把按钮换成进度条（拿不到百分比时走不确定态动画）。
+		action = (
+			<span className={css.modelProgress}>
+				<span className={css.modelBar}>
+					<span
+						className={cls(css.modelBarFill, percent === undefined ? css.modelBarFillBusy : undefined)}
+						style={percent === undefined ? undefined : { width: `${Math.max(2, Math.min(100, percent))}%` }}
+					/>
+				</span>
+				<span className={css.modelPercent}>{percent === undefined ? null : `${Math.round(percent)}%`}</span>
+			</span>
+		);
+	} else if (installed) {
+		action = <span className={css.modelInstalled}>{t('memoryModelInstalled')}</span>;
+	} else if (status.download === 'disabled') {
+		action = <span className={cls(css.modelState, css.modelStateOff)}>{t('memoryStateDownloadDisabled')}</span>;
+	} else {
+		action = (
+			<button type="button" className={css.discard} disabled={onDownload === undefined} onClick={start}>
+				{broken ? t('memoryModelRetry') : t('memoryModelDownload')}
+			</button>
+		);
+	}
 	return (
 		<div className={css.modelCard}>
 			<div className={css.modelTitle}>
 				<span>{title}</span>
-				<span className={css.badgeMuted}>{status.id === '' ? '—' : status.id}</span>
+				<span className={css.modelAction}>{action}</span>
 			</div>
-			<div className={css.modelStates}>
-				<span className={cls(css.modelState, modelStateClass(status.download))}>
-					{t('memoryDownloadLabel')}：{modelStateLabel(t, 'download', status.download)}
-					{status.download === 'downloading' && props.progress?.percent !== undefined
-						? ` ${Math.round(props.progress.percent)}%`
-						: ''}
-				</span>
-				<span className={cls(css.modelState, modelStateClass(status.load))}>
-					{t('memoryLoadLabel')}：{modelStateLabel(t, 'load', status.load)}
-				</span>
-			</div>
-			{failed && status.error !== undefined ? <p className={css.failed}>{status.error}</p> : null}
+			<p className={css.modelName} title={status.id}>
+				{status.id === '' ? '—' : status.id}
+			</p>
+			{failed !== null ? <p className={css.failed}>{failed}</p> : null}
+			{broken && status.error !== undefined ? <p className={css.failed}>{status.error}</p> : null}
 		</div>
 	);
 }
 
 /**
- * 本地模型状态：把「文件已下载」与「运行时已加载」拆成两个独立检查点，
- * 避免 ready/FTS-only 混在一起时误判。状态来自 worker 的真实加载流程。
+ * 本地模型状态：两个模型各一张卡，卡片右侧就是操作区——
+ * 未下载显示「下载」，下载中显示进度条，就绪显示「已安装」。
+ * 状态来自 worker 的真实加载流程（模型 id 另起一行显示）。
  */
-function MemoryModelStatusPanel(props: { t: Translate; status: RagStatusView | null }): ReactNode {
+function MemoryModelStatusPanel(props: {
+	t: Translate;
+	status: RagStatusView | null;
+	onDownload?: (model: 'embedding' | 'reranker') => Promise<void> | void;
+}): ReactNode {
 	const { t, status } = props;
 	if (status === null) return <p className={css.hint}>{t('loading')}</p>;
 	const models = status.models ?? {
@@ -1823,8 +1872,20 @@ function MemoryModelStatusPanel(props: { t: Translate; status: RagStatusView | n
 						: ''}
 				</span>
 			</div>
-			<ModelStatusCard t={t} title={t('memoryEmbeddingModelShort')} status={models.embedding} progress={progressOf('embedding')} />
-			<ModelStatusCard t={t} title={t('memoryRerankModelShort')} status={models.reranker} progress={progressOf('reranker')} />
+			<ModelStatusCard
+				t={t}
+				title={t('memoryEmbeddingModelShort')}
+				status={models.embedding}
+				progress={progressOf('embedding')}
+				onDownload={props.onDownload === undefined ? undefined : () => props.onDownload?.('embedding')}
+			/>
+			<ModelStatusCard
+				t={t}
+				title={t('memoryRerankModelShort')}
+				status={models.reranker}
+				progress={progressOf('reranker')}
+				onDownload={props.onDownload === undefined ? undefined : () => props.onDownload?.('reranker')}
+			/>
 			{status.lastError !== undefined ? <p className={css.failed}>{status.lastError}</p> : null}
 		</div>
 	);
@@ -2017,7 +2078,14 @@ function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined
 			) : null}
 			{status !== null ? (
 				<div className={css.logPanel}>
-					<MemoryModelStatusPanel t={t} status={status} />
+					<MemoryModelStatusPanel
+						t={t}
+						status={status}
+						onDownload={async (model) => {
+							await call('memory/models/download', { model });
+							setStatus(parseRagStatus(await call('memory/status')));
+						}}
+					/>
 					<p className={css.hint}>
 						消息 {status.messages} ｜ 片段 {status.chunks} ｜ 技能 {status.skills} ｜ DB={status.db ? '✓' : '✗'} ｜ FTS={status.fts ? '✓' : '✗'} ｜ vec={status.vec ? '✓' : '✗'}
 					</p>
@@ -3161,7 +3229,7 @@ export function DshQQSection(props: CardProps): ReactNode {
 	const tasksActive = activeGroup?.custom === 'tasks';
 	const taskData = useTaskData(getRpc, rpcAvailable && tasksActive);
 	const memoryConfigActive = activeGroup?.id === 'memory';
-	const [memoryStatus] = useMemoryStatus(getRpc, rpcAvailable && memoryConfigActive);
+	const [memoryStatus, setMemoryStatus] = useMemoryStatus(getRpc, rpcAvailable && memoryConfigActive);
 	const transportConnected = useTransportConnected(getRpc);
 	if (!state.available || activeGroup === undefined) return null;
 	const navigation: Array<{ section: string; groups: FieldGroup[] }> = [];
@@ -3261,7 +3329,20 @@ export function DshQQSection(props: CardProps): ReactNode {
 							}
 							extra={logActive ? <LogViewerPanel t={props.t} log={log} /> : undefined}
 							statusBody={
-								memoryConfigActive ? <MemoryModelStatusPanel t={props.t} status={memoryStatus} /> : undefined
+								memoryConfigActive ? (
+									<MemoryModelStatusPanel
+										t={props.t}
+										status={memoryStatus}
+										onDownload={async (model) => {
+											const rpc = getRpc?.();
+											if (rpc === undefined) throw new Error(props.t('memoryRpcUnavailable'));
+											const answer = await rpc('memory/models/download', { model });
+											if (!answer.ok) throw new Error(answer.error?.message ?? '操作失败');
+											const next = await rpc('memory/status', {});
+											if (next.ok) setMemoryStatus(parseRagStatus(next.value));
+										}}
+									/>
+								) : undefined
 							}
 							customBody={customBody}
 							modelOptions={modelOptions}

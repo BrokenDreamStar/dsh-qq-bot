@@ -58,8 +58,19 @@ button.dshqq-header{cursor:pointer}
 .dshqq-modelGridHead{grid-column:1/-1;justify-content:space-between;align-items:center;gap:12px;display:flex}
 .dshqq-modelCard{border:.5px solid var(--dsw-alias-border-l2);border-radius:9px;min-width:0;padding:8px 10px}
 .dshqq-modelTitle{min-width:0;color:var(--dsw-alias-label-primary);justify-content:space-between;align-items:center;gap:8px;font-size:12px;font-weight:600;line-height:1.5;display:flex}
-.dshqq-modelTitle>span:last-child{min-width:0;color:var(--dsw-alias-label-tertiary);font-family:var(--dsw-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:10px;font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dshqq-modelStates{flex-wrap:wrap;align-items:center;gap:5px;margin-top:6px;display:flex}
+/* 「向量模型」「重排模型」四个字必须横排：卡片变窄时不折成两行。 */
+.dshqq-modelTitle>span:first-child{white-space:nowrap;flex:none}
+.dshqq-modelAction{flex:none;align-items:center;gap:6px;display:inline-flex}
+.dshqq-modelAction .dshqq-discard{padding:2px 12px;font-size:12px}
+/* 模型 id 另起一行，长 id 允许换行（等宽字体便于抄写）。 */
+.dshqq-modelName{margin:4px 0 0;color:var(--dsw-alias-label-tertiary);font-family:var(--dsw-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:10px;line-height:1.5;overflow-wrap:anywhere}
+.dshqq-modelInstalled{white-space:nowrap;color:var(--dsw-alias-state-success-primary);font-size:11px;line-height:1.5}
+/* 下载中：按钮位置换成一条迷你进度条（无百分比时走不确定态动画）。 */
+.dshqq-modelProgress{flex:1;align-items:center;gap:6px;min-width:84px;max-width:130px;display:inline-flex}
+.dshqq-modelBar{background:var(--dsw-alias-border-l2);border-radius:999px;flex:1;height:4px;min-width:48px;overflow:hidden;display:block}
+.dshqq-modelBarFill{background:var(--dsw-alias-brand-primary);border-radius:999px;height:100%;transition:width .35s ease;display:block}
+.dshqq-modelBarFillBusy{width:40%;animation:dshqq-progressIndeterminate 1.2s ease-in-out infinite}
+.dshqq-modelPercent{color:var(--dsw-alias-label-tertiary);font-size:10px;font-variant-numeric:tabular-nums;line-height:1.5}
 .dshqq-modelState{corner-shape:round;white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-tertiary);border-radius:999px;padding:1px 7px;font-size:10px;line-height:17px}
 .dshqq-modelStateOk{color:var(--dsw-alias-state-success-primary)}
 .dshqq-modelStateBusy{color:var(--dsw-alias-brand-primary)}

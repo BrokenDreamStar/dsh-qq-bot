@@ -2,7 +2,7 @@
  * 长期记忆 / 技能的 WebUI RPC 端点（宿主半）。
  *
  * 端点：memory/status | memory/search | memory/recent | memory/delete |
- *       memory/reindex | memory/prune | memory/setup |
+ *       memory/reindex | memory/prune | memory/setup | memory/models/download |
  *       skills/list | skills/get | skills/save | skills/delete |
  *       skills/toggle | skills/promote | skills/test | skills/learn
  *
@@ -129,6 +129,13 @@ export async function handleMemoryRpc(
 		}
 		if (endpoint === 'memory/setup') {
 			return ok(await deps.memory.setup());
+		}
+		if (endpoint === 'memory/models/download') {
+			const body = asRecord(payload);
+			const model = body.model === 'embedding' || body.model === 'reranker' ? body.model : undefined;
+			if (model === undefined) return fail('invalid', 'model 必须是 embedding 或 reranker');
+			await deps.memory.downloadModel(model);
+			return ok({ started: true, model });
 		}
 		if (endpoint === 'skills/list') {
 			const body = asRecord(payload);

@@ -368,6 +368,13 @@ export class MemoryService {
 		return { ...this.status, ...(progress !== undefined ? { progress } : {}) };
 	}
 
+	/** 手动下载/重试单个本地模型（WebUI 卡片按钮）；失败时抛错给调用方展示。 */
+	async downloadModel(model: 'embedding' | 'reranker'): Promise<void> {
+		const client = this.client;
+		if (client === undefined) throw new Error('长期记忆尚未启动');
+		await client.downloadModel(model);
+	}
+
 	async prune(): Promise<number> {
 		const removed = await this.client?.prune() ?? 0;
 		this.lastPruneAt = Date.now();

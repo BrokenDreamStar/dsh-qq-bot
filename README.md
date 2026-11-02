@@ -88,7 +88,7 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add link:/path/to/dsh-qq-bo
 | 群成员识别 | 成员名单（TTL + 落盘 + 单飞刷新，含角色与最近发言人）注入 system prompt；引用还原与 @ 语义化 |
 | 聊天记录 | `qq_read_history`：本地内存缓冲 + 对接端历史接口合并，只能读当前会话 |
 | 提问与回答 | agent 的 `ask_user_question`（含计划确认）转发到 QQ，接受 QQ 回复作为答案；与 dsh 界面两边谁先答用谁 |
-| 长期记忆（RAG） | 默认关闭。聊天写入本地 `<数据目录>/memory.db`，按 4 条/400 字切 chunk；FTS5 中文分词 + 可选 `sqlite-vec` 向量召回，开启重排时用本地 bge-reranker-base；相关片段注入 user 尾部（不进 system prompt）。WebUI「记忆库与技能」可查看检索结果、最近片段、运行时状态。embedding 模型固定为 `Xenova/bge-small-zh-v1.5`（512 维）：模型 id 与向量表维度（`float[512]`）绑死，换模型要改代码并把历史重新向量化，所以卡片里只做**只读展示**、不给编辑框；重排模型、下载源与精度只在配置文件里可改（`memoryRerankModel` / `memoryHfEndpoint` / `memoryHfMirror` / `memoryEmbeddingDtype`，默认直连失败自动切 hf-mirror.com、精度 int8）。**没有用户画像/群成员画像/蒸馏** |
+| 长期记忆（RAG） | 默认关闭。聊天写入本地 `<数据目录>/memory.db`，按 4 条/400 字切 chunk；FTS5 中文分词 + 可选 `sqlite-vec` 向量召回，开启重排时用本地 bge-reranker-base；相关片段注入 user 尾部（不进 system prompt）。WebUI「记忆库与技能」可查看检索结果、最近片段、运行时状态，本地模型未下载时可直接在卡片里点「下载」（下载中显示进度条，完成后显示「已安装」）。embedding 模型固定为 `Xenova/bge-small-zh-v1.5`（512 维）：模型 id 与向量表维度（`float[512]`）绑死，换模型要改代码并把历史重新向量化，所以卡片里只做**只读展示**、不给编辑框；重排模型、下载源与精度只在配置文件里可改（`memoryRerankModel` / `memoryHfEndpoint` / `memoryHfMirror` / `memoryEmbeddingDtype`，默认直连失败自动切 hf-mirror.com、精度 int8）。**没有用户画像/群成员画像/蒸馏** |
 | 媒体与互动 | 收图落盘到会话媒体目录并把绝对路径交给 agent；戳一戳自动回复 |
 | 定时任务 | 任务总览与手动管理（启停/改期/删除/立即执行/新建）；任务绑定创建会话；每个任务可选「直接推送」（不调模型）或「agent 执行」 |
 | 人格 | 一张卡两个子分节：〔会话人格〕每个会话目录一份 `SOUL.md`，是人格的唯一生效源，可查看/编辑/恢复默认模板/套用模板，保存后重建当前会话；〔人格模板〕模板增删改（`personas.json`），只用于「还没有 SOUL.md 的会话」播种或手动套用 |
