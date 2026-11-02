@@ -12,7 +12,7 @@ import {
 	SETTINGS_NS,
 	splitModelSpec,
 } from './form.ts';
-import { en, zh } from './locales.ts';
+import { zh } from './locales.ts';
 import { addOrderItem, moveOrderItem, removeOrderItem } from '../search/priority.ts';
 import type { CardState, ConfigForm, ConfigFormSnapshot, SettingsPathOp, SnapshotStore } from './types.ts';
 
@@ -23,25 +23,22 @@ interface CardFace {
 	stageValue: (key: string, value: unknown) => void;
 	stageList: (key: string, items: string[]) => void;
 	stageClear: (key: string) => void;
-	resetField: (key: string) => void;
 	save: (cardId: string) => void;
 	discard: (cardId: string) => void;
 }
 
 describe('字段定义与文案字典', () => {
-	it('每个分组都有 id/分区/标题/描述，每个字段都有 zh/en 的 Label 与 Hint', () => {
+	it('每个分组都有 id/分区/标题/描述，每个字段都有 Label；可编辑字段还有 Hint', () => {
 		for (const group of FIELD_GROUPS) {
 			expect(group.id, 'group id').toBeTruthy();
 			expect(group.sectionKey, `group ${group.id} sectionKey`).toBeTruthy();
 			expect(zh[group.titleKey], `group ${group.titleKey}`).toBeTruthy();
-			expect(en[group.titleKey], `group ${group.titleKey} (en)`).toBeTruthy();
 			expect(zh[group.descKey], `group ${group.descKey}`).toBeTruthy();
-			expect(en[group.descKey], `group ${group.descKey} (en)`).toBeTruthy();
 			for (const def of group.fields) {
-				expect(zh[`${def.key}Label`], `${def.key}Label (zh)`).toBeTruthy();
-				expect(zh[`${def.key}Hint`], `${def.key}Hint (zh)`).toBeTruthy();
-				expect(en[`${def.key}Label`], `${def.key}Label (en)`).toBeTruthy();
-				expect(en[`${def.key}Hint`], `${def.key}Hint (en)`).toBeTruthy();
+				expect(zh[`${def.key}Label`], `${def.key}Label`).toBeTruthy();
+				// 只读项只是"给人看一眼的值"，按用户要求不显示解释性说明，因此没有 Hint。
+				if (def.kind === 'readonly') continue;
+				expect(zh[`${def.key}Hint`], `${def.key}Hint`).toBeTruthy();
 			}
 		}
 	});
@@ -49,6 +46,7 @@ describe('字段定义与文案字典', () => {
 	it('每项说明都是单行一句话，避免长段落把控件撑高', () => {
 		for (const group of FIELD_GROUPS) {
 			for (const def of group.fields) {
+				if (def.kind === 'readonly') continue;
 				const hint = zh[`${def.key}Hint`] ?? '';
 				expect(hint, `${def.key}Hint`).not.toContain('\n');
 				expect((hint.match(/。/g) ?? []).length, `${def.key}Hint 应为一句`).toBeLessThanOrEqual(1);
@@ -57,14 +55,13 @@ describe('字段定义与文案字典', () => {
 		}
 	});
 
-	it('enum 与 orderList 的每个取值都有 zh/en 选项文案', () => {
+	it('enum 与 orderList 的每个取值都有选项文案', () => {
 		for (const group of FIELD_GROUPS) {
 			for (const def of group.fields) {
 				// orderList 的选项同样是 ${key}.${value}（列表行与"加入"按钮都用它）。
 				if ((def.kind !== 'enum' && def.kind !== 'quoteMode' && def.kind !== 'orderList') || def.options === undefined) continue;
 				for (const option of def.options) {
-					expect(zh[`${def.key}.${option}`], `${def.key}.${option} (zh)`).toBeTruthy();
-					expect(en[`${def.key}.${option}`], `${def.key}.${option} (en)`).toBeTruthy();
+					expect(zh[`${def.key}.${option}`], `${def.key}.${option}`).toBeTruthy();
 				}
 			}
 		}
@@ -138,7 +135,6 @@ describe('字段定义与文案字典', () => {
 		expect([...seen]).toEqual(['sectionAccess', 'sectionChat', 'sectionRuntime']);
 		for (const key of seen) {
 			expect(zh[key], key).toBeTruthy();
-			expect(en[key], `${key} (en)`).toBeTruthy();
 		}
 	});
 
@@ -147,8 +143,7 @@ describe('字段定义与文案字典', () => {
 			const subs = group.fields.map((def) => def.sub);
 			for (const sub of new Set(subs)) {
 				if (sub === undefined) continue;
-				expect(zh[sub], `${sub} (zh)`).toBeTruthy();
-				expect(en[sub], `${sub} (en)`).toBeTruthy();
+				expect(zh[sub], sub).toBeTruthy();
 			}
 			// 渲染器只在标签变化处插一次小标题，不连续的重复标签会渲染两次。
 			const runs = subs.filter((sub, index) => index === 0 || sub !== subs[index - 1]);
@@ -232,7 +227,6 @@ describe('字段定义与文案字典', () => {
 			'groupRoutes', 'groupRoutesDesc', 'groupTasks', 'groupTasksDesc',
 		]) {
 			expect(zh[key], key).toBeTruthy();
-			expect(en[key], `${key} (en)`).toBeTruthy();
 		}
 	});
 });
@@ -450,11 +444,11 @@ describe('DshQQCardController（按卡暂存/保存）', () => {
 		expect(state.fields.replyMaxChars.invalid).toBe(true);
 	});
 
-	it('resetField 走 unset（恢复组合层默认），且随所在卡保存', async () => {
+	it('stageClear 走 unset（退回组合层默认），且随所在卡保存', async () => {
 		const fake = fakeScope({ value: { replyMaxChars: 3000, url: 'ws://a' }, user: { replyMaxChars: 3000 } });
 		const face = new DshQQCardController(fake.scope).inject() as unknown as CardFace;
 		expect(face.hooks.dshQQCard.getSnapshot().fields.replyMaxChars.overridden).toBe(true);
-		face.resetField('replyMaxChars');
+		face.stageClear('replyMaxChars');
 		face.edit('url', 'ws://b');
 		face.save('reply');
 		await settle();
@@ -574,11 +568,11 @@ describe('DshQQCardController（按卡暂存/保存）', () => {
 		expect(covered.committed[0]).toEqual([{ op: 'unset', path: ['userTools'] }]);
 	});
 
-	it('toolList：resetField 暂存恢复手势，保存走 unset', async () => {
+	it('toolList：stageClear 暂存清空手势，保存走 unset', async () => {
 		const fake = fakeScope({ value: { userTools: ['bash'] }, user: { userTools: ['bash'] } });
 		const face = new DshQQCardController(fake.scope).inject() as unknown as CardFace;
 		expect(face.hooks.dshQQCard.getSnapshot().fields.userTools.overridden).toBe(true);
-		face.resetField('userTools');
+		face.stageClear('userTools');
 		let state = face.hooks.dshQQCard.getSnapshot();
 		expect(state.fields.userTools.overridden).toBe(false);
 		expect(state.fields.userTools.values).toEqual(['bash']);
@@ -693,17 +687,17 @@ describe('DshQQCardController（按卡暂存/保存）', () => {
 		expect(fake.committed).toHaveLength(0);
 	});
 
-	it('modelSelect：resetField 把两个路径一起退回组合层', async () => {
+	it('modelSelect：stageClear 把两个路径一起退回组合层', async () => {
 		const fake = fakeScope({
 			value: { memorySkillProvider: 'deepseek-official', memorySkillModel: 'deepseek-chat' },
 			user: { memorySkillProvider: 'deepseek-official', memorySkillModel: 'deepseek-chat' },
 		});
 		const face = new DshQQCardController(fake.scope).inject() as unknown as CardFace;
 		expect(face.hooks.dshQQCard.getSnapshot().fields.memorySkillModel.overridden).toBe(true);
-		face.resetField('memorySkillModel');
+		face.stageClear('memorySkillModel');
 		const state = face.hooks.dshQQCard.getSnapshot();
 		expect(state.fields.memorySkillModel.text).toBe('');
-		// 「恢复默认」是"退回组合层"手势：保存后不再有覆盖（与 toolList 同类语义）。
+		// 清空是"退回组合层"手势：保存后不再有覆盖（与 toolList 同类语义）。
 		expect(state.fields.memorySkillModel.overridden).toBe(false);
 		expect(state.cards.memory.dirty).toBe(true);
 		face.save('memory');

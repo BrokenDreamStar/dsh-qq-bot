@@ -660,10 +660,6 @@ export class DshQQCardController {
 			stageClear: (key: string) => {
 				this.stage(key, { text: '', clear: true });
 			},
-			resetField: (key: string) => {
-				const def = this.def(key);
-				this.stage(key, { text: this.fieldText(def, 'base'), clear: true });
-			},
 			save: (cardId: string) => {
 				void this.save(cardId);
 			},
@@ -796,7 +792,7 @@ export class DshQQCardController {
 			const def = this.def(key);
 			const current = this.sectionValue(def);
 			// modelSelect 必须在通用 clear 分支之前：一次选择要写两个路径，
-			// resetField 的恢复手势也要把两个路径一起退回组合层。
+			// 清空（clear）手势也要把两个路径一起退回组合层。
 			if (def.kind === 'modelSelect') {
 				const spec = staged.clear ? '' : typeof staged.value === 'string' ? staged.value : staged.text;
 				this.planModelWrite(def, spec.trim(), ops, verify);

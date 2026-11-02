@@ -13,7 +13,7 @@
 import { DshQQSection } from './components.tsx';
 import { DshQQCardController, SETTINGS_NS } from './form.ts';
 import { installNavIcon } from './icon.ts';
-import { LOCALE_NS, en, zh } from './locales.ts';
+import { LOCALE_NS, zh } from './locales.ts';
 import { injectCardCss } from './style.ts';
 import type { ClientConnectionLike, ClientCtx, RpcCaller } from './types.ts';
 
@@ -28,14 +28,17 @@ export function apply(ctx: ClientCtx): void {
 	injectCardCss('@deepseek-ai/dsh-qq-bot/section.css', 'dsh-qq-bot');
 	ctx.effect(() => {
 		const removeZh = ctx.locale.register(LOCALE_NS, 'zh', zh);
-		const removeEn = ctx.locale.register(LOCALE_NS, 'en', en);
+		// 界面文案只维护中文（不提供英文译文）：英文界面也注册同一份中文，
+		// 否则宿主按 en 取词会全部回退成 key（页面上显示 nav / groupMemory 之类）。
+		const removeEn = ctx.locale.register(LOCALE_NS, 'en', zh);
 		return () => {
 			removeZh();
 			removeEn();
 		};
 	}, 'dsh-qq-bot: section dictionaries');
 	// shell 对未知 section id 回退齿轮图标，这里把本插件条目的图标换为 QQ。
-	installNavIcon(ctx, [zh.nav, en.nav].filter((label): label is string => typeof label === 'string' && label !== ''));
+	const navLabel = zh.nav;
+	installNavIcon(ctx, navLabel === undefined ? [] : [navLabel]);
 
 	// describe 镜像携带宿主注入的工具选项（userTools/blockedTools 选择框）。
 	// dsh ≥ 0.2.1 的 ConfigForms 按 profile entry id 取表单（id 与插件 id 一致）。

@@ -157,7 +157,6 @@ export interface CardProps extends Record<string, unknown> {
 	stageValue: (key: string, value: unknown) => void;
 	stageList: (key: string, items: string[]) => void;
 	stageClear: (key: string) => void;
-	resetField: (key: string) => void;
 	save: (cardId: string) => void;
 	discard: (cardId: string) => void;
 	/** 惰性取宿主 RPC 调用器（connection 服务晚于本插件就绪时每次拉取重取）。 */
@@ -280,7 +279,7 @@ function useMessageLog(getRpc: (() => RpcCaller | undefined) | undefined, active
 			const result = await call('logs/recent', { limit: LOG_VIEW_MAX });
 			if (signal.aborted) return;
 			if (!result.ok) {
-				setFailed(result.error?.message ?? 'error');
+				setFailed(result.error?.message ?? '操作失败');
 				return;
 			}
 			setFailed(null);
@@ -621,7 +620,7 @@ function usePersonaModelData(getRpc: (() => RpcCaller | undefined) | undefined, 
 			const firstError = !personasAnswer.ok ? personasAnswer : !routesAnswer.ok ? routesAnswer : undefined;
 			if (firstError !== undefined && !firstError.ok) {
 				setStatus('error');
-				setFailed(firstError.error?.message ?? 'error');
+				setFailed(firstError.error?.message ?? '操作失败');
 				return;
 			}
 			setPersonas(parsePersonaList(personasAnswer.value));
@@ -657,7 +656,7 @@ function usePersonaModelData(getRpc: (() => RpcCaller | undefined) | undefined, 
 		}
 		const answer = await call('personas/save', { personas: next });
 		if (!answer.ok) {
-			const error = answer.error?.message ?? 'error';
+			const error = answer.error?.message ?? '操作失败';
 			setFailed(error);
 			return { ok: false, error };
 		}
@@ -675,7 +674,7 @@ function usePersonaModelData(getRpc: (() => RpcCaller | undefined) | undefined, 
 			}
 			const answer = await call('routes/save', { rows: next, default: nextDefault });
 			if (!answer.ok) {
-				const error = answer.error?.message ?? 'error';
+				const error = answer.error?.message ?? '操作失败';
 				setFailed(error);
 				return { ok: false, error };
 			}
@@ -1220,7 +1219,7 @@ function SoulPanel(props: {
 			}
 			const answer = await rpc(endpoint, payload);
 			if (!answer.ok) {
-				setFailed(answer.error?.message ?? 'error');
+				setFailed(answer.error?.message ?? '操作失败');
 				return null;
 			}
 			setFailed(null);
@@ -1482,7 +1481,7 @@ function useTaskData(getRpc: (() => RpcCaller | undefined) | undefined, active: 
 			const answer = await call('tasks/list');
 			if (!answer.ok) {
 				setStatus('error');
-				setFailed(answer.error?.message ?? 'error');
+				setFailed(answer.error?.message ?? '操作失败');
 				return;
 			}
 			setTasks(parseTaskViews(answer.value));
@@ -1513,7 +1512,7 @@ function useTaskData(getRpc: (() => RpcCaller | undefined) | undefined, active: 
 			}
 			const answer = await call(endpoint, payload);
 			if (!answer.ok) {
-				const error = answer.error?.message ?? 'error';
+				const error = answer.error?.message ?? '操作失败';
 				setFailed(error);
 				return { ok: false, error };
 			}
@@ -2020,7 +2019,7 @@ function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined
 				<div className={css.logPanel}>
 					<MemoryModelStatusPanel t={t} status={status} />
 					<p className={css.hint}>
-						{status.messages} messages ｜ {status.chunks} chunks ｜ {status.skills} skills ｜ DB={status.db ? '✓' : '✗'} ｜ FTS={status.fts ? '✓' : '✗'} ｜ vec={status.vec ? '✓' : '✗'}
+						消息 {status.messages} ｜ 片段 {status.chunks} ｜ 技能 {status.skills} ｜ DB={status.db ? '✓' : '✗'} ｜ FTS={status.fts ? '✓' : '✗'} ｜ vec={status.vec ? '✓' : '✗'}
 					</p>
 				</div>
 			) : null}
@@ -2030,7 +2029,7 @@ function MemoryPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined
 					{chunks.map((item) => (
 						<div key={item.id} className={css.logPanel}>
 							<p className={css.hint}>
-								#{item.id} ｜ {formatChunkTime(item.ts)} ｜ score={item.score.toFixed(3)}
+								#{item.id} ｜ {formatChunkTime(item.ts)} ｜ 分数={item.score.toFixed(3)}
 							</p>
 							<pre className={css.hint}>{item.text}</pre>
 							<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void deleteChunk(item.id)}>
@@ -2417,36 +2416,21 @@ interface RowProps {
 	onEdit: (key: string, text: string) => void;
 	onStageValue: (key: string, value: unknown) => void;
 	onStageList: (key: string, items: string[]) => void;
-	onReset: (key: string) => void;
 	onStageClear: (key: string) => void;
 }
 
 /**
- * 头部：label + 覆盖时的「恢复默认」。
- * user 层有覆盖时不再显示"已覆盖"角标（保存后满屏角标噪音太大），
- * 只保留就地恢复默认的入口。
+ * 头部：只有 label。
+ * 用户明确要求去掉逐字段的「恢复默认」入口（连"已覆盖"角标一起）：
+ * 想撤销某个字段在 user 层的覆盖，只能改 profile 配置或整卡放弃草稿。
  */
 function FieldHead(props: RowProps & { htmlFor: string }): ReactNode {
-	const { def, state, t, disabled } = props;
+	const { def, t } = props;
 	return (
 		<div className={css.head}>
 			<label className={css.label} htmlFor={props.htmlFor}>
 				{t(`${def.key}Label`)}
 			</label>
-			{state.overridden ? (
-				<span className={css.badges}>
-					<button
-						type="button"
-						className={css.reset}
-						disabled={disabled}
-						onClick={() => {
-							props.onReset(def.key);
-						}}
-					>
-						{t('reset')}
-					</button>
-				</span>
-			) : null}
 		</div>
 	);
 }
@@ -2700,23 +2684,9 @@ function OrderListRow(props: RowProps): ReactNode {
 	};
 	return (
 		<div className={css.field}>
-			{/* 列表不是可标注（labelable）控件，所以头部与 SwitchRow 一样自己渲染 label + 恢复默认。 */}
+			{/* 列表不是可标注（labelable）控件，所以头部与 SwitchRow 一样自己渲染 label。 */}
 			<div className={css.head}>
 				<span className={css.label}>{t(`${def.key}Label`)}</span>
-				{state.overridden ? (
-					<span className={css.badges}>
-						<button
-							type="button"
-							className={css.reset}
-							disabled={disabled}
-							onClick={() => {
-								props.onReset(def.key);
-							}}
-						>
-							{t('reset')}
-						</button>
-					</span>
-				) : null}
 			</div>
 			<ol className={css.orderList} role="group" aria-label={t(`${def.key}Label`)}>
 				{items.map((entry, index) => (
@@ -2789,24 +2759,13 @@ function OrderListRow(props: RowProps): ReactNode {
 }
 
 /** 开关（boolean）。 */
-function SwitchRow(props: RowProps): ReactNode {	const { def, state, t, disabled } = props;
+function SwitchRow(props: RowProps): ReactNode {
+	const { def, state, t, disabled } = props;
 	return (
 		<div className={css.field}>
 			<div className={css.toggleRow}>
 				<span className={css.label}>{t(`${def.key}Label`)}</span>
 				<span className={css.badges}>
-					{state.overridden ? (
-						<button
-							type="button"
-							className={css.reset}
-							disabled={disabled}
-							onClick={() => {
-								props.onReset(def.key);
-							}}
-						>
-							{t('reset')}
-						</button>
-					) : null}
 					<button
 						type="button"
 						role="switch"
@@ -2874,6 +2833,7 @@ function SecretRow(props: RowProps): ReactNode {
  * 只读展示行：值由代码或配置文件决定，界面上能看不能改。
  * 用于和存储格式绑死的参数（embedding 模型 id ↔ 向量表维度），
  * 避免给用户一个"改了会静默坏"的输入框，同时保留可见性。
+ * 用户明确要求不显示「只读」角标和解释性说明，所以这里只有 label + 值。
  */
 function ReadonlyRow(props: RowProps): ReactNode {
 	const { def, state, t } = props;
@@ -2881,12 +2841,8 @@ function ReadonlyRow(props: RowProps): ReactNode {
 		<div className={css.field}>
 			<div className={css.head}>
 				<span className={css.label}>{t(`${def.key}Label`)}</span>
-				<span className={css.badges}>
-					<span className={css.badgeMuted}>{t('readonlyBadge')}</span>
-				</span>
 			</div>
 			<code className={css.readonlyValue}>{state.text}</code>
-			<p title={t(`${def.key}Hint`)} className={cls(css.hint, css.fieldHint)}>{t(`${def.key}Hint`)}</p>
 		</div>
 	);
 }
@@ -3053,7 +3009,6 @@ function GroupCard(
 				onEdit={props.edit}
 				onStageValue={props.stageValue}
 				onStageList={props.stageList}
-				onReset={props.resetField}
 				onStageClear={props.stageClear}
 			/>,
 		);

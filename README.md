@@ -193,7 +193,7 @@ dsh WebUI 的**设置**左列有独立的「qq-bot 配置」入口（需 dsh ≥
 - 每个折叠卡片**独立暂存与保存**，保存后不收起，展开态写入 sessionStorage（刷新后仍保持）
 - 保存通过 dsh 的 settings/config-editor 写入当前 profile 的 `cordis.patch.yml`（revision fence 防并发覆盖），bundle/patch 默认值继续生效
 - 配置字段在 schema 上标记为 `.volatile()`：dsh 以稳定引用热更新，不重启插件；插件监听 `loader/volatile-update` 原地合并（连接参数变化会自动重建 transport）
-- 只读部署自动禁用；中英双语跟随 WebUI 语言
+- 只读部署自动禁用；界面文案只做中文（不维护英文译文，英文界面同样显示中文）
 - `accessToken` 与各 API Key 为**只写字段**（宿主脱敏、永不回显，留空保存 = 保持不变）
 - 「人格」「会话模型设置」「定时任务」的数据走插件自建 RPC（编辑 `personas.json` / `SOUL.md` / `chat-overrides.json` / `tasks.json`），保存后所有会话下一条消息即按新配置重建（历史保留）
 
@@ -274,6 +274,7 @@ dsh 还在 developer preview，API 可能有破坏性变更。所有 dsh API 调
 
 - `docs/memory-design.md` — 长期记忆 RAG + 自演进技能的设计与取舍
 - `docs/memory-market-research.md` — 同类插件/记忆层/产品级实现的市场调研与改造建议
+- `docs/auto-deploy.md` — 推送到 Gitea 后由远端定时器自动拉取、构建、测试并重启
 
 ## License
 
