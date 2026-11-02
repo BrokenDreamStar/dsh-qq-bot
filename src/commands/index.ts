@@ -122,7 +122,7 @@ export const COMMANDS: Record<string, CommandDef> = {
 				`会话 id：${ctx.bridge.sessionIdString}`,
 				`写句柄：${ctx.bridge.dispositionText()}`,
 				...(ctx.bridge.hasPendingQuestion() ? ['提问：agent 正在等本会话的回答（问题已发到 QQ，直接回复即算答案）'] : []),
-				`模型：${info.spec === '' ? '部署默认' : info.spec}（${describeModelSource(info.source)}）`,
+				`模型：${info.spec === '' ? '部署默认' : info.spec}${info.effort === undefined ? '' : `（思考强度 ${info.effort}）`}（${describeModelSource(info.source)}）`,
 				`Token 累计：输入 ${usage.input} / 输出 ${usage.output}`,
 				cwdLine,
 			];

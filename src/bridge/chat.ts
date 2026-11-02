@@ -50,6 +50,8 @@ import { ChatSessionStore, readLegacySessionMarker } from './sessionStore.ts';
 import {
 	describeModelSource,
 	formatModelSpec,
+	formatSelectionKey,
+	resolveChatEffort,
 	resolveChatModel,
 	type ModelSource,
 	type ResolvedChatModel,
@@ -557,7 +559,7 @@ export class ChatBridge {
 	}
 	/**
 	 * 人格/模型配置的候选键：先精确 chatKey（命令写入），再号码级键
-	 * （WebUI「人格与模型」表格）。perUser 群会话的键是
+	 * （WebUI「会话模型设置」表格）。perUser 群会话的键是
 	 * `g-<群号>-u-<QQ号>`，需要回落到群级 `g-<群号>`。
 	 */
 	private routeKeys(): readonly string[] {
@@ -571,30 +573,45 @@ export class ChatBridge {
 		return resolveChatModel({ override: this.options.store.getChatModel(this.routeKeys()), configDefault: this.options.store.defaultModel() });
 	}
 
-	/** 路由模型 → AgentOptions：只写了 model 时用部署默认 provider 补齐。 */
-	private agentOptionsFor(resolved: ResolvedChatModel): AgentOptions {
-		if (resolved.model === undefined) return this.services.agentDefaultModel.currentSelection();
-		const provider = resolved.model.provider ?? this.services.agentDefaultModel.currentSelection().provider;
-		if (provider !== undefined && provider !== '') return { provider, model: resolved.model.model };
-		return { model: resolved.model.model };
+	/** 会话生效思考强度：会话/号码行 > 「默认会话」行 > 空（= 模型默认）。 */
+	private resolveEffort(): string | undefined {
+		return resolveChatEffort({ override: this.options.store.getChatEffort(this.routeKeys()), configDefault: this.options.store.defaultEffort() });
 	}
 
-	/** 当前应有的 agent 模型参数、其文本签名与来源。 */
-	private currentModel(): { options: AgentOptions; spec: string; source: ModelSource } {
+	/**
+	 * 路由模型 + 思考强度 → AgentOptions：只写了 model 时用部署默认 provider 补齐；
+	 * 强度为空时不写该字段（交给模型/适配器默认）。
+	 */
+	private agentOptionsFor(resolved: ResolvedChatModel, effort: string | undefined): AgentOptions {
+		const options: AgentOptions = {};
+		if (resolved.model === undefined) {
+			Object.assign(options, this.services.agentDefaultModel.currentSelection());
+		} else {
+			const provider = resolved.model.provider ?? this.services.agentDefaultModel.currentSelection().provider;
+			if (provider !== undefined && provider !== '') options.provider = provider;
+			options.model = resolved.model.model;
+		}
+		if (effort !== undefined && effort !== '') options.reasoningEffort = effort as NonNullable<AgentOptions['reasoningEffort']>;
+		return options;
+	}
+
+	/** 当前应有的 agent 模型参数、其变更签名（模型#强度）与来源。 */
+	private currentModel(): { options: AgentOptions; spec: string; effort: string | undefined; source: ModelSource } {
 		const resolved = this.resolveModel();
-		const options = this.agentOptionsFor(resolved);
-		return { options, spec: formatModelSpec(options), source: resolved.source };
+		const effort = this.resolveEffort();
+		const options = this.agentOptionsFor(resolved, effort);
+		return { options, spec: formatModelSpec(options), effort, source: resolved.source };
 	}
 
 	/** 对外展示的生效模型（agent 未创建时同样可用；/model、/status 用）。 */
-	modelInfo(): { spec: string; source: ModelSource } {
-		const { spec, source } = this.currentModel();
-		return { spec, source };
+	modelInfo(): { spec: string; effort: string | undefined; source: ModelSource } {
+		const { spec, effort, source } = this.currentModel();
+		return { spec, effort, source };
 	}
 
 	private async initializeAgent(waitOnBusy = true): Promise<AgentHandle> {
-		const { options: agentOptions, spec } = this.currentModel();
-		this.activeModelSpec = spec;
+		const { options: agentOptions, spec, effort } = this.currentModel();
+		this.activeModelSpec = formatSelectionKey(spec, effort);
 		await this.awaitPendingDispose();
 		this.handle = await this.openAgent(agentOptions, waitOnBusy);
 		this.handleSessionId = this.sessionId;
@@ -999,7 +1016,14 @@ export class ChatBridge {
 	private async setupAgent(agentCtx: Parameters<NonNullable<import('@deepseek-ai/dsh-agent').CreateAgentOptions['setup']>>[0], agentOptions: AgentOptions): Promise<void> {
 		if (agentOptions.provider !== undefined && agentOptions.model !== undefined) {
 			try {
-				installModelSelection(agentCtx, { current: { provider: agentOptions.provider, model: agentOptions.model }, assembled: undefined });
+				installModelSelection(agentCtx, {
+					current: {
+						provider: agentOptions.provider,
+						model: agentOptions.model,
+						...(agentOptions.reasoningEffort === undefined ? {} : { reasoningEffort: agentOptions.reasoningEffort }),
+					},
+					assembled: undefined,
+				});
 			} catch (error) {
 				this.logger.warn(`dsh-qq-bot: installModelSelection 失败: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -1543,9 +1567,12 @@ export class ChatBridge {
 	 */
 	private async applyModelChange(): Promise<void> {
 		if (this.handle === null) return;
-		const { spec, source } = this.currentModel();
-		if (spec === this.activeModelSpec) return;
-		this.logger.info(`dsh-qq-bot: ${this.label} 模型变更 ${this.activeModelSpec === '' ? '默认' : this.activeModelSpec} → ${spec === '' ? '默认' : spec}（${describeModelSource(source)}），重建会话`);
+		const { spec, effort, source } = this.currentModel();
+		const next = formatSelectionKey(spec, effort);
+		if (next === this.activeModelSpec) return;
+		this.logger.info(
+			`dsh-qq-bot: ${this.label} 模型变更 ${this.activeModelSpec === '' ? '默认' : this.activeModelSpec} → ${next === '' ? '默认' : next}（${describeModelSource(source)}），重建会话`,
+		);
 		await this.disposeHandle();
 	}
 
@@ -1948,8 +1975,8 @@ export class ChatBridgeManager {
 	}
 
 	/**
-	 * 人格库 / 人格与模型映射变化后重建全部会话桥：只丢弃 handle，
-	 * 会话 id 与历史保留，下一条消息重新走 setup 以新人格与模型实例化。
+	 * 人格库 / 会话模型设置映射变化后重建全部会话桥：只丢弃 handle，
+	 * 会话 id 与历史保留，下一条消息重新走 setup 以新会话模型设置实例化。
 	 *
 	 * 丢弃后**立刻重新占住**：handle 空着这段时间正是界面刷新就能把写句柄抢走的
 	 * 窗口（同 warmup）。重占是后台 best-effort，不阻塞 WebUI 的保存请求。

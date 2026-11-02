@@ -198,7 +198,7 @@ describe('字段定义与文案字典', () => {
 		expect(hosts[0]?.fields.map((def) => def.key)).toEqual(['messageLog', 'messageLogMax', 'messageLogToFile', 'debug']);
 	});
 
-	it('人格、人格与模型、定时任务、记忆库是四张自定义卡片，位于 Agent 之前且没有 schema 字段', () => {
+	it('人格、会话模型设置、定时任务、记忆库是四张自定义卡片，位于 Agent 之前且没有 schema 字段', () => {
 		const custom = FIELD_GROUPS.filter((group) => group.custom !== undefined);
 		expect(custom.map((group) => group.id)).toEqual(['memoryItems', 'tasks', 'personas', 'routes']);
 		expect(custom.map((group) => group.custom)).toEqual(['memory', 'tasks', 'personas', 'routes']);

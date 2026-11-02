@@ -70,6 +70,34 @@ describe('listModelOptions', () => {
 		expect(options[1]).toMatchObject({ provider: 'openai', model: 'gpt', name: 'GPT' });
 	});
 
+	it('带出每个模型的思考强度与默认强度，并标记部署默认项', async () => {
+		const llm: LlmServiceLike = {
+			listProviders: () => ['dsh'],
+			listModels: async () => [{ id: 'base', name: 'Base' }],
+			resolveModelInfo: async (_provider: string, model: string) => ({
+				id: model,
+				reasoning: { efforts: [{ id: 'low', name: '低' }, { id: 'high', name: '高', description: '慢而稳' }], defaultEffort: 'low' },
+			}),
+		};
+		const options = await listModelOptions({ getLlm: () => llm, getDefaultModel: () => ({ provider: 'dsh', model: 'base' }), logger });
+		expect(options[0]).toMatchObject({ spec: 'dsh/base', isDefault: true, defaultEffort: 'low' });
+		expect(options[0]?.efforts.map((effort) => effort.id)).toEqual(['low', 'high']);
+		expect(options[0]?.efforts[1]).toMatchObject({ name: '高', description: '慢而稳' });
+	});
+
+	it('resolveModelInfo 抛错时只丢强度，不影响模型清单', async () => {
+		const llm: LlmServiceLike = {
+			listProviders: () => ['dsh'],
+			listModels: async () => [{ id: 'base' }],
+			resolveModelInfo: async () => {
+				throw new Error('boom');
+			},
+		};
+		const options = await listModelOptions({ getLlm: () => llm, getDefaultModel: () => ({ provider: 'dsh', model: 'base' }), logger });
+		expect(options.map((option) => option.spec)).toEqual(['dsh/base']);
+		expect(options[0]?.efforts).toEqual([]);
+	});
+
 	it('llm 缺失时只有部署默认', async () => {
 		const options = await listModelOptions({ getLlm: () => undefined, getDefaultModel: () => ({ provider: 'dsh', model: 'base' }), logger });
 		expect(options.map((option) => option.spec)).toEqual(['dsh/base']);
@@ -129,13 +157,14 @@ describe('handlePersonaRpc', () => {
 		expect(result).toMatchObject({ ok: true, value: { rows: [{ chat: 'group_9', model: 'a/b' }] } });
 	});
 
-	it('routes/save 的默认会话行落到 default 保留键并即时生效', async () => {
+	it('routes/save 的默认会话行落到 default 保留键并即时生效（模型 + 思考强度）', async () => {
 		const { deps, store, refresh } = makeDeps();
-		const saved = await handlePersonaRpc('routes/save', { rows: [], default: { persona: 'default', model: 'dsh/base' } }, deps);
-		expect(saved).toMatchObject({ ok: true, value: { default: { persona: 'default', model: 'dsh/base' } } });
+		const saved = await handlePersonaRpc('routes/save', { rows: [], default: { model: 'dsh/base', effort: 'high' } }, deps);
+		expect(saved).toMatchObject({ ok: true, value: { default: { model: 'dsh/base', effort: 'high' } } });
 		expect(store.defaultModel()).toBe('dsh/base');
+		expect(store.defaultEffort()).toBe('high');
 		const listed = await handlePersonaRpc('routes/list', undefined, deps);
-		expect(listed).toMatchObject({ ok: true, value: { default: { persona: 'default', model: 'dsh/base' }, libraryDefault: 'default' } });
+		expect(listed).toMatchObject({ ok: true, value: { default: { model: 'dsh/base', effort: 'high' }, libraryDefault: 'default' } });
 		// 默认行不混进号码行。
 		expect(store.mappings()).toEqual([]);
 		// 显式清空默认行。
@@ -143,6 +172,32 @@ describe('handlePersonaRpc', () => {
 		expect(cleared).toMatchObject({ ok: true, value: { default: {} } });
 		expect(store.defaultMapping()).toBeNull();
 		expect(refresh).toHaveBeenCalledTimes(2);
+	});
+
+	it('routes/save 带思考强度：号码行回显 effort，且不抹掉旧版人格列', async () => {
+		const { deps, store } = makeDeps();
+		await handlePersonaRpc('personas/save', { personas: [{ name: 'default', prompt: 'D' }, { name: '冷淡', prompt: '话少' }] }, deps);
+		await handlePersonaRpc('routes/save', { rows: [{ chat: 'friend_7', persona: '冷淡', model: 'a/b' }] }, deps);
+		await handlePersonaRpc('routes/save', { rows: [{ chat: 'friend_7', model: 'a/b', effort: 'max' }] }, deps);
+		const listed = await handlePersonaRpc('routes/list', undefined, deps);
+		expect(listed).toMatchObject({ ok: true, value: { rows: [{ chat: 'friend_7', model: 'a/b', effort: 'max' }] } });
+		expect(store.resolve('u-7').name).toBe('冷淡');
+	});
+
+	it('personas/default 只改新会话默认模板，保留同一行的模型与强度', async () => {
+		const { deps, store } = makeDeps();
+		await handlePersonaRpc('routes/save', { rows: [], default: { model: 'dsh/base', effort: 'low' } }, deps);
+		await handlePersonaRpc('personas/save', { personas: [{ name: 'a', prompt: 'A' }, { name: 'b', prompt: 'B' }] }, deps);
+		const saved = await handlePersonaRpc('personas/default', { name: 'b' }, deps);
+		expect(saved).toMatchObject({ ok: true, value: { defaultTemplate: 'b' } });
+		expect(store.defaultPersonaSeed()).toBe('b');
+		expect(store.defaultModel()).toBe('dsh/base');
+		expect(store.defaultEffort()).toBe('low');
+		// 空串 = 回到人格库默认。
+		await handlePersonaRpc('personas/default', { name: '' }, deps);
+		expect(store.defaultPersonaSeed()).toBeUndefined();
+		const bad = await handlePersonaRpc('personas/default', { name: 'missing' }, deps);
+		expect(bad).toMatchObject({ ok: false, error: { code: 'not-found' } });
 	});
 
 	it('routes/save 不带 default 字段时保留默认行（老客户端）', async () => {

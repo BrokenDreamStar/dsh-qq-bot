@@ -2,12 +2,15 @@
  * 模型规格的解析与展示（纯逻辑，可测）。
  *
  * 模型来自两处，都会归一为 `provider/model` 文本后交给 dsh：
- *  - WebUI「人格与模型」表格的模型下拉（宿主 RPC 写入 chat-overrides.json）；
+ *  - WebUI「会话模型设置」表格的模型下拉（宿主 RPC 写入 chat-overrides.json）；
  *  - 会话内 `/model provider/model` 命令。
  *
+ * 思考强度（dsh 的 reasoningEffort，适配器自有的 id 字符串）走同一份存储、
+ * 同一套优先级；空 = 交给模型/适配器默认。
+ *
  * 生效优先级（高 → 低）：
- *   1. 会话内 `/model` 覆盖 / WebUI 表格里该号码的模型（同一份存储）
- *   2. WebUI「人格与模型」卡片「默认会话」行的模型
+ *   1. 会话内 `/model` 覆盖 / WebUI 表格里该号码的行（同一份存储）
+ *   2. WebUI「会话模型设置」卡片「默认会话」行
  *   3. dsh 部署默认模型
  */
 
@@ -36,9 +39,9 @@ export function formatModelSpec(spec: { provider?: string; model?: string }): st
 }
 
 export type ModelSource =
-	/** 会话内 /model 覆盖或 WebUI「人格与模型」表格里的模型。 */
+	/** 会话内 /model 覆盖或 WebUI「会话模型设置」表格里的行。 */
 	| { kind: 'chatOverride' }
-	/** WebUI「人格与模型」卡片「默认会话」行的模型。 */
+	/** WebUI「会话模型设置」卡片「默认会话」行。 */
 	| { kind: 'configDefault' }
 	/** dsh 部署默认模型。 */
 	| { kind: 'default' };
@@ -62,9 +65,24 @@ export function resolveChatModel(input: { override?: string; configDefault?: str
 	return { source: { kind: 'default' } };
 }
 
+/**
+ * 解析某会话的思考强度（会话/号码行 > 默认会话行 > 空 = 模型默认）。
+ * id 是适配器自有的不透明字符串，这里只做去空白，不校验取值。
+ */
+export function resolveChatEffort(input: { override?: string; configDefault?: string }): string | undefined {
+	if (input.override !== undefined && input.override.trim() !== '') return input.override.trim();
+	if (input.configDefault !== undefined && input.configDefault.trim() !== '') return input.configDefault.trim();
+	return undefined;
+}
+
+/** 模型 + 思考强度 → 变更签名（换模型或换强度都要重建 agent）。 */
+export function formatSelectionKey(spec: string, effort: string | undefined): string {
+	return effort === undefined || effort === '' ? spec : `${spec}#${effort}`;
+}
+
 /** 来源的中文描述（/model、/status 与日志用）。 */
 export function describeModelSource(source: ModelSource): string {
 	if (source.kind === 'chatOverride') return '本会话 /model 或 WebUI 模型配置';
-	if (source.kind === 'configDefault') return 'WebUI「人格与模型」默认会话行';
+	if (source.kind === 'configDefault') return 'WebUI「会话模型设置」默认会话行';
 	return 'dsh 部署默认';
 }

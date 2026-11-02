@@ -476,7 +476,7 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 	);
 
 	// WebUI 的宿主 RPC（connection / webServer 缺失 = 旧宿主或非 web profile）：
-	// 日志查看 + 日志实时流 + 人格库与「人格与模型」表格 + 定时任务列表（见
+	// 日志查看 + 日志实时流 + 人格库与「会话模型设置」表格 + 定时任务列表（见
 	// persona/rpc.ts 与 tasks/rpc.ts）。
 	// 两个服务都可能晚于本插件装载，所以用 inject 懒挂载而不是在 apply 里快照。
 	// 通道**不走 connection.rpc.handle**（该 API 在 cordis shadow 代理下拿不到
@@ -487,7 +487,7 @@ export async function apply(ctx: Context, rawConfig: DshQQConfig): Promise<void>
 			const connection = getService<HostConnectionLike>(channelCtx, 'connection');
 			const webServer = getService<WebServerLike>(channelCtx, 'webServer');
 			if (connection === undefined || typeof connection.requestRejection !== 'function' || webServer === undefined || typeof webServer.register !== 'function') {
-				logger.warn('dsh-qq-bot: 缺少 connection / webServer，WebUI 配置页的 RPC（日志、人格模板、会话人格、人格与模型）不可用');
+				logger.warn('dsh-qq-bot: 缺少 connection / webServer，WebUI 配置页的 RPC（日志、人格模板、会话人格、会话模型设置）不可用');
 				return;
 			}
 			const personaRpc: PersonaRpcDeps = {

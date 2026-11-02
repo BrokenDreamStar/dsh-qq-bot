@@ -90,7 +90,7 @@ function parseUpsert(
 ): { value: { id?: string; chatKey: string; chatType: 'private' | 'group'; chatId: string; prompt: string; delivery: TaskDelivery; note: string; schedule: TaskSchedule } } | { error: string } {
 	const id = typeof payload.id === 'string' && payload.id.trim() !== '' ? payload.id.trim() : undefined;
 	const chat = typeof payload.chat === 'string' ? payload.chat.trim() : '';
-	// 表格输入与「人格与模型」卡片同一套选择器：friend_/group_（也接受 u-/g- 往返编辑）。
+	// 表格输入与「会话模型设置」卡片同一套选择器：friend_/group_（也接受 u-/g- 往返编辑）。
 	const selector = parseChatSelector(chat);
 	if (selector === null) return { error: `无法识别的会话：${chat === '' ? '（空）' : chat}（应为 friend_QQ号 或 group_群号）` };
 	const validated = validateTaskInput({

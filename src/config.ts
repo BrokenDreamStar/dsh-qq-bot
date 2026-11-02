@@ -457,7 +457,7 @@ export const ConfigSchema = Schema.object({
 	memorySkillLearnEveryTurns: Schema.number().step(1).min(1).max(100).default(6).description('每多少轮尝试学习一次（带工具调用的成功轮次才计入）'),
 	memorySkillLearnMinToolCalls: Schema.number().step(1).min(0).max(10).default(1).description('一轮至少几次工具调用才值得总结（0 = 纯聊天也学）'),
 	memorySkillProvider: Schema.string().default('').description('技能学习模型 provider（留空 = 部署默认）；WebUI 里由模型下拉与 model 一并写入'),
-	memorySkillModel: Schema.string().default('').description('技能学习模型 id（留空 = 部署默认模型）；WebUI 里与「人格与模型」同一份模型清单的下拉'),
+	memorySkillModel: Schema.string().default('').description('技能学习模型 id（留空 = 部署默认模型）；WebUI 里与「会话模型设置」同一份模型清单的下拉'),
 	memorySkillMaxPerChat: Schema.number().step(5).min(5).max(500).default(100).description('每个会话技能条数上限；超出按使用次数/更新时间淘汰到 archived'),
 	memorySkillInjectMaxItems: Schema.number().step(1).min(0).max(10).default(3).description('每轮技能列表最多展示几条（0 = 不注入）'),
 	memorySkillInjectMaxChars: Schema.number().step(50).min(100).max(2000).default(400).description('每轮技能列表字数上限'),

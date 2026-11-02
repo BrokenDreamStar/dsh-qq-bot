@@ -92,7 +92,7 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add link:/path/to/dsh-qq-bo
 | 媒体与互动 | 收图落盘到会话媒体目录并把绝对路径交给 agent；戳一戳自动回复 |
 | 定时任务 | 任务总览与手动管理（启停/改期/删除/立即执行/新建）；任务绑定创建会话；每个任务可选「直接推送」（不调模型）或「agent 执行」 |
 | 人格 | 一张卡两个子分节：〔会话人格〕每个会话目录一份 `SOUL.md`，是人格的唯一生效源，可查看/编辑/恢复默认模板/套用模板，保存后重建当前会话；〔人格模板〕模板增删改（`personas.json`），只用于「还没有 SOUL.md 的会话」播种或手动套用 |
-| 人格与模型 | 首行「默认会话」，下方按 `friend_QQ号` / `group_群号` 逐行指定模型（人格列仅作无 SOUL.md 时的播种/兼容兜底） |
+| 会话模型设置 | 首行「默认会话」，下方按 `friend_QQ号` / `group_群号` 逐行指定**模型 + 思考强度**（选项来自 dsh 的模型元数据；人格不在这里，去「人格」卡改 SOUL.md） |
 
 ### 运行与维护
 
@@ -151,7 +151,7 @@ QQ 群/私聊是**无认证入口**：任何能给机器人发消息的人都可
 | 内容 | 路径 |
 |---|---|
 | 会话目录（agent 工作目录 + 左栏分组 + 媒体根） | `<数据目录>/sessions/Friend_<QQ号>`、`Group_<群号>`（媒体在 `<会话目录>/media/<chatKey>/`） |
-| 人格模板 / 会话人格与模型覆盖 | `<数据目录>/personas.json`、`chat-overrides.json`；每个会话自己的 `<数据目录>/sessions/Friend_*\|Group_*/SOUL.md`（前两者在 WebUI「人格」卡的〔人格模板〕〔会话人格〕两个子分节里编辑） |
+| 人格模板 / 会话人格 / 模型与强度覆盖 | `<数据目录>/personas.json`、`chat-overrides.json`；每个会话自己的 `<数据目录>/sessions/Friend_*\|Group_*/SOUL.md`（前两者在 WebUI「人格」卡的〔人格模板〕〔会话人格〕两个子分节里编辑，模型与强度在「会话模型设置」卡） |
 | 会话身份表（chatKey → sessionId）/ `/cwd` 覆盖 | `<数据目录>/chat-sessions.json`、`workspaces.json` |
 | 定时任务 / 群成员缓存 / 动态管理员 / 消息日志 / 长期记忆 | `<数据目录>/tasks.json`、`roster/`、`admins.json`、`message-log.ndjson`、`memory.db`、`models/`、`runtime/` |
 
@@ -195,7 +195,7 @@ dsh WebUI 的**设置**左列有独立的「qq-bot 配置」入口（需 dsh ≥
 - 配置字段在 schema 上标记为 `.volatile()`：dsh 以稳定引用热更新，不重启插件；插件监听 `loader/volatile-update` 原地合并（连接参数变化会自动重建 transport）
 - 只读部署自动禁用；中英双语跟随 WebUI 语言
 - `accessToken` 与各 API Key 为**只写字段**（宿主脱敏、永不回显，留空保存 = 保持不变）
-- 「人格」「人格与模型」「定时任务」的数据走插件自建 RPC（编辑 `personas.json` / `SOUL.md` / `chat-overrides.json` / `tasks.json`），保存后所有会话下一条消息即按新配置重建（历史保留）
+- 「人格」「会话模型设置」「定时任务」的数据走插件自建 RPC（编辑 `personas.json` / `SOUL.md` / `chat-overrides.json` / `tasks.json`），保存后所有会话下一条消息即按新配置重建（历史保留）
 
 ## 插件间组合（Cordis Service）
 

@@ -128,9 +128,10 @@ const css = {
 	editor: 'dshqq-editor',
 	editorItem: 'dshqq-editorItem',
 	editorHead: 'dshqq-editorHead',
-	routeHead: 'dshqq-routeHead',
 	routeRow: 'dshqq-routeRow',
 	routeRowDefault: 'dshqq-routeRowDefault',
+	routeLine: 'dshqq-routeLine',
+	routeFieldLabel: 'dshqq-routeFieldLabel',
 	routeDefaultLabel: 'dshqq-routeDefaultLabel',
 	routeRemove: 'dshqq-routeRemove',
 	taskHead: 'dshqq-taskHead',
@@ -459,7 +460,7 @@ function LogViewerPanel(props: { t: Translate; log: MessageLogState }): ReactNod
 	);
 }
 
-// ── 人格库 / 人格与模型（宿主 RPC 数据，不走 settings schema）──
+// ── 人格库 / 会话模型设置（宿主 RPC 数据，不走 settings schema）──
 
 /** 人格库条目（宿主 PersonaRecord 的浏览器镜像）。 */
 export interface PersonaRecordView {
@@ -467,17 +468,25 @@ export interface PersonaRecordView {
 	prompt: string;
 }
 
-/** 「人格与模型」一行：chat 为 `friend_<QQ号>` / `group_<群号>`。 */
+/** 「会话模型设置」一行：chat 为 `friend_<QQ号>` / `group_<群号>`。 */
 export interface RouteRowView {
 	chat: string;
-	persona?: string;
 	model?: string;
+	/** 思考强度 id（适配器自有；空 = 模型默认）。 */
+	effort?: string;
 }
 
-/** 「默认会话」行：没有 chat（左列是固定文案），只存人格与模型。 */
+/** 「默认会话」行：没有 chat（左列是固定文案），只存模型与思考强度。 */
 export interface DefaultRowView {
-	persona?: string;
 	model?: string;
+	effort?: string;
+}
+
+/** 思考强度选项（宿主 ModelEffortOption 的浏览器镜像）。 */
+export interface ModelEffortView {
+	id: string;
+	name: string;
+	description?: string;
 }
 
 /** 模型下拉选项（spec = `provider/model`）。 */
@@ -486,6 +495,12 @@ export interface ModelOptionView {
 	provider: string;
 	model: string;
 	name: string;
+	/** 该模型可选的思考强度（空 = 模型不支持或宿主没有元数据）。 */
+	efforts: ModelEffortView[];
+	/** 适配器默认强度。 */
+	defaultEffort?: string;
+	/** 部署默认模型（模型留空时用它补强度清单）。 */
+	isDefault?: boolean;
 }
 
 function asString(value: unknown): string {
@@ -514,15 +529,15 @@ function parseRouteViews(value: unknown): RouteViews {
 				.filter((entry): entry is Record<string, unknown> => entry !== null && typeof entry === 'object')
 				.map((entry) => {
 					const row: RouteRowView = { chat: asString(entry.chat) };
-					if (asString(entry.persona) !== '') row.persona = asString(entry.persona);
 					if (asString(entry.model) !== '') row.model = asString(entry.model);
+					if (asString(entry.effort) !== '') row.effort = asString(entry.effort);
 					return row;
 				})
 		: [];
 	const source = raw.default !== null && typeof raw.default === 'object' ? (raw.default as Record<string, unknown>) : {};
 	const defaultRow: DefaultRowView = {};
-	if (asString(source.persona) !== '') defaultRow.persona = asString(source.persona);
 	if (asString(source.model) !== '') defaultRow.model = asString(source.model);
+	if (asString(source.effort) !== '') defaultRow.effort = asString(source.effort);
 	return { rows, defaultRow, libraryDefault: asString(raw.libraryDefault) };
 }
 
@@ -532,11 +547,31 @@ function parseModelViews(value: unknown): ModelOptionView[] {
 	if (!Array.isArray(raw.models)) return [];
 	return raw.models
 		.filter((entry): entry is Record<string, unknown> => entry !== null && typeof entry === 'object')
-		.map((entry) => ({ spec: asString(entry.spec), provider: asString(entry.provider), model: asString(entry.model), name: asString(entry.name) }))
+		.map((entry) => {
+			const option: ModelOptionView = {
+				spec: asString(entry.spec),
+				provider: asString(entry.provider),
+				model: asString(entry.model),
+				name: asString(entry.name),
+				efforts: Array.isArray(entry.efforts)
+					? entry.efforts
+							.filter((effort): effort is Record<string, unknown> => effort !== null && typeof effort === 'object')
+							.map((effort) => ({
+								id: asString(effort.id),
+								name: asString(effort.name) !== '' ? asString(effort.name) : asString(effort.id),
+								...(asString(effort.description) === '' ? {} : { description: asString(effort.description) }),
+							}))
+							.filter((effort) => effort.id !== '')
+					: [],
+			};
+			if (asString(entry.defaultEffort) !== '') option.defaultEffort = asString(entry.defaultEffort);
+			if (entry.isDefault === true) option.isDefault = true;
+			return option;
+		})
 		.filter((entry) => entry.spec !== '');
 }
 
-/** 人格库 / 人格与模型共享的数据源与保存动作。 */
+/** 人格库 / 会话模型设置共享的数据源与保存动作。 */
 interface PersonaModelData {
 	status: 'idle' | 'loading' | 'ready' | 'error';
 	failed: string | null;
@@ -650,7 +685,7 @@ function usePersonaModelData(getRpc: (() => RpcCaller | undefined) | undefined, 
 }
 
 /**
- * 模型清单（宿主 `models/list`）：与「人格与模型」的模型列同源，供 settings
+ * 模型清单（宿主 `models/list`）：与「会话模型设置」的模型列同源，供 settings
  * 卡片里的模型下拉（modelSelect，如「长期记忆」的蒸馏模型）使用。只在含该
  * 控件的卡片展开时拉一次；失败不算已加载，下次展开重试。
  *
@@ -681,7 +716,7 @@ function useModelOptions(getRpc: (() => RpcCaller | undefined) | undefined, acti
 	return models;
 }
 
-/** 模板库子分节（「人格」卡内、会话人格之后）。默认人格不在这里选（见「人格与模型」的默认会话行）。 */
+/** 模板库子分节（「人格」卡内、会话人格之后）。默认人格不在这里选（见「会话模型设置」的默认会话行）。 */
 function PersonaPanel(props: { t: Translate; data: PersonaModelData; disabled: boolean }): ReactNode {
 	const { t, data, disabled } = props;
 	const [draft, setDraft] = useState<PersonaRecordView[]>([]);
@@ -813,20 +848,24 @@ function PersonaPanel(props: { t: Translate; data: PersonaModelData; disabled: b
 /** 号码行 → 可比较的规范形（去空白、空值省略）。脏检查与保存共用。 */
 function normalizeRouteRow(row: RouteRowView): RouteRowView {
 	const out: RouteRowView = { chat: row.chat.trim() };
-	if ((row.persona ?? '') !== '') out.persona = row.persona;
 	if ((row.model ?? '') !== '') out.model = row.model;
+	if ((row.effort ?? '') !== '') out.effort = row.effort;
 	return out;
 }
 
 /** 「默认会话」行 → 可比较的规范形（不参与号码校验）。 */
 function normalizeDefaultRow(row: DefaultRowView): DefaultRowView {
 	const out: DefaultRowView = {};
-	if ((row.persona ?? '') !== '') out.persona = row.persona;
 	if ((row.model ?? '') !== '') out.model = row.model;
+	if ((row.effort ?? '') !== '') out.effort = row.effort;
 	return out;
 }
 
-/** 「人格与模型」表格面板：第一行固定「默认会话」，其余每行左填会话、中选人格、右选模型。 */
+/**
+ * 「会话模型设置」表格面板：第一行固定「默认会话」，其余每行左填会话、
+ * 中选模型、右选思考强度。人格不在这一列——每个会话的人格是「人格」卡里的
+ * SOUL.md，这里只管模型与推理强度。
+ */
 function RoutePanel(props: { t: Translate; data: PersonaModelData; disabled: boolean }): ReactNode {
 	const { t, data, disabled } = props;
 	const [draft, setDraft] = useState<RouteRowView[]>([]);
@@ -839,11 +878,13 @@ function RoutePanel(props: { t: Translate; data: PersonaModelData; disabled: boo
 		setDefaultDraft({ ...data.defaultRow });
 	}, [data.rows, data.defaultRow]);
 
-	const named = draft.map((row) => row.chat.trim());
-	const hasContent = (row: RouteRowView): boolean => row.chat.trim() !== '' || (row.persona ?? '') !== '' || (row.model ?? '') !== '';
+	const hasContent = (row: RouteRowView): boolean => row.chat.trim() !== '' || (row.model ?? '') !== '' || (row.effort ?? '') !== '';
 	const badChat = draft.some((row) => hasContent(row) && parseChatSelector(row.chat) === null);
-	const missingChat = draft.some((row) => row.chat.trim() === '' && ((row.persona ?? '') !== '' || (row.model ?? '') !== ''));
-	const keys = named.filter((chat) => chat !== '').map((chat) => parseChatSelector(chat)?.key ?? chat);
+	const missingChat = draft.some((row) => row.chat.trim() === '' && ((row.model ?? '') !== '' || (row.effort ?? '') !== ''));
+	const keys = draft
+		.map((row) => row.chat.trim())
+		.filter((chat) => chat !== '')
+		.map((chat) => parseChatSelector(chat)?.key ?? chat);
 	const duplicate = keys.some((key, index) => keys.indexOf(key) !== index);
 	const invalid = badChat || missingChat || duplicate;
 	const dirty =
@@ -870,8 +911,6 @@ function RoutePanel(props: { t: Translate; data: PersonaModelData; disabled: boo
 		setDraft((prev) => prev.map((row, at) => (at === index ? { ...row, ...next } : row)));
 	};
 
-	const personaNames = data.personas.map((entry) => entry.name);
-
 	const save = async (): Promise<void> => {
 		if (disabled || saving || invalid) return;
 		setSaving(true);
@@ -884,112 +923,132 @@ function RoutePanel(props: { t: Translate; data: PersonaModelData; disabled: boo
 
 	const invalidMessage = badChat ? 'routeInvalidChat' : missingChat ? 'routeChatRequired' : duplicate ? 'routeDuplicateChat' : 'routePanelHint';
 
-	// 「默认会话」行：左列是固定文案，人格/模型两列与号码行同栅格（人格留空 = 跟随人格库默认）。
-	const defaultPersona = defaultDraft.persona ?? '';
+	/** 某行模型可选的思考强度；模型留空 = 跟随部署默认模型。 */
+	const effortsOf = (model: string): ModelEffortView[] => {
+		const match = model !== '' ? data.models.find((entry) => entry.spec === model) : data.models.find((entry) => entry.isDefault === true);
+		return match?.efforts ?? [];
+	};
+	const modelOptionsOf = (value: string): ModelOptionView[] =>
+		value !== '' && !data.models.some((entry) => entry.spec === value)
+			? [{ spec: value, provider: '', model: '', name: value, efforts: [] }, ...data.models]
+			: data.models;
+	/** 已保存但当前模型不再支持的强度仍要回显（否则下拉会静默丢值）。 */
+	const effortOptionsOf = (model: string, value: string): ModelEffortView[] => {
+		const efforts = effortsOf(model);
+		return value !== '' && !efforts.some((entry) => entry.id === value) ? [{ id: value, name: value }, ...efforts] : efforts;
+	};
+	/** 换模型时清掉不再受支持的强度（留着只会在请求时报错）。 */
+	const modelPatch = (row: { model?: string; effort?: string }, model: string): { model: string; effort: string } => {
+		const ids = effortsOf(model).map((entry) => entry.id);
+		const keep = (row.effort ?? '') !== '' && ids.includes(row.effort ?? '');
+		return { model, effort: keep ? (row.effort ?? '') : '' };
+	};
+
+	const effortSelect = (model: string, effort: string, onChange: (value: string) => void): ReactNode => {
+		const options = effortOptionsOf(model, effort);
+		return (
+			<select
+				className={cls(css.input, css.select)}
+				value={effort}
+				disabled={disabled || saving || options.length === 0}
+				aria-label={t('routeColEffort')}
+				onChange={(event) => onChange(event.target.value)}
+			>
+				<option value="">{options.length === 0 ? t('routeEffortUnsupported') : t('routeEffortDefault')}</option>
+				{options.map((entry) => (
+					<option key={entry.id} value={entry.id}>
+						{entry.name}
+					</option>
+				))}
+			</select>
+		);
+	};
+
 	const defaultModel = defaultDraft.model ?? '';
-	const defaultPersonaOptions = defaultPersona !== '' && !personaNames.includes(defaultPersona) ? [defaultPersona, ...personaNames] : personaNames;
-	const defaultModelOptions = defaultModel !== '' && !data.models.some((entry) => entry.spec === defaultModel) ? [{ spec: defaultModel, name: defaultModel }, ...data.models] : data.models;
 
 	return (
 		<div className={css.editor}>
-			{/* 列标题 + 固定「默认会话」行 + 号码行共用同一套栅格（含末列 28px），保证三列严格对齐。 */}
-			<div className={css.routeHead}>
-				<span>{t('routeColChat')}</span>
-				<span>{t('routeColPersona')}</span>
-				<span>{t('routeColModel')}</span>
-			</div>
+			{/* 窄列宽下每行两行：上行会话号码（或「默认会话」标签），下行模型 + 思考强度。 */}
 			<div className={css.routeRowDefault}>
-				<span className={css.routeDefaultLabel}>{t('routeDefaultChat')}</span>
-				<select
-					className={cls(css.input, css.select)}
-					value={defaultPersona}
-					disabled={disabled || saving}
-					onChange={(event) => {
-						setDefaultDraft((prev) => ({ ...prev, persona: event.target.value }));
-					}}
-				>
-					<option value="">{data.libraryDefault === '' ? t('routePersonaLibraryDefault') : t('routePersonaLibraryDefaultNamed').replace('{name}', data.libraryDefault)}</option>
-					{defaultPersonaOptions.map((name) => (
-						<option key={name} value={name}>
-							{name}
-						</option>
-					))}
-				</select>
-				<select
-					className={cls(css.input, css.select)}
-					value={defaultModel}
-					disabled={disabled || saving}
-					onChange={(event) => {
-						setDefaultDraft((prev) => ({ ...prev, model: event.target.value }));
-					}}
-				>
-					<option value="">{t('routeModelDefault')}</option>
-					{defaultModelOptions.map((option) => (
-						<option key={option.spec} value={option.spec}>
-							{modelOptionText(option)}
-						</option>
-					))}
-				</select>
+				<div className={css.routeLine}>
+					<span className={css.routeDefaultLabel}>{t('routeDefaultChat')}</span>
+				</div>
+				<div className={css.routeLine}>
+					<select
+						className={cls(css.input, css.select)}
+						aria-label={t('routeColModel')}
+						value={defaultModel}
+						disabled={disabled || saving}
+						onChange={(event) => {
+							const model = event.target.value;
+							setDefaultDraft((prev) => ({ ...prev, ...modelPatch(prev, model) }));
+						}}
+					>
+						<option value="">{t('routeModelDefault')}</option>
+						{modelOptionsOf(defaultModel).map((option) => (
+							<option key={option.spec} value={option.spec}>
+								{modelOptionText(option)}
+							</option>
+						))}
+					</select>
+					<span className={css.routeFieldLabel}>{t('routeColEffort')}</span>
+					{effortSelect(defaultModel, defaultDraft.effort ?? '', (value) => {
+						setDefaultDraft((prev) => ({ ...prev, effort: value }));
+					})}
+				</div>
 			</div>
 			{draft.length === 0 ? <p className={css.hint}>{t('routeEmpty')}</p> : null}
 			{draft.map((row, index) => {
-				const personaValue = row.persona ?? '';
 				const modelValue = row.model ?? '';
-				const personaOptions = personaValue !== '' && !personaNames.includes(personaValue) ? [personaValue, ...personaNames] : personaNames;
-				const modelOptions = modelValue !== '' && !data.models.some((entry) => entry.spec === modelValue) ? [{ spec: modelValue, name: modelValue }, ...data.models] : data.models;
 				return (
 					<div className={css.routeRow} key={index}>
-						<input
-							className={parseChatSelector(row.chat) === null && row.chat.trim() !== '' ? cls(css.input, css.inputInvalid) : css.input}
-							type="text"
-							value={row.chat}
-							placeholder={t('routeChatPlaceholder')}
-							disabled={disabled || saving}
-							onChange={(event) => {
-								patch(index, { chat: event.target.value });
-							}}
-						/>
-						<select
-							className={cls(css.input, css.select)}
-							value={personaValue}
-							disabled={disabled || saving}
-							onChange={(event) => {
-								patch(index, { persona: event.target.value });
-							}}
-						>
-							<option value="">{t('routePersonaNone')}</option>
-							{personaOptions.map((name) => (
-								<option key={name} value={name}>
-									{name}
-								</option>
-							))}
-						</select>
-						<select
-							className={cls(css.input, css.select)}
-							value={modelValue}
-							disabled={disabled || saving}
-							onChange={(event) => {
-								patch(index, { model: event.target.value });
-							}}
-						>
-							<option value="">{t('routeModelDefault')}</option>
-							{modelOptions.map((option) => (
-								<option key={option.spec} value={option.spec}>
-									{modelOptionText(option)}
-								</option>
-							))}
-						</select>
-						<button
-							type="button"
-							className={css.routeRemove}
-							disabled={disabled || saving}
-							aria-label={t('routeRemove')}
-							onClick={() => {
-								setDraft((prev) => prev.filter((_, at) => at !== index));
-							}}
-						>
-							×
-						</button>
+						<div className={css.routeLine}>
+							<input
+								className={parseChatSelector(row.chat) === null && row.chat.trim() !== '' ? cls(css.input, css.inputInvalid) : css.input}
+								type="text"
+								value={row.chat}
+								placeholder={t('routeChatPlaceholder')}
+								aria-label={t('routeColChat')}
+								disabled={disabled || saving}
+								onChange={(event) => {
+									patch(index, { chat: event.target.value });
+								}}
+							/>
+							<button
+								type="button"
+								className={css.routeRemove}
+								disabled={disabled || saving}
+								aria-label={t('routeRemove')}
+								onClick={() => {
+									setDraft((prev) => prev.filter((_, at) => at !== index));
+								}}
+							>
+								×
+							</button>
+						</div>
+						<div className={css.routeLine}>
+							<select
+								className={cls(css.input, css.select)}
+								aria-label={t('routeColModel')}
+								value={modelValue}
+								disabled={disabled || saving}
+								onChange={(event) => {
+									const model = event.target.value;
+									patch(index, modelPatch(row, model));
+								}}
+							>
+								<option value="">{t('routeModelDefault')}</option>
+								{modelOptionsOf(modelValue).map((option) => (
+									<option key={option.spec} value={option.spec}>
+										{modelOptionText(option)}
+									</option>
+								))}
+							</select>
+							<span className={css.routeFieldLabel}>{t('routeColEffort')}</span>
+							{effortSelect(modelValue, row.effort ?? '', (value) => {
+								patch(index, { effort: value });
+							})}
+						</div>
 					</div>
 				);
 			})}
@@ -1083,6 +1142,8 @@ function SoulPanel(props: {
 	const [content, setContent] = useState('');
 	const [info, setInfo] = useState<{ path: string; source: string; exists: boolean; chars: number; template: string; error: string | null } | null>(null);
 	const [template, setTemplate] = useState('');
+	const [defaultTemplate, setDefaultTemplate] = useState('');
+	const [libraryDefault, setLibraryDefault] = useState('');
 	const [busy, setBusy] = useState(false);
 	const [failed, setFailed] = useState<string | null>(null);
 	const [saved, setSaved] = useState(false);
@@ -1134,8 +1195,22 @@ function SoulPanel(props: {
 		if (listValue === null) return;
 		const list = parseSoulList(listValue);
 		setSouls(list);
+		// 新会话播种用的默认模板（人格库默认是它的回落值）。
+		setDefaultTemplate(typeof listValue.defaultTemplate === 'string' ? listValue.defaultTemplate : '');
+		setLibraryDefault(typeof listValue.libraryDefault === 'string' ? listValue.libraryDefault : '');
 		if (list.length > 0) await read(list[0]!.chat);
 	}, [call, read]);
+
+	/** 改「新会话默认模板」：只影响以后新建的 SOUL.md，不重建现有会话。 */
+	const saveDefaultTemplate = async (name: string): Promise<void> => {
+		if (disabled || busy) return;
+		setBusy(true);
+		const value = await call('personas/default', { name });
+		setBusy(false);
+		if (value === null) return;
+		setDefaultTemplate(typeof value.defaultTemplate === 'string' ? value.defaultTemplate : '');
+		setLibraryDefault(typeof value.libraryDefault === 'string' ? value.libraryDefault : '');
+	};
 
 	useEffect(() => {
 		void load();
@@ -1192,8 +1267,28 @@ function SoulPanel(props: {
 		);
 	}
 
+	const defaultOptions = defaultTemplate !== '' && !props.templates.includes(defaultTemplate) ? [defaultTemplate, ...props.templates] : props.templates;
+
 	return (
 		<div className={css.editor}>
+			<div className={css.chipAdd}>
+				<span className={css.chipRowLabel}>{t('soulDefaultTemplate')}</span>
+				<select
+					className={cls(css.input, css.select)}
+					value={defaultTemplate}
+					disabled={disabled || busy}
+					aria-label={t('soulDefaultTemplate')}
+					onChange={(event) => void saveDefaultTemplate(event.target.value)}
+				>
+					<option value="">{t('soulDefaultTemplateLibrary').replace('{name}', libraryDefault)}</option>
+					{defaultOptions.map((name) => (
+						<option key={name} value={name}>
+							{name}
+						</option>
+					))}
+				</select>
+			</div>
+			<p className={css.hint}>{t('soulDefaultTemplateHint')}</p>
 			<div className={css.taskHead}>
 				<select className={cls(css.input, css.select)} value={chat} disabled={disabled || busy} onChange={(event) => void read(event.target.value)}>
 					{souls.map((item) => (
@@ -1955,7 +2050,7 @@ function formatStamp(ms: number): string {
 
 /**
  * 定时任务面板（卡片展开体）：列表 + 单任务操作（启停/立即执行/编辑/删除），
- * 编辑走暂存草稿（保存才落库）；新建/编辑是同一个表单。与「人格与模型」
+ * 编辑走暂存草稿（保存才落库）；新建/编辑是同一个表单。与「会话模型设置」
  * 不同，列表不做整表替换——agent 会在会话里并发建任务，这里只做单任务操作，
  * 每次操作后用宿主返回的全量列表刷新。
  */
@@ -2253,7 +2348,7 @@ interface RowProps {
 	disabled: boolean;
 	/**
 	 * 模型下拉（modelSelect）的选项：宿主 `models/list` 的运行时清单，
-	 * 与「人格与模型」卡片的模型列同源（见 useModelOptions）。
+	 * 与「会话模型设置」卡片的模型列同源（见 useModelOptions）。
 	 */
 	modelOptions?: readonly ModelOptionView[];
 	onEdit: (key: string, text: string) => void;
@@ -2370,13 +2465,13 @@ function modelOptionText(option: { spec: string; name: string }): string {
 }
 
 /**
- * 模型下拉（modelSelect）：与「人格与模型」卡片的模型列**同一份清单与文案**
+ * 模型下拉（modelSelect）：与「会话模型设置」卡片的模型列**同一份清单与文案**
  * （宿主 models/list = dsh「设置 → 模型」的运行时清单）。值型是 `provider/model`
  * 规格串，空 = 部署默认模型；一次选择同时写 provider 与 model 两个配置项
  * （见 form.ts 的 planModelWrite）。
  *
  * 清单为空（旧宿主 / llm 服务缺失）时只留「部署默认」一项并给出提示——与
- * 「人格与模型」的行为一致，不退回文本框（模型 id 无法凭空猜）。
+ * 「会话模型设置」的行为一致，不退回文本框（模型 id 无法凭空猜）。
  */
 function ModelSelectRow(props: RowProps): ReactNode {
 	const { def, state, t, disabled } = props;
@@ -2840,7 +2935,7 @@ function GroupCard(
 		staticHeader?: boolean;
 		/** 折叠头部的附加角标（如日志条数）。 */
 		extraBadge?: ReactNode;
-		/** 自定义交互卡片（人格库 / 人格与模型）的展开体：替代字段列表与保存栏。 */
+		/** 自定义交互卡片（人格库 / 会话模型设置）的展开体：替代字段列表与保存栏。 */
 		customBody?: ReactNode;
 		/** 模型下拉（modelSelect）的选项（宿主 models/list）。 */
 		modelOptions?: readonly ModelOptionView[];

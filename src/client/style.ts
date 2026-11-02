@@ -160,12 +160,15 @@ button.dshqq-header{cursor:pointer}
 .dshqq-editorHead{align-items:center;gap:8px;display:flex}
 .dshqq-editorHead .dshqq-input{flex:1;min-width:0}
 .dshqq-editor .dshqq-textarea{min-height:74px}
-.dshqq-routeHead,.dshqq-routeRowDefault,.dshqq-routeRow{grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(0,1.3fr) 28px;align-items:center;gap:8px;display:grid}
-.dshqq-routeHead{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:600;letter-spacing:.03em;line-height:1.5}
+/* 会话模型行：窄列宽下两行（会话号码 / 模型 + 思考强度），不做四列栅格。 */
+.dshqq-routeRowDefault,.dshqq-routeRow{flex-direction:column;gap:8px;display:flex}
 .dshqq-routeRowDefault{padding-bottom:10px;border-bottom:.5px solid var(--dsw-alias-border-l2)}
-.dshqq-routeRowDefault .dshqq-select,.dshqq-routeRow .dshqq-select{width:100%}
-/* 末列（模型）右侧只有 8px 栅格间隙 + 删除按钮列：把框按同样的内推量加宽，箭头原地不动，只把右边框外移。 */
-.dshqq-routeRowDefault .dshqq-select:last-of-type,.dshqq-routeRow .dshqq-select:last-of-type{width:calc(100% + var(--dshqq-select-inset))}
+.dshqq-routeRow{border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;padding:8px 10px}
+.dshqq-routeLine{align-items:center;gap:8px;display:flex}
+.dshqq-routeLine .dshqq-input,.dshqq-routeLine .dshqq-select{flex:1;min-width:0}
+/* 思考强度取词很短，按内容定宽，把余量留给模型列。 */
+.dshqq-routeLine .dshqq-select:last-of-type{flex:0 1 auto;width:auto;max-width:46%}
+.dshqq-routeFieldLabel{color:var(--dsw-alias-label-tertiary);flex:none;font-size:12px;line-height:1.5}
 .dshqq-routeDefaultLabel{background:var(--dsw-alias-bg-module-platform);height:34px;color:var(--dsw-alias-label-secondary);border-radius:8px;align-items:center;padding:0 12px;font-size:13px;font-weight:500;line-height:1.5;display:flex;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dshqq-routeRemove{appearance:none;font:inherit;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:none;border-radius:6px;justify-self:center;width:26px;height:26px;font-size:15px;line-height:1}
 .dshqq-routeRemove:hover:not(:disabled){color:var(--dsw-alias-label-error)}
@@ -181,10 +184,8 @@ button.dshqq-header{cursor:pointer}
 .dshqq-taskOps .dshqq-discard{padding:3px 10px;font-size:12px}
 .dshqq-taskWeek{flex-wrap:wrap;gap:0 12px;display:flex}
 @media (max-width:560px){
-.dshqq-routeHead{display:none}
-.dshqq-routeRowDefault,.dshqq-routeRow{grid-template-columns:minmax(0,1fr) 28px}
-.dshqq-routeRowDefault>*,.dshqq-routeRow>*{grid-column:1}
-.dshqq-routeRow .dshqq-routeRemove{grid-column:2;grid-row:1}
+.dshqq-routeLine{gap:6px}
+.dshqq-routeFieldLabel{display:none}
 }
 .dshqq-progressWrap{border:.5px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-module-platform);margin:8px 0;padding:10px 12px}
 .dshqq-progressTrack{height:6px;background:var(--dsw-alias-border-l2);border-radius:999px;overflow:hidden;margin:8px 0 4px}

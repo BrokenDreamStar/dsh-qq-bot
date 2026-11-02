@@ -47,6 +47,10 @@ function makeBridge(input: {
 	api?: unknown;
 	/** 人格库 resolve 出的提示词（SOUL.md 播种用）。 */
 	personaPrompt?: string;
+	/** 会话级思考强度覆盖（chat-overrides 的 effort）。 */
+	effort?: string;
+	/** 「默认会话」行配置的思考强度。 */
+	configEffort?: string;
 }): ChatBridge {
 	const scope = input.scope ?? 'group';
 	const chatId = input.chatId ?? '123456';
@@ -60,6 +64,8 @@ function makeBridge(input: {
 	const store = {
 		getChatModel: () => input.override,
 		defaultModel: () => input.configDefault,
+		getChatEffort: () => input.effort,
+		defaultEffort: () => input.configEffort,
 		resolve: () => ({ name: 'default', prompt: input.personaPrompt ?? '' }),
 	} as unknown as PersonaStore;
 	const sessionDir = input.sessionDir ?? mkdtempSync(join(tmpdir(), 'dshqq-model-'));
@@ -139,6 +145,12 @@ describe('ChatBridge.modelInfo（会话/WebUI 模型配置接线）', () => {
 		const info = makeBridge({ override: 'broken/' }).modelInfo();
 		expect(info.spec).toBe('dsh/base');
 		expect(info.source).toEqual({ kind: 'default' });
+	});
+
+	it('思考强度：会话行 > 默认会话行 > 空', () => {
+		expect(makeBridge({ effort: 'high', configEffort: 'low' }).modelInfo().effort).toBe('high');
+		expect(makeBridge({ configEffort: 'low' }).modelInfo().effort).toBe('low');
+		expect(makeBridge({}).modelInfo().effort).toBeUndefined();
 	});
 });
 
@@ -595,6 +607,8 @@ describe('启动预热与重建后重占（ChatBridgeManager）', () => {
 		const store = {
 			getChatModel: () => undefined,
 			defaultModel: () => undefined,
+			getChatEffort: () => undefined,
+			defaultEffort: () => undefined,
 			resolve: () => ({ name: 'default', prompt: input.personaPrompt ?? '' }),
 		} as unknown as PersonaStore;
 		const config = { dataDir: input.dataDir, groupSession: 'shared', workspaceMode: 'chat' } as unknown as DshQQConfig;

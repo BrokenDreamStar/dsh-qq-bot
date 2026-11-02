@@ -105,6 +105,40 @@ describe('PersonaStore 会话覆盖', () => {
 	});
 });
 
+describe('PersonaStore 思考强度与新会话默认模板', () => {
+	it('强度覆盖按候选顺序命中，默认行兜底', () => {
+		const { store } = makeStore();
+		expect(store.defaultEffort()).toBeUndefined();
+		store.setDefaultMapping({ key: 'default', model: 'a/b', effort: 'low' });
+		expect(store.defaultEffort()).toBe('low');
+		expect(store.getChatEffort(['g-1'])).toBeUndefined();
+		store.setMappings([{ key: 'g-1', model: 'a/b', effort: 'high' }]);
+		expect(store.getChatEffort(['g-1-u-9', 'g-1'])).toBe('high');
+		store.setChatEffort('g-1-u-9', 'max');
+		expect(store.getChatEffort(['g-1-u-9', 'g-1'])).toBe('max');
+		expect(store.mappings()).toEqual([{ key: 'g-1', model: 'a/b', effort: 'high' }]);
+	});
+
+	it('setMappings 不带 persona 时保留旧版人格列', () => {
+		const { store } = makeStore();
+		store.setMappings([{ key: 'u-1', persona: 'old', model: 'a/b' }]);
+		store.setMappings([{ key: 'u-1', model: 'c/d', effort: 'high' }]);
+		expect(store.mappings()).toEqual([{ key: 'u-1', persona: 'old', model: 'c/d', effort: 'high' }]);
+	});
+
+	it('默认模板写入默认行的 persona，不动模型与强度', () => {
+		const { store } = makeStore();
+		store.setDefaultMapping({ key: 'default', model: 'a/b', effort: 'high' });
+		store.setDefaultPersonaSeed('hot');
+		expect(store.defaultPersonaSeed()).toBe('hot');
+		expect(store.defaultModel()).toBe('a/b');
+		expect(store.defaultEffort()).toBe('high');
+		store.setDefaultPersonaSeed(null);
+		expect(store.defaultPersonaSeed()).toBeUndefined();
+		expect(store.defaultModel()).toBe('a/b');
+	});
+});
+
 describe('PersonaStore 「默认会话」行', () => {
 	it('未配置时为空，配置后作用于没有单独覆盖的会话', () => {
 		const { store } = makeStore();

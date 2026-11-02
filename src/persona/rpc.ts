@@ -1,9 +1,9 @@
 /**
- * 人格模板 / 会话人格（SOUL.md）/ 人格与模型 / 模型清单的宿主 RPC 端点。
+ * 人格模板 / 会话人格（SOUL.md）/ 会话模型设置 / 模型清单的宿主 RPC 端点。
  *
  * 数据不走 dsh settings 文档，而是插件的 dataDir 文件（personas.json /
  * chat-overrides.json）与各会话目录的 SOUL.md：保存后所有会话桥丢弃
- * handle，下一条消息以新人格与模型重建，历史保留。
+ * handle，下一条消息以新会话模型设置重建，历史保留。
  *
  * 返回 undefined 表示端点不属于本模块（调用方继续尝试其它端点）。
  */
@@ -20,6 +20,13 @@ import { sessionDirFor } from '../bridge/chat.ts';
 
 export type PersonaRpcResult = { ok: true; value: unknown } | { ok: false; error: { code: string; message: string } };
 
+/** 思考强度选项（dsh 适配器自有的 id + 显示名）。 */
+export interface ModelEffortOption {
+	id: string;
+	name: string;
+	description?: string;
+}
+
 /** WebUI 模型下拉的选项（spec 即 `provider/model`）。 */
 export interface ModelOption {
 	spec: string;
@@ -27,6 +34,12 @@ export interface ModelOption {
 	model: string;
 	/** 模型显示名（catalog 未提供时等于 model）。 */
 	name: string;
+	/** 该模型可选的思考强度（空 = 模型不支持或旧宿主没有元数据）。 */
+	efforts: ModelEffortOption[];
+	/** 适配器默认强度；空 = 交给模型/适配器默认。 */
+	defaultEffort?: string;
+	/** 是否是部署默认模型（模型留空时客户端用它的强度清单）。 */
+	isDefault?: boolean;
 }
 
 export interface PersonaRpcDeps {
@@ -62,15 +75,15 @@ function nonEmptyString(value: unknown): string | undefined {
 export async function listModelOptions(deps: Pick<PersonaRpcDeps, 'getLlm' | 'getDefaultModel' | 'logger'>): Promise<ModelOption[]> {
 	const options: ModelOption[] = [];
 	const seen = new Set<string>();
-	const push = (provider: string, model: string, name?: string): void => {
+	const push = (provider: string, model: string, name?: string, isDefault = false): void => {
 		const spec = `${provider}/${model}`;
 		if (seen.has(spec)) return;
 		seen.add(spec);
-		options.push({ spec, provider, model, name: name !== undefined && name !== '' ? name : model });
+		options.push({ spec, provider, model, name: name !== undefined && name !== '' ? name : model, efforts: [], ...(isDefault ? { isDefault: true } : {}) });
 	};
 	const preset = deps.getDefaultModel?.();
 	if (preset?.provider !== undefined && preset.model !== undefined && preset.provider !== '' && preset.model !== '') {
-		push(preset.provider, preset.model);
+		push(preset.provider, preset.model, undefined, true);
 	}
 	const llm = deps.getLlm?.();
 	if (llm !== undefined) {
@@ -87,6 +100,24 @@ export async function listModelOptions(deps: Pick<PersonaRpcDeps, 'getLlm' | 'ge
 			}
 		} catch (error) {
 			deps.logger.warn(`dsh-qq-bot: 枚举模型 provider 失败: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		// 第二遍：补每个模型的思考强度（resolveModelInfo 是适配器元数据，不产生请求；
+		// 旧宿主没有这个方法时整列留空 = 用模型默认）。
+		if (typeof llm.resolveModelInfo === 'function') {
+			for (const option of options) {
+				try {
+					const info = await llm.resolveModelInfo(option.provider, option.model);
+					const efforts = info?.reasoning?.efforts ?? [];
+					option.efforts = efforts.map((effort) => ({
+						id: effort.id,
+						name: effort.name !== undefined && effort.name !== '' ? effort.name : effort.id,
+						...(effort.description === undefined ? {} : { description: effort.description }),
+					}));
+					if (info?.reasoning?.defaultEffort !== undefined && info.reasoning.defaultEffort !== '') option.defaultEffort = info.reasoning.defaultEffort;
+				} catch (error) {
+					deps.logger.warn(`dsh-qq-bot: 读取 ${option.spec} 的思考强度失败: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
 		}
 	}
 	return options;
@@ -108,7 +139,7 @@ function parsePersonaRecords(input: unknown): { records: PersonaRecord[] } | { e
 	return { records };
 }
 
-/** 校验并规范化「人格与模型」表格行；非法行返回错误。 */
+/** 校验并规范化「会话模型设置」表格行；非法行返回错误。 */
 export function parseMappingRows(input: unknown): { rows: ChatMapping[]; invalid: string[] } {
 	if (!Array.isArray(input)) return { rows: [], invalid: ['rows 必须是数组'] };
 	const byKey = new Map<string, ChatMapping>();
@@ -124,21 +155,23 @@ export function parseMappingRows(input: unknown): { rows: ChatMapping[]; invalid
 		const row: ChatMapping = { key: selector.key };
 		const persona = nonEmptyString(entry.persona);
 		const model = nonEmptyString(entry.model);
+		const effort = nonEmptyString(entry.effort);
 		if (persona !== undefined) row.persona = persona;
 		if (model !== undefined) row.model = model;
+		if (effort !== undefined) row.effort = effort;
 		byKey.set(row.key, row);
 	}
 	return { rows: [...byKey.values()], invalid };
 }
 
-/** 表格行 → 浏览器面（chat 恢复成 `friend_`/`group_` 写法）。 */
-function toRowViews(rows: readonly ChatMapping[]): Array<{ chat: string; persona?: string; model?: string }> {
+/** 表格行 → 浏览器面（chat 恢复成 `friend_`/`group_` 写法；人格列已并入「人格」卡，不再回显）。 */
+function toRowViews(rows: readonly ChatMapping[]): Array<{ chat: string; model?: string; effort?: string }> {
 	return rows.map((row) => {
 		const chat = formatChatSelector(row.key) ?? row.key;
 		return {
 			chat,
-			...(row.persona === undefined ? {} : { persona: row.persona }),
 			...(row.model === undefined ? {} : { model: row.model }),
+			...(row.effort === undefined ? {} : { effort: row.effort }),
 		};
 	});
 }
@@ -147,10 +180,10 @@ function toRowViews(rows: readonly ChatMapping[]): Array<{ chat: string; persona
  * 「默认会话」行 → 浏览器面；未配置返回 `{}`（两个下拉都留空）。
  * `chat` 字段固定为「默认会话」，客户端据此渲染第一行。
  */
-function toDefaultView(row: ChatMapping | null): { persona?: string; model?: string } {
+function toDefaultView(row: ChatMapping | null): { model?: string; effort?: string } {
 	return {
-		...(row?.persona === undefined ? {} : { persona: row.persona }),
 		...(row?.model === undefined ? {} : { model: row.model }),
+		...(row?.effort === undefined ? {} : { effort: row.effort }),
 	};
 }
 
@@ -160,9 +193,11 @@ function parseDefaultMapping(input: unknown): ChatMapping | null {
 	const row: ChatMapping = { key: DEFAULT_MAPPING_KEY };
 	const persona = nonEmptyString(entry.persona);
 	const model = nonEmptyString(entry.model);
+	const effort = nonEmptyString(entry.effort);
 	if (persona !== undefined) row.persona = persona;
 	if (model !== undefined) row.model = model;
-	return row.persona === undefined && row.model === undefined ? null : row;
+	if (effort !== undefined) row.effort = effort;
+	return row.persona === undefined && row.model === undefined && row.effort === undefined ? null : row;
 }
 
 function defaultPersona(store: PersonaStore): PersonaRecord | undefined {
@@ -225,8 +260,9 @@ function listSouls(deps: PersonaRpcDeps): Array<Record<string, unknown>> {
 
 /**
  * 处理一个端点；不是本模块的端点返回 undefined。
- * 支持的端点：personas/list | personas/save | souls/list | souls/read |
- * souls/save | souls/apply | souls/reset | routes/list | routes/save | models/list。
+ * 支持的端点：personas/list | personas/save | personas/default | souls/list |
+ * souls/read | souls/save | souls/apply | souls/reset | routes/list | routes/save |
+ * models/list。
  */
 export async function handlePersonaRpc(
 	endpoint: string,
@@ -248,6 +284,16 @@ export async function handlePersonaRpc(
 			deps.logger.info(`dsh-qq-bot: 人格库已更新（${parsed.records.length} 个人格，库默认 ${deps.store.defaultPersonaName()}）`);
 			return ok({ personas: deps.store.records(), default: deps.store.defaultPersonaName() });
 		}
+		if (endpoint === 'personas/default') {
+			const body = asRecord(payload);
+			const name = typeof body.name === 'string' ? body.name.trim() : '';
+			if (name !== '' && !deps.store.records().some((record) => record.name === name)) return fail('not-found', `没有模板「${name}」`);
+			// 只改「新会话默认模板」（chat-overrides 的默认会话行 persona），
+			// 同一行的 model / effort 原样保留；不重建会话（只影响以后新建的 SOUL.md）。
+			deps.store.setDefaultPersonaSeed(name === '' ? null : name);
+			deps.logger.info(`dsh-qq-bot: 新会话默认人格模板 → ${name === '' ? `（人格库默认 ${deps.store.defaultPersonaName()}）` : name}`);
+			return ok({ defaultTemplate: deps.store.defaultPersonaSeed() ?? null, libraryDefault: deps.store.defaultPersonaName() });
+		}
 		if (endpoint === 'routes/list') {
 			return ok({
 				rows: toRowViews(deps.store.mappings()),
@@ -264,14 +310,19 @@ export async function handlePersonaRpc(
 			// 老客户端不带 default 字段：视为不动「默认会话」行。
 			if (body.default !== undefined) deps.store.setDefaultMapping(parseDefaultMapping(body.default));
 			await deps.refreshBridges();
-			deps.logger.info(`dsh-qq-bot: 人格与模型映射已更新（${rows.length} 行 + 默认会话行）`);
+			deps.logger.info(`dsh-qq-bot: 会话模型设置已更新（${rows.length} 行 + 默认会话行）`);
 			return ok({ rows: toRowViews(deps.store.mappings()), default: toDefaultView(deps.store.defaultMapping()), libraryDefault: deps.store.defaultPersonaName() });
 		}
 		if (endpoint === 'models/list') {
 			return ok({ models: await listModelOptions(deps) });
 		}
 		if (endpoint === 'souls/list') {
-			return ok({ souls: listSouls(deps) });
+			return ok({
+				souls: listSouls(deps),
+				// 新会话（还没有 SOUL.md）播种用的人格模板：显式设置优先，否则跟随人格库默认。
+				defaultTemplate: deps.store.defaultPersonaSeed() ?? null,
+				libraryDefault: deps.store.defaultPersonaName(),
+			});
 		}
 		if (endpoint === 'souls/read') {
 			const target = soulTarget(deps, payload);

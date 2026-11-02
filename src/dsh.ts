@@ -29,10 +29,26 @@ export interface AgentDefaultModelLike {
 /** provider 条目：旧版 dsh 返回 route key 字符串，0.1.5 起返回 {id, name} 对象。 */
 export type LlmProviderEntry = string | { id: string; name?: string };
 
+/** 适配器自有的思考强度（dsh `LlmReasoningEffortInfo` 的结构面）。 */
+export interface LlmReasoningEffortLike {
+	id: string;
+	name: string;
+	description?: string;
+}
+
 /** ctx.llm 服务（模型枚举 + 一次性调用；可选）。 */
 export interface LlmServiceLike {
 	listProviders(): readonly LlmProviderEntry[];
 	listModels(providerId: string): Promise<readonly { id: string; name?: string }[]>;
+	/**
+	 * 某个 provider/model 的完整元数据（含可选的思考强度清单）。
+	 * dsh 0.2.1 起提供；旧宿主没有时 WebUI 的「思考强度」下拉为空（= 用模型默认）。
+	 */
+	resolveModelInfo?(
+		providerId: string,
+		modelId: string,
+		signal?: AbortSignal,
+	): Promise<{ id?: string; name?: string; reasoning?: { efforts?: readonly LlmReasoningEffortLike[]; defaultEffort?: string } }>;
 	/**
 	 * 一次性模型调用（长期记忆的蒸馏用它）。
 	 *

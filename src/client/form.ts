@@ -93,7 +93,7 @@ export interface FieldGroup {
 	logViewer?: boolean;
 	/**
 	 * 自定义交互卡片：不走 settings schema，展开体由 RPC 驱动
-	 * （人格 / 人格与模型 / 定时任务 / 记忆库）。此类卡片没有 fields，保存栏由面板自持。
+	 * （人格 / 会话模型设置 / 定时任务 / 记忆库）。此类卡片没有 fields，保存栏由面板自持。
 	 */
 	custom?: 'personas' | 'routes' | 'tasks' | 'memory';
 }
@@ -535,7 +535,7 @@ export function hasPath(obj: unknown, path: string[]): boolean {
 }
 
 /**
- * 模型下拉（`modelSelect`）的值型：`provider/model` 规格串（与「人格与模型」
+ * 模型下拉（`modelSelect`）的值型：`provider/model` 规格串（与「会话模型设置」
  * 卡片的模型列、宿主 `models/list` 的 `spec` 一致）。两条纯函数是它的全部
  * 解析规则——provider 永远不含斜杠，而模型 id 可能含（如 openrouter 的
  * `anthropic/claude-…`），所以只按**第一个**斜杠切分。

@@ -42,7 +42,7 @@ export function apply(ctx: ClientCtx): void {
 	const describe = ctx.configForms.describe();
 	const controller = new DshQQCardController(ctx.configForms.get<Record<string, unknown>>(SETTINGS_NS), describe);
 	const t = ctx.locale.bind(LOCALE_NS);
-	// 宿主 RPC：消息日志视图 + 人格库 / 人格与模型（均走 /dsh-qq-bot 通道）。
+	// 宿主 RPC：消息日志视图 + 人格库 / 会话模型设置（均走 /dsh-qq-bot 通道）。
 	// connection 是 web profile 基线服务，但可能晚于本插件就绪，所以每次
 	// 拉取时惰性解析；没有该服务（旧宿主）时日志与人格卡片降级为提示。
 	// 注意：connection 不在 inject 声明里，ctx 上的属性读取会因 inject 门控
