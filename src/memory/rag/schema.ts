@@ -130,16 +130,6 @@ CREATE TRIGGER IF NOT EXISTS rag_skills_au AFTER UPDATE ON rag_skills BEGIN
 END;
 
 CREATE TABLE IF NOT EXISTS rag_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS rag_audit (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  chat_key TEXT NOT NULL,
-  item_id INTEGER,
-  action TEXT NOT NULL,
-  actor TEXT NOT NULL,
-  before TEXT,
-  after TEXT,
-  at INTEGER NOT NULL
-);
 CREATE TABLE IF NOT EXISTS rag_skill_tombstones (
   content_hash TEXT PRIMARY KEY,
   chat_key TEXT NOT NULL,

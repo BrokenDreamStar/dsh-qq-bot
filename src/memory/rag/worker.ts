@@ -350,6 +350,8 @@ async function loadReranker(): Promise<void> {
 
 async function loadModels(): Promise<void> {
 	if (config === undefined || db === undefined) return;
+	// 启用即加载：文件不在本地时由 transformers 自动下载（进度经 progress 事件
+	// 推给卡片）。第一次加载完成后，后续启动直接命中本地缓存，不再联网。
 	if (!config.memoryEmbeddingEnabled && !config.memoryRerankEnabled) return;
 	try {
 		transformers = await importTransformers();
@@ -366,27 +368,6 @@ async function loadModels(): Promise<void> {
 	}
 	if (config.memoryEmbeddingEnabled) await loadEmbedding();
 	if (config.memoryRerankEnabled) await loadReranker();
-}
-
-/**
- * 手动下载/重试单个模型（WebUI 卡片上的按钮）。
- *
- * 下载与加载是同一条路径（`loadEmbedding` / `loadReranker`）：模型文件已在
- * 缓存里时只会重新加载。函数立即返回，进度经 status/progress 事件推给主线程。
- */
-async function startModelDownload(model: 'embedding' | 'reranker'): Promise<void> {
-	if (config === undefined || db === undefined) throw new Error('长期记忆尚未就绪');
-	const enabled = model === 'reranker' ? config.memoryRerankEnabled : config.memoryEmbeddingEnabled;
-	if (!enabled) throw new Error(model === 'reranker' ? '本地重排未启用' : 'embedding 未启用');
-	if (models[model].download === 'downloading' || models[model].load === 'loading') return;
-	if (transformers === undefined) {
-		try {
-			transformers = await importTransformers();
-		} catch (error) {
-			throw new Error(`本地推理运行时不可用：${modelErrorText(error)}`);
-		}
-	}
-	void (model === 'reranker' ? loadReranker() : loadEmbedding());
 }
 
 function normalizeVector(vector: Float32Array): Float32Array {
@@ -553,8 +534,6 @@ async function handleInit(payload: InitPayload): Promise<void> {
 	if (config.memoryEmbeddingEnabled) markCachedModel('embedding');
 	if (config.memoryRerankEnabled) markCachedModel('reranker');
 	status.runtime = runtimeDir !== '' ? 'ready' : 'missing';
-	status.runtimeDir = runtimeDir;
-	status.modelDir = modelsDir;
 	const result = await RagDatabase.open({
 		filePath: join(payload.dataDir, 'memory.db'),
 		logger,
@@ -676,12 +655,6 @@ async function handleRequest(request: Record<string, unknown>): Promise<void> {
 		if (method === 'skills/promote') {
 			const skill = db?.promoteSkill(String(request.chatKey ?? ''), Number(request.skillId ?? 0));
 			post({ id, ok: true, value: { skill: skill ?? null } });
-			return;
-		}
-		if (method === 'models/download') {
-			const model = request.model === 'reranker' ? 'reranker' : 'embedding';
-			await startModelDownload(model);
-			post({ id, ok: true, value: { started: true } });
 			return;
 		}
 		if (method === 'stats') {

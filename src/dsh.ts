@@ -50,11 +50,11 @@ export interface LlmServiceLike {
 		signal?: AbortSignal,
 	): Promise<{ id?: string; name?: string; reasoning?: { efforts?: readonly LlmReasoningEffortLike[]; defaultEffort?: string } }>;
 	/**
-	 * 一次性模型调用（长期记忆的蒸馏用它）。
+	 * 一次性模型调用（技能学习用它）。
 	 *
 	 * dsh 的注释明确支持"手搓 messages 的一次性请求"（*a hand-built one-shot
-	 * passes any list*），所以蒸馏**不需要新建 agent**，也就不产生多余的 dsh
-	 * 会话文件、不占写句柄。旧宿主没有这个方法时自动蒸馏停用。
+	 * passes any list*），所以技能学习**不需要新建 agent**，也就不产生多余的 dsh
+	 * 会话文件、不占写句柄。旧宿主没有这个方法时技能学习停用。
 	 */
 	stream?(options: {
 		provider: string;

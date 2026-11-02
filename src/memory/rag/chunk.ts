@@ -137,8 +137,3 @@ export function takeChunks(
 	}
 	return { drafts, rest: window };
 }
-
-/** 一次性生成全部 chunk（含尾巴），用于重建/回填。 */
-export function buildChunks(chatKey: string, messages: readonly ChunkMessage[], options: Partial<ChunkOptions> = {}): ChunkDraft[] {
-	return takeChunks(chatKey, messages, options, true).drafts;
-}

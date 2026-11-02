@@ -184,7 +184,7 @@ export const COMMANDS: Record<string, CommandDef> = {
 	},
 	memory: {
 		usage: '/memory [status|search <词>|recent [n]|forget <id>|reindex|prune|setup]',
-		help: '查看本会话的长期记忆（RAG）：status 状态，search 检索，recent 最近片段，forget 删除片段（管理员），reindex 重建索引，prune 清理，setup 安装运行时/模型',
+		help: '查看本会话的长期记忆：status 状态，search 检索，recent 最近片段，forget 删除片段（管理员），reindex 重建索引，prune 清理，setup 安装运行时/模型',
 		async run(ctx) {
 			const memory = ctx.memory;
 			if (memory === undefined || !memory.ready) {

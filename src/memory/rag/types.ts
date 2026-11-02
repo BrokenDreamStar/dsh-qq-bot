@@ -126,18 +126,8 @@ export interface RagStatus {
 	chunks: number;
 	skills: number;
 	lastError?: string;
-	/** 运行时目录（仅宿主面展示，不发给模型）。 */
-	runtimeDir?: string;
-	modelDir?: string;
 	/** 当前下载/安装进度；空闲时 undefined。 */
 	progress?: RagProgress;
-}
-
-/** 检索结果（工具/命令用）。 */
-export interface RagRecallResult {
-	text: string;
-	count: number;
-	candidates: number;
 }
 
 /** 一轮结束后交给技能学习器的上下文。 */

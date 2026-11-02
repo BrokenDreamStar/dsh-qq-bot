@@ -201,8 +201,6 @@ export interface DshQQConfig {
 	// 长期记忆 / RAG（卡片「长期记忆」；默认关闭）
 	/** 总开关：记录聊天到本地 RAG 库、每轮注入相关历史、注册记忆/技能工具。默认关闭。 */
 	memoryEnabled: boolean;
-	/** 首次开启时后台安装 runtime（@huggingface/transformers + sqlite-vec）。 */
-	memoryRuntimeAutoInstall: boolean;
 	/** 启用 embedding（bge-small-zh-v1.5 int8）；关闭则纯 FTS。 */
 	memoryEmbeddingEnabled: boolean;
 	/** ONNX 精度（只在配置文件里配）：int8 / fp16 / fp32，非法值回落 int8。 */
@@ -423,8 +421,7 @@ export const ConfigSchema = Schema.object({
 	askUserWaitMs: Schema.number().step(1000).min(0).max(3600000).default(DEFAULT_ASK_WAIT_MS).description('等待用户回答的上限（ms）：超时后不再等 QQ（把请求让给 dsh 界面的应答器；两边都没人答时模型会收到一条超时错误）；实际等待不超过单轮上限的一半；填 0 = 用默认值'),
 
 	// ── 长期记忆 / RAG（卡片「长期记忆」）──
-	memoryEnabled: Schema.boolean().default(false).description('长期记忆总开关（默认关闭）：把聊天写入本地 RAG 库（<数据目录>/memory.db），每轮注入相关历史，并注册 qq_recall_memory / qq_use_skill / qq_list_skills 工具。首次开启会后台安装运行时并下载 embedding 模型；运行时未就绪时先跑 FTS-only。工具默认仅管理员可用，普通用户要用得在「工具权限」卡片加进 userTools'),
-	memoryRuntimeAutoInstall: Schema.boolean().default(true).description('首次开启时后台安装 RAG 运行时（@huggingface/transformers + sqlite-vec 到 <数据目录>/runtime/，不写插件依赖树）'),
+	memoryEnabled: Schema.boolean().default(false).description('长期记忆总开关（默认关闭）：把聊天写入本地 RAG 库（<数据目录>/memory.db），每轮注入相关历史，并注册 qq_recall_memory / qq_use_skill / qq_list_skills 工具。运行时（@huggingface/transformers + sqlite-vec）需要手动点击「安装运行时」（或 /memory setup）安装，不会自动装；运行时未就绪时先跑 FTS-only。工具默认仅管理员可用，普通用户要用得在「工具权限」卡片加进 userTools'),
 	memoryEmbeddingEnabled: Schema.boolean().default(true).description('启用 embedding（bge-small-zh-v1.5 int8，约 24MB，首次启用下载到 <数据目录>/models/）：关闭则只用 FTS5 关键词检索。模型 id 与输出维度绑定向量表（float[512]），不是配置项，换模型要改代码并重建索引'),
 	memoryEmbeddingDtype: Schema.string().default('int8').description('embedding 模型的 ONNX 精度（只在配置文件里改，设置页不暴露）：int8（默认，约 24MB）/ fp16 / fp32；非法值回落 int8'),
 	// 下载源是部署/网络属性，不占设置页：官方地址是常量，镜像默认值已覆盖国内网络，
@@ -439,10 +436,10 @@ export const ConfigSchema = Schema.object({
 	memoryRecallTopK: Schema.number().step(1).min(1).max(30).default(8).description('单次检索最多返回多少条历史记录'),
 	memoryRecallMaxChars: Schema.number().step(100).min(200).max(6000).default(1500).description('单次检索返回的正文总字数上限（整条取舍，不截断句子）'),
 	memoryPrefetch: Schema.boolean().default(true).description('每轮按用户消息自动召回相关历史并注入 user 尾部（本地检索，零 LLM）'),
-	memoryPrefetchMinScore: Schema.number().step(0.05).min(0).max(1).default(0.35).description('自动预取的最低分（0~1）：低于该分本轮不注入'),
-	memoryPrefetchMaxItems: Schema.number().step(1).min(0).max(10).default(3).description('自动预取最多注入几条历史片段（0 = 关闭注入但仍保留检索工具）'),
-	memoryInjectMaxChars: Schema.number().step(100).min(200).max(6000).default(1200).description('注入块总字数上限（整条取舍，不截断句子）'),
-	memoryRecencyHalfLifeDays: Schema.number().step(1).min(1).max(365).default(30).description('时间衰减半衰期（天）：越久远的记录权重越低'),
+	memoryPrefetchMinScore: Schema.number().step(0.05).min(0).max(1).default(0.3).description('自动预取的最低分（0~1）：低于该分本轮不注入。同一批结果会归一化，未开重排时最高分通常 ≥0.6，阈值主要筛掉靠后的片段；开了重排才按重排分真正卡相关度'),
+	memoryPrefetchMaxItems: Schema.number().step(1).min(0).max(10).default(6).description('自动预取最多注入几条历史片段（0 = 关闭注入但仍保留检索工具）'),
+	memoryInjectMaxChars: Schema.number().step(100).min(200).max(6000).default(1600).description('注入块总字数上限（整条取舍，不截断句子）'),
+	memoryRecencyHalfLifeDays: Schema.number().step(1).min(1).max(365).default(60).description('时间衰减半衰期（天）：越久远的记录权重越低'),
 	memoryChunkMessages: Schema.number().step(1).min(1).max(20).default(4).description('一个 chunk 最多几条消息'),
 	memoryChunkMaxChars: Schema.number().step(50).min(100).max(2000).default(400).description('一个 chunk 最多多少字；超长消息按此切段'),
 	memoryChunkOverlap: Schema.number().step(1).min(0).max(5).default(1).description('相邻 chunk 重叠几条消息，避免问答对被切断'),

@@ -27,10 +27,8 @@
 #   DSHQQ_MEMORY_ENABLED
 #                      长期记忆总开关（默认 false = 关闭）；开启后会按会话持久记录
 #                      消息正文（<数据目录>/memory.db）并注册 qq_recall_memory /
-#                      qq_memorize 工具。记忆工具默认仅管理员可用，普通用户要用得在
-#                      「工具权限」卡片加进 userTools
-#   DSHQQ_MEMORY_DISTILL_PROVIDER / DSHQQ_MEMORY_DISTILL_MODEL
-#                      蒸馏用的模型（留空 = 部署默认模型；建议填便宜模型）
+#                      qq_use_skill / qq_list_skills 工具。记忆工具默认仅管理员可用，
+#                      普通用户要用得在「工具权限」卡片加进 userTools
 #
 # 无环境变量的常用配置项（在 profile 自己的 cordis.patch.yml 里按 id 覆盖）：
 #   workspaceMode  会话默认工作目录：chat（默认，会话目录）| home（网关模式，
@@ -41,24 +39,22 @@
 #                  historyMaxMessages 单次读取上限、historyBufferPerChat 每会话本地保留
 #                  条数（只在内存）、historyRemoteFetch 是否读 OneBot 历史接口
 #   memoryEnabled  长期记忆总开关，默认 false（关闭）。开启后还有一组参数：
-#                  memoryCardMaxChars 画像段字符预算（600）、memoryProfileMaxChars 画像段独立预算（400）、
-#                  memoryEpisodicMaxChars 每轮情景段预算（1200）、memoryMaxFacts 条数上限（200）、
-#                  memoryRecallEnabled / memoryRecallTopK / memoryRecallMaxChars /
-#                  memoryRecallHalfLifeDays（检索工具与打分）、memoryPrefetch /
-#                  memoryPrefetchMinScore / memoryPrefetchMaxItems（每轮自动预取）、
-#                  memoryDistillEvery（10）/ memoryDistillMinChars（800）/ memoryDistillIdleMs（600000）/
-#                  memoryDistillProvider / memoryDistillModel / memoryDistillMaxTokens /
-#                  memoryDistillRetryTokens（首轮没有可见文本时放大预算重试，上限 32768）/
-#                  memoryDistillTimeoutMs（蒸馏频率、模型与预算）、
-#                  memoryHandoffTail / memoryHandoffDistillWaitMs（世代交接）、
-#                  memoryRetentionDays / memoryMaxEventsPerChat（档案保留）、
-#                  memorySensitiveFilter / memoryCrossGroupUserProfile / memoryCandidateReview /
-#                  memoryFactTtlDays / memoryUserPreferenceTtlDays / memoryTombstoneDays /
-#                  memoryInjectLog（隐私与生命周期）、memoryMemberProfiles /
-#                  memoryMemberProfileMaxChars / memoryMemberAutoActive / memoryMemberMaxFacts
-#                  （群成员画像：自述生效、转述进候选、每人预算与条数上限）、
-#                  memoryDistillMaxNewFacts（单次蒸馏新增上限）。全部可在 WebUI「长期记忆」卡片里配；
-#                  记忆内容本身在「记忆库」卡片里查看/编辑/删除/测试召回
+#                  memoryEmbeddingEnabled / memoryRerankEnabled（本地向量与重排，默认关）、
+#                  memoryRerankTopN / memoryRerankTimeoutMs、memoryRecallEnabled /
+#                  memoryRecallTopK / memoryRecallMaxChars、memoryPrefetch /
+#                  memoryPrefetchMinScore / memoryPrefetchMaxItems / memoryInjectMaxChars、
+#                  memoryRecencyHalfLifeDays、memoryChunkMessages / memoryChunkMaxChars /
+#                  memoryChunkOverlap / memoryRetentionDays / memoryMaxMessagesPerChat /
+#                  memoryMaxChunksPerChat（切块与保留）、memorySensitiveFilter / memoryInjectLog；
+#                  自演进技能：memorySkillEnabled / memorySkillAutoLearn /
+#                  memorySkillLearnEveryTurns / memorySkillLearnMinToolCalls /
+#                  memorySkillProvider / memorySkillModel / memorySkillInjectMaxItems /
+#                  memorySkillInjectMaxChars / memorySkillAutoActivate /
+#                  memorySkillMinConfidence / memorySkillBodyMaxChars。
+#                  模型与下载源（memoryRerankModel / memoryHfEndpoint / memoryHfMirror /
+#                  memoryEmbeddingDtype）只在配置文件里改；其余都能在 WebUI「记忆与上下文」
+#                  卡片里配，记忆内容的查看/检索/删除走 /memory 命令、技能管理走 /skill，
+#                  运行时需要手动点「安装」。
 #   searchEnabled  网页搜索工具（qq_web_search）总开关，默认 true；searchOrder 搜索顺序数组
 #                  （默认 [exa, tavily, dsh]，数组顺序 = 尝试顺序，移出的不参与）、
 #                  exaApiKey / tavilyApiKey 两个密钥、searchMaxResults / searchMaxQueries /
@@ -81,9 +77,10 @@
 #                  QQ 回复作为答案，默认 true；askUserWaitMs 等待回答上限（默认 300000）。
 #                  关闭后提问只在 dsh 界面里回答
 #
-# 人格库与「人格与模型」映射不在这里配置：在 dsh WebUI 的
-# 「设置 → qq-bot 配置 → 人格库 / 人格与模型」里维护，数据存于数据目录下的
-# personas.json / chat-overrides.json（会话内 /persona、/model 同样生效）。
+# 人格模板、会话人格（SOUL.md）与会话模型映射不在这里配置：在 dsh WebUI 的
+# 「设置 → qq-bot 配置 → 人格 / 会话模型设置」里维护，数据存于数据目录下的
+# personas.json / chat-overrides.json 与各会话目录的 SOUL.md（会话内 /persona、
+# /model 同样生效）。
 # 定时任务同理：任务由 agent 在会话里创建（或 WebUI「定时任务」卡片手动管理），
 # 持久化在数据目录的 tasks.json。
 
@@ -100,8 +97,6 @@
         # 长期记忆：默认关闭。开启需要按会话持久记录消息正文，属于部署决策，
         # 所以只在环境变量显式给了值时覆盖（空 = 用 schema 默认 false）。
         memoryEnabled: !!js "process.env.DSHQQ_MEMORY_ENABLED === undefined ? undefined : process.env.DSHQQ_MEMORY_ENABLED === 'true'"
-        memoryDistillProvider: !!js process.env.DSHQQ_MEMORY_DISTILL_PROVIDER ?? ''
-        memoryDistillModel: !!js process.env.DSHQQ_MEMORY_DISTILL_MODEL ?? ''
         # 网页搜索（qq_web_search）：两个后端的密钥可以走环境变量，这样密钥不必
         # 落进 profile 的 cordis.patch.yml；没配 Key 的后端在链上自动跳过。搜索顺序是部署选择，
         # 不提供环境变量——在 WebUI「网页搜索」卡片里用上下箭头排序，或在这里写

@@ -18,13 +18,12 @@ import { RagClient } from './rag/client.ts';
 import { createModelStatus } from './rag/progress.ts';
 import { renderChunkBlock, renderRecallBlock, renderSkillList } from './rag/render.ts';
 import { ensureRuntime, resolveRuntimePaths, resolveVecPath, type RuntimePaths } from './rag/runtime.ts';
-import type { AfterTurnInput, RagProgress, RagRecord, RagSkill, RagStatus, RagWorkerConfig, SkillDraft } from './rag/types.ts';
+import type { AfterTurnInput, RagProgress, RagRecord, RagSkill, RagStatus, RagWorkerConfig } from './rag/types.ts';
 import { SkillLearner } from './skills/learn.ts';
 
 /** 记忆服务对外暴露的配置视图（由 config.ts 的 DshQQConfig 满足）。 */
 export interface MemoryConfigView {
 	memoryEnabled: boolean;
-	memoryRuntimeAutoInstall: boolean;
 	memoryEmbeddingEnabled: boolean;
 	memoryEmbeddingDtype: string;
 	memoryHfEndpoint: string;
@@ -105,8 +104,9 @@ export class MemoryService {
 	private starting: Promise<void> | undefined;
 	private status: RagStatus = { ...EMPTY_STATUS };
 	private installProgress: RagProgress | undefined;
+	/** 当前 worker 对应的配置指纹；不变就不重启（见 reconfigure）。 */
+	private lastWorkerSignature: string | undefined;
 	private readonly learner: SkillLearner;
-	private lastPruneAt = 0;
 
 	constructor(private readonly deps: MemoryServiceDeps) {
 		this.learner = new SkillLearner({
@@ -191,11 +191,11 @@ export class MemoryService {
 	}
 
 	private async start(): Promise<void> {
+		// 运行时不再自动安装：缺 runtime 时先跑 FTS-only，等用户点「安装运行时」
+		// （WebUI）或发 `/memory setup`。installProgress 只由手动安装路径维护。
 		const paths = resolveRuntimePaths(this.deps.dataDir);
+		this.lastWorkerSignature = this.workerSignature();
 		await this.startClient(paths);
-		if (!paths.installed && this.deps.config.memoryRuntimeAutoInstall) {
-			void this.installRuntime(paths);
-		}
 	}
 
 	private async startClient(paths: RuntimePaths): Promise<void> {
@@ -231,29 +231,6 @@ export class MemoryService {
 		this.deps.note?.('memory-start', `runtime=${paths.installed ? 'ready' : 'missing'}，vec=${this.status.vec ? 'ready' : 'off'}`);
 	}
 
-	private async installRuntime(paths: RuntimePaths): Promise<void> {
-		this.deps.logger.info(`dsh-qq-bot: 开始安装 RAG 运行时（${paths.dir}）`);
-		this.installProgress = { kind: 'install', message: '正在安装 RAG 运行时依赖…', at: Date.now() };
-		const installed = await ensureRuntime({
-			dataDir: this.deps.dataDir,
-			logger: this.deps.logger,
-			onProgress: progress => {
-				this.installProgress = { kind: 'install', message: progress.message, at: Date.now() };
-				this.deps.note?.('memory-progress', progress.message);
-			},
-		});
-		if (!installed.installed) {
-			this.installProgress = undefined;
-			this.deps.note?.('memory-runtime-failed', '运行时安装失败，继续 FTS-only');
-			return;
-		}
-		this.installProgress = undefined;
-		const previous = this.client;
-		this.client = undefined;
-		await previous?.dispose();
-		await this.startClient(installed);
-	}
-
 	/** 记一条消息（入站或机器人回复）；未启用/敏感内容静默忽略。 */
 	record(event: RagRecord): void {
 		if (this.client === undefined) return;
@@ -274,7 +251,9 @@ export class MemoryService {
 		if (!this.ready || !this.deps.config.memoryPrefetch) return '';
 		const trimmed = query.trim();
 		if (trimmed === '') return '';
-		const maxItems = Math.max(1, this.deps.config.memoryPrefetchMaxItems);
+		// 0 = 关闭自动注入（配置描述即此语义）；检索工具 qq_recall_memory 不受影响。
+		const maxItems = Math.max(0, Math.trunc(this.deps.config.memoryPrefetchMaxItems));
+		if (maxItems === 0) return '';
 		const hits = await this.client?.search(chatKey, trimmed, maxItems * 3) ?? [];
 		const filtered = hits
 			.filter(hit => hit.score >= this.deps.config.memoryPrefetchMinScore)
@@ -348,10 +327,6 @@ export class MemoryService {
 		return this.client?.promoteSkill(chatKey, skillId);
 	}
 
-	async saveSkill(draft: SkillDraft): Promise<RagSkill | undefined> {
-		return this.client?.upsertSkill(draft);
-	}
-
 	/** 一轮结束后尝试学习技能（fire-and-forget）。 */
 	afterTurn(input: AfterTurnInput): void {
 		if (!this.ready) return;
@@ -368,46 +343,63 @@ export class MemoryService {
 		return { ...this.status, ...(progress !== undefined ? { progress } : {}) };
 	}
 
-	/** 手动下载/重试单个本地模型（WebUI 卡片按钮）；失败时抛错给调用方展示。 */
-	async downloadModel(model: 'embedding' | 'reranker'): Promise<void> {
-		const client = this.client;
-		if (client === undefined) throw new Error('长期记忆尚未启动');
-		await client.downloadModel(model);
-	}
-
 	async prune(): Promise<number> {
-		const removed = await this.client?.prune() ?? 0;
-		this.lastPruneAt = Date.now();
-		return removed;
+		return await this.client?.prune() ?? 0;
 	}
 
 	async reindex(chatKey?: string): Promise<number> {
 		return this.client?.reindex(chatKey) ?? 0;
 	}
 
-	/** 手动安装/重装 runtime（WebUI 按钮 / `/memory setup`）。 */
+	/**
+	 * 手动安装/重装 runtime（WebUI 按钮 / `/memory setup`）。
+	 * 这是**唯一**的安装入口：启动时不再自动装，缺 runtime 就先跑 FTS-only。
+	 * 安装期间维护 installProgress，WebUI 轮询 status 能看到「运行时安装中」。
+	 */
 	async setup(): Promise<{ installed: boolean; runtimeDir: string }> {
-		const installed = await ensureRuntime({
-			dataDir: this.deps.dataDir,
-			logger: this.deps.logger,
-			onProgress: progress => this.deps.note?.('memory-progress', progress.message),
-		});
-		if (installed.installed) {
-			const previous = this.client;
-			this.client = undefined;
-			await previous?.dispose();
-			await this.startClient(installed);
+		this.installProgress = { kind: 'install', message: '正在安装 RAG 运行时依赖…', at: Date.now() };
+		try {
+			const installed = await ensureRuntime({
+				dataDir: this.deps.dataDir,
+				logger: this.deps.logger,
+				onProgress: progress => {
+					this.installProgress = { kind: 'install', message: progress.message, at: Date.now() };
+					this.deps.note?.('memory-progress', progress.message);
+				},
+			});
+			if (installed.installed) {
+				const previous = this.client;
+				this.client = undefined;
+				await previous?.dispose();
+				await this.startClient(installed);
+			} else {
+				this.deps.note?.('memory-runtime-failed', '运行时安装失败，继续 FTS-only');
+			}
+			return { installed: installed.installed, runtimeDir: installed.dir };
+		} finally {
+			this.installProgress = undefined;
 		}
-		return { installed: installed.installed, runtimeDir: installed.dir };
 	}
 
-	/** 配置热应用：开关/模型/检索参数变化后重启 worker（防抖由调用方保证）。 */
+	/**
+	 * 配置热应用：只有**记忆相关**配置真的变了才重启 worker（防抖由调用方保证）。
+	 * 每次 settings 保存（哪怕改的是唤醒前缀之类）都会进这里；无条件重启会顺带
+	 * 重载两个模型、在卡片上闪出「加载中」，用户会误以为点了别的开关触发了下载。
+	 */
 	reconfigure(): void {
 		if (!this.deps.config.memoryEnabled) {
-			void this.stop();
+			if (this.client !== undefined) void this.stop();
 			return;
 		}
+		const signature = this.workerSignature();
+		if (signature === this.lastWorkerSignature && this.client !== undefined) return;
+		this.lastWorkerSignature = signature;
 		void this.restart();
+	}
+
+	/** worker 关心的全部配置的稳定指纹（顺序由 workerConfig 的对象字面量固定）。 */
+	private workerSignature(): string {
+		return JSON.stringify(this.workerConfig());
 	}
 
 	private async restart(): Promise<void> {
@@ -425,16 +417,9 @@ export class MemoryService {
 		await previous?.dispose();
 	}
 
-	/** 定期 prune（由 index.ts 的心跳调用；每 6 小时最多一次）。 */
-	async sweep(): Promise<void> {
-		if (!this.ready) return;
-		if (Date.now() - this.lastPruneAt < 6 * 3600_000) return;
-		await this.prune();
-	}
-
 	async dispose(): Promise<void> {
 		await this.stop();
 	}
 }
 
-export type { MemoryLlmView, RagRecord, RagSkill, RagStatus, SkillDraft, AfterTurnInput };
+export type { MemoryLlmView, RagRecord, RagSkill, RagStatus, AfterTurnInput };

@@ -67,16 +67,6 @@ export function finalScore(input: {
 	return clamp01(0.6 * rrf + 0.25 * recency + 0.15 * coverage);
 }
 
-/** Jaccard 相似度（用于重叠 chunk 去重）。 */
-export function jaccard(a: string, b: string): number {
-	const left = new Set(a.replace(/\s+/g, '').split(''));
-	const right = new Set(b.replace(/\s+/g, '').split(''));
-	if (left.size === 0 && right.size === 0) return 1;
-	let intersection = 0;
-	for (const char of left) if (right.has(char)) intersection += 1;
-	return intersection / (left.size + right.size - intersection);
-}
-
 function clamp01(value: number): number {
 	if (!Number.isFinite(value)) return 0;
 	if (value < 0) return 0;

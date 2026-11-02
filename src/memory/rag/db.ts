@@ -492,15 +492,6 @@ export class RagDatabase {
 		}
 	}
 
-	chatKeys(): string[] {
-		try {
-			const rows = this.db.prepare('SELECT DISTINCT chat_key FROM rag_messages').all() as Array<{ chat_key?: unknown }>;
-			return rows.map(row => asString(row.chat_key)).filter(key => key !== '');
-		} catch {
-			return [];
-		}
-	}
-
 	lastChunkEndSeq(chatKey: string): number {
 		try {
 			const row = this.db.prepare('SELECT MAX(end_seq) AS maxSeq FROM rag_chunks WHERE chat_key = ?').get(chatKey) as
@@ -883,16 +874,6 @@ export class RagDatabase {
 		} catch (error) {
 			this.logger.warn(`dsh-qq-bot: RAG reindex 失败：${error instanceof Error ? error.message : String(error)}`);
 			return 0;
-		}
-	}
-
-	audit(chatKey: string, itemId: number | null, action: string, actor: string, before: string | null, after: string | null): void {
-		try {
-			this.db
-				.prepare('INSERT INTO rag_audit(chat_key, item_id, action, actor, before, after, at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-				.run(chatKey, itemId, action, actor, before, after, Date.now());
-		} catch {
-			// ignore
 		}
 	}
 

@@ -10,9 +10,6 @@
  * bundle 引用。
  */
 
-/** 单条记忆正文的字符上限（自然语言条目，比旧 object 的 80 字宽）。 */
-export const MAX_ITEM_CONTENT_CHARS = 500;
-
 /** 句子里连续 5–12 位数字的 QQ 号：括号形式 `(12345)` 或 @ 形式 `@12345`。 */
 const QQ_NUMBER_PATTERN = /\(\d{5,12}\)|@\d{5,12}/g;
 
@@ -93,9 +90,9 @@ export function contentHash(text: string): string {
 /**
  * 自然语言"元指令"：在对机器人说"怎么处理记忆"，不是关于世界的事实。
  *
- * 这类消息不应该被蒸馏成记忆（否则"把刚才那条删了"会变成一条用户偏好），
- * 也不应该参与画像。保守匹配，避免误伤"记住我喜欢简短回复"这类真正的记忆请求
- * ——新实现里「记住」只靠普通聊天进 RAG，不再有 qq_memorize/蒸馏。
+ * 这类消息不应该写进长期记忆（否则"把刚才那条删了"会变成一条用户偏好）。
+ * 保守匹配，避免误伤"记住我喜欢简短回复"这类真正的记忆请求——「记住」
+ * 只靠普通聊天进 RAG。
  */
 const META_COMMAND_PATTERNS: readonly RegExp[] = [
 	/^(把)?(刚才|刚刚|之前|上一条|那条|这条).{0,8}(删|删掉|删除|忘|忘掉|取消)/,
@@ -105,7 +102,7 @@ const META_COMMAND_PATTERNS: readonly RegExp[] = [
 	/^(不要|别)(再)?(提|记)(这个|那件事|刚才)/,
 ];
 
-/** 是否是自然语言元指令（应排除在蒸馏/画像之外）。 */
+/** 是否是自然语言元指令（应排除在长期记忆写入之外）。 */
 export function isMetaCommand(text: string): boolean {
 	const normalized = text.trim();
 	if (normalized === '') return false;

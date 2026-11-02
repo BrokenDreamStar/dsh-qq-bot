@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildChunks, chunkHash, renderChunkLine, splitLongText, takeChunks, type ChunkMessage } from './chunk.ts';
+import { chunkHash, renderChunkLine, splitLongText, takeChunks, type ChunkMessage } from './chunk.ts';
 
 function message(seq: number, text: string, name = '张三'): ChunkMessage {
 	return { seq, ts: 1000 + seq, senderName: name, self: false, text };
@@ -26,7 +26,7 @@ describe('chunk：窗口切块', () => {
 	it('末尾不足一窗：增量模式留在 rest，重建模式生成 chunk', () => {
 		const messages = [message(1, 'a')];
 		expect(takeChunks('g-1', messages, { maxMessages: 4, maxChars: 400, overlap: 1 }, false).drafts).toEqual([]);
-		expect(buildChunks('g-1', messages, { maxMessages: 4, maxChars: 400, overlap: 1 })).toHaveLength(1);
+		expect(takeChunks('g-1', messages, { maxMessages: 4, maxChars: 400, overlap: 1 }, true).drafts).toHaveLength(1);
 	});
 
 	it('长消息切段并单独成 chunk', () => {

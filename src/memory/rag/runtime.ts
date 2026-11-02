@@ -71,21 +71,6 @@ export function resolveRuntimePaths(dataDir: string): RuntimePaths {
 	};
 }
 
-/** 当前 runtime 目录（不触发安装）。 */
-export function currentRuntimeDir(dataDir: string): string {
-	return resolveRuntimePaths(dataDir).dir;
-}
-
-/** 从 runtime 目录解析模块（worker 用同一个逻辑）。 */
-export function resolveRuntimeModule(runtimeDir: string, name: string): string | undefined {
-	try {
-		const require = createRequire(join(runtimeDir, 'package.json'));
-		return require.resolve(name);
-	} catch {
-		return undefined;
-	}
-}
-
 /** sqlite-vec 的 loadable extension 路径；没装返回 undefined。 */
 export function resolveVecPath(runtimeDir: string): string | undefined {
 	try {

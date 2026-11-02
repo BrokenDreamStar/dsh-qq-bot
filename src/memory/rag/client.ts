@@ -349,12 +349,6 @@ export class RagClient {
 		}
 	}
 
-	/** 手动下载/重试单个模型；失败时抛错（由调用方显示给用户）。 */
-	async downloadModel(model: 'embedding' | 'reranker'): Promise<void> {
-		if (!this.ready) throw new Error('长期记忆尚未就绪');
-		await this.request('models/download', { model }, 30_000);
-	}
-
 	async prune(): Promise<number> {
 		if (!this.ready) return 0;
 		try {

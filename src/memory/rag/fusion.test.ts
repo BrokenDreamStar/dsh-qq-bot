@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { coverageOf, finalScore, jaccard, normalizeScores, recencyScore, rrfFuse } from './fusion.ts';
+import { coverageOf, finalScore, normalizeScores, recencyScore, rrfFuse } from './fusion.ts';
 
 describe('fusion：混合召回', () => {
 	it('RRF 只依赖名次，两个列表都能贡献', () => {
@@ -33,10 +33,5 @@ describe('fusion：混合召回', () => {
 		const withRerank = finalScore({ rrf: 0.5, recency: 0.5, coverage: 0.5, rerank: 1 });
 		expect(withRerank).toBeGreaterThan(without);
 		expect(withRerank).toBeLessThanOrEqual(1);
-	});
-
-	it('Jaccard 去重', () => {
-		expect(jaccard('abc', 'abc')).toBe(1);
-		expect(jaccard('abc', 'xyz')).toBe(0);
 	});
 });

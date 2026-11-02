@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { describeFindings, normalizeFactText, sanitizeMemoryText, scanForThreats } from './guard.ts';
+import { describeFindings, sanitizeMemoryText, scanForThreats } from './guard.ts';
 
 describe('scanForThreats', () => {
 	it('放行普通群聊内容', () => {
@@ -48,21 +48,5 @@ describe('sanitizeMemoryText', () => {
 	it('折叠多余空白与空行', () => {
 		expect(sanitizeMemoryText('  多   空格  ')).toBe('多 空格');
 		expect(sanitizeMemoryText('a\n\n\n\nb')).toBe('a\n\nb');
-	});
-});
-
-describe('normalizeFactText', () => {
-	it('空串返回 undefined', () => {
-		expect(normalizeFactText('   ', 10)).toBeUndefined();
-	});
-
-	it('超长截断并加省略号', () => {
-		const result = normalizeFactText('一'.repeat(20), 5);
-		expect(result).toHaveLength(5);
-		expect(result?.endsWith('…')).toBe(true);
-	});
-
-	it('未超长时原样返回清洗结果', () => {
-		expect(normalizeFactText(' 张三 是 运维 ', 20)).toBe('张三 是 运维');
 	});
 });

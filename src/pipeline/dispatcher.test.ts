@@ -194,12 +194,12 @@ describe('Dispatcher 长期记忆采集', () => {
 	it('已注册的命令不进记忆档案（控制指令不是对话内容）', async () => {
 		const app = harness(baseConfig());
 		app.dispatcher.handle(messageEvent('/status', 'group', 1));
-		app.dispatcher.handle(messageEvent('/memory distill', 'group', 2));
+		app.dispatcher.handle(messageEvent('/memory status', 'group', 2));
 		await Promise.resolve();
 		await Promise.resolve();
 		// 两个命令都进了聊天记录（那是"刚才群里在聊什么"的语义）……
-		expect(app.recorded.map((msg) => msg.plainText)).toEqual(['/status', '/memory distill']);
-		// ……但都不进长期记忆（否则每条命令都会白烧一次蒸馏）。
+		expect(app.recorded.map((msg) => msg.plainText)).toEqual(['/status', '/memory status']);
+		// ……但都不进长期记忆（否则每条命令都会占一条检索片段）。
 		expect(app.memories).toEqual([]);
 	});
 

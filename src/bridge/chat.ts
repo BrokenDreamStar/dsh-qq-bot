@@ -1104,7 +1104,7 @@ export class ChatBridge {
 		} catch (error) {
 			this.logger.warn(`dsh-qq-bot: workspace section 注册失败: ${error instanceof Error ? error.message : String(error)}`);
 		}
-		// 长期记忆：system prompt 只放一条稳定能力提示（不放卡片/画像，避免前缀缓存失效）。
+		// 长期记忆：system prompt 只放一条稳定能力提示（不放记忆内容，避免前缀缓存失效）。
 		// 相关历史与技能列表每轮注入 user 尾部（见 memoryInjection）。
 		try {
 			(agentCtx as unknown as { systemPrompt?: SystemPromptLike }).systemPrompt?.section({
@@ -1205,12 +1205,6 @@ export class ChatBridge {
 		return true;
 	}
 
-	/**
-	 * 本轮的记忆注入：世代交接块（换了新会话时一次）优先于每轮相关历史预取。
-	 *
-	 * 交接块来自"上一段对话"，预取来自"更早的历史档案"，同一轮里给两个块既费 token
-	 * 又可能互相矛盾（交接块已经给了上下文），所以二选一。
-	 */
 	/**
 	 * 本轮记忆注入：相关历史 + 可用技能。
 	 *

@@ -12,7 +12,7 @@
   - `rag_chunks` + `rag_chunks_fts`：4 条 / 400 字一窗，1 条重叠；中文 `Intl.Segmenter` 预分词。
   - `rag_chunk_vec`：`float[512]`，按 `chat_key` 分区（sqlite-vec 不支持分区时退化为全局 KNN + 过滤）。
   - `rag_skills` + `rag_skills_fts` + `rag_skill_vec`：自演进技能（按 chatKey 隔离，管理员可提升全局）。
-  - `rag_meta` / `rag_audit` / `rag_skill_tombstones`。
+  - `rag_meta` / `rag_skill_tombstones`。
 - **写入**：dispatcher 在访问控制/信息过滤之后调用 `memory.record()`；已注册命令、
   自然语言元指令、敏感信息（手机号/证件号/银行卡/住址/凭证）不写入。
   机器人最终回复以 `kind='reply'` 写入；主链路 fire-and-forget。
@@ -362,7 +362,8 @@ score = wBm25 * bm25Normalized      // 0.6：FTS5 bm25()（越小越相关，归
 （这是自动召回的历史片段；与本轮对话无关时请忽略。）
 ```
 
-- 阈值 `memoryPrefetchMinScore`（默认 0.35）与条数上限 `memoryPrefetchMaxItems`（默认 3）；
+- 阈值 `memoryPrefetchMinScore`（默认 0.30）与条数上限 `memoryPrefetchMaxItems`（默认 6，0 = 关闭注入）；
+  注入块另受 `memoryInjectMaxChars`（默认 1600 字）约束，整条取舍；
 - **失败/超时（100ms 上限）直接跳过**，绝不影响主链路（Hermes 对 stuck provider 的 `prefetch` 有同样的超时+跳过保护）；
 - 与 §7 交接块**互斥**：同一轮只注入一个（交接块优先）。
 
@@ -677,9 +678,11 @@ memoryRecallHalfLifeDays: number       // default 30, 1..365
 /** 每轮自动预取（按本轮用户文本召回并拼进 prompt；零 LLM） */
 memoryPrefetch: boolean                // default true
 /** 预取最低分（低于则本轮不注入） */
-memoryPrefetchMinScore: number         // default 0.35, 0..1
-/** 预取最多注入条数 */
-memoryPrefetchMaxItems: number         // default 3, 0..10
+memoryPrefetchMinScore: number         // default 0.30, 0..1
+/** 预取最多注入条数（0 = 关闭注入，检索工具照常） */
+memoryPrefetchMaxItems: number         // default 6, 0..10
+/** 注入块总字数上限（整条取舍） */
+memoryInjectMaxChars: number           // default 1600, 200..6000
 
 /** 蒸馏：累计多少条新事件触发一次（越大越省 token，时效越差） */
 memoryDistillEvery: number             // default 50, 5..1000

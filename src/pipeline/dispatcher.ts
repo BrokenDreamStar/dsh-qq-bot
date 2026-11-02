@@ -171,14 +171,14 @@ export class Dispatcher {
 	private recordMemory(msg: InboundMessage): void {
 		const memory = this.deps.memory;
 		if (memory === undefined || !memory.ready) return;
-		// **已注册的命令不进记忆档案**（`/status`、`/memory distill`…）：它们是控制
-		// 指令而不是对话内容，记进去只会白烧蒸馏 token，还可能被蒸成"事实"。
+		// **已注册的命令不进记忆档案**（`/status`、`/memory status`…）：它们是控制
+		// 指令而不是对话内容，记进去只会污染检索、浪费 token。
 		// 未知的 `/xxx` 仍照记——那种消息会落到 agent，是真实发言。聊天记录
 		// （history）不受影响：它的语义是"刚才群里在聊什么"，命令也在其中。
 		const command = parseCommand(msg.plainText);
 		if (command !== null && COMMANDS[command.name] !== undefined) return;
 		// 自然语言元指令（"把刚才那条删了"）也不进档案：它们是对机器人说的话，
-		// 不是关于世界的事实，蒸馏进去会变成一条假的"用户偏好"。
+		// 不是关于世界的事实，存进去会变成一条假的"用户偏好"。
 		if (isMetaCommand(msg.plainText)) return;
 		try {
 			const bridge = this.bridgeFor(msg);
@@ -273,7 +273,7 @@ export class Dispatcher {
 		}
 
 		// 长期记忆的会话档案：同一位置、同一语义（过滤之后、准入之后）。
-		// 世代 id 取桥上记录的当前 sessionId（rotate/reset 后会变，交接靠它判断）。
+		// 世代 id 取桥上记录的当前 sessionId（rotate/reset 后会变，记忆按它归档）。
 		this.recordMemory(msg);
 
 		const wake = evaluateWake(msg, config);

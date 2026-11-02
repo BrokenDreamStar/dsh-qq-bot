@@ -83,7 +83,7 @@ export function registerMemoryTools(
 			async execute(args) {
 				const bridge = requireBridge(services, manager);
 				if (!memory.ready) throw new Error('dsh-qq-bot: 长期记忆当前不可用（未启用或存储未就绪，见 WebUI「长期记忆」卡片）');
-				if (!config.memoryRecallEnabled) throw new Error('dsh-qq-bot: 记忆检索已在 WebUI 关闭（设置 → qq-bot 配置 → 长期记忆 → 检索）');
+				if (!config.memoryRecallEnabled) throw new Error('dsh-qq-bot: 记忆检索已在 WebUI 关闭（设置 → qq-bot 配置 → 长期记忆 → 检索与注入）');
 				const result = await memory.recall(bridge.key, args.query, args.count ?? RECALL_DEFAULT_COUNT);
 				return { count: result.count, found: result.count > 0, transcript: result.text };
 			},

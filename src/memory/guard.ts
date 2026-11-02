@@ -1,8 +1,8 @@
 /**
  * 记忆写入侧的安全扫描（纯逻辑，可测）。
  *
- * 为什么需要：卡片会被注入 **system prompt**，检索结果会进本轮上下文，
- * 而 QQ 是**无认证入口** —— 任何群成员说一句话就可能被蒸馏成一条"事实"。
+ * 为什么需要：检索结果会进本轮上下文（技能说明还会进 system prompt），
+ * 而 QQ 是**无认证入口** —— 任何群成员说一句话都可能被写进长期记忆。
  * 所以写入前必须过一遍威胁扫描（对齐 hermes-agent 的 `tools/threat_patterns.py`
  * 的 strict 档），命中即**整条拒绝**，不落库。
  *
@@ -100,18 +100,6 @@ export function sanitizeMemoryText(text: string): string {
 		.trim();
 }
 
-/**
- * 归一化一条事实的 object：清洗 + 截断 + 拒绝空串。
- *
- * @returns 归一化后的文本，或 `undefined`（空 / 全是控制字符）。
- */
-export function normalizeFactText(text: string, maxChars: number): string | undefined {
-	const cleaned = sanitizeMemoryText(text);
-	if (cleaned === '') return undefined;
-	if (cleaned.length <= maxChars) return cleaned;
-	return `${cleaned.slice(0, maxChars - 1)}…`;
-}
-
 /** 把 findings 渲染成一行日志文本。 */
 export function describeFindings(findings: readonly ThreatFinding[]): string {
 	return findings.map((finding) => `${finding.kind}(${finding.pattern})`).join(', ');
@@ -129,7 +117,7 @@ const SENSITIVE_PATTERNS: ReadonlyArray<{ kind: string; pattern: RegExp }> = [
  * 敏感信息扫描：命中即拒绝写入长期记忆。
  *
  * 这是隐私边界而不是提示注入防护：群友的手机号/证件号/住址不应该因为
- * 一次闲聊就被自动做成跨会话画像。默认开启；管理员可在配置里关闭
+ * 一次闲聊就被写进长期记忆。默认开启；管理员可在配置里关闭
  * （关掉后仍建议不要主动记这类信息）。
  */
 export function scanSensitive(text: string): { ok: boolean; findings: string[] } {

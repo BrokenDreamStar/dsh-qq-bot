@@ -8,7 +8,7 @@
 import type { Logger } from '../types.ts';
 import type { MemoryLlmView } from './llm.ts';
 import { MemoryService, type MemoryConfigView } from './service.ts';
-import type { AfterTurnInput, RagRecord, RagSkill, RagStatus, SkillDraft } from './rag/types.ts';
+import type { AfterTurnInput, RagRecord, RagSkill, RagStatus } from './rag/types.ts';
 
 export interface MemoryLike {
 	/** 是否可用（总开关打开且 worker 已就绪）。 */
@@ -32,7 +32,6 @@ export interface MemoryLike {
 	deleteSkill?(chatKey: string, skillId: number, actor: string): Promise<boolean>;
 	toggleSkill?(skillId: number, status: RagSkill['status']): Promise<boolean>;
 	promoteSkill?(chatKey: string, skillId: number): Promise<RagSkill | undefined>;
-	saveSkill?(draft: SkillDraft): Promise<RagSkill | undefined>;
 	/** 一轮结束后尝试学习技能（fire-and-forget）。 */
 	afterTurn?(input: AfterTurnInput): void;
 	/** 最近一次技能学习失败原因。 */
@@ -45,7 +44,7 @@ export interface MemoryLike {
 	dispose(): Promise<void>;
 }
 
-export type { MemoryConfigView, MemoryLlmView, RagRecord, RagSkill, RagStatus, SkillDraft, AfterTurnInput };
+export type { MemoryConfigView, MemoryLlmView, RagRecord, RagSkill, RagStatus, AfterTurnInput };
 
 export interface CreateMemoryOptions {
 	/** 数据目录（库文件 `<dataDir>/memory.db`，runtime/models 也在其下）。 */
