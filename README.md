@@ -91,8 +91,7 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add link:/path/to/dsh-qq-bo
 | 长期记忆（RAG） | 默认关闭。聊天写入本地 `<数据目录>/memory.db`，按 4 条/400 字切 chunk；FTS5 中文分词 + 可选 `sqlite-vec` 向量召回，开启重排时用本地 bge-reranker-base；相关片段注入 user 尾部（不进 system prompt）。WebUI「记忆库与技能」可查看检索结果、最近片段、运行时状态。**没有用户画像/群成员画像/蒸馏** |
 | 媒体与互动 | 收图落盘到会话媒体目录并把绝对路径交给 agent；戳一戳自动回复 |
 | 定时任务 | 任务总览与手动管理（启停/改期/删除/立即执行/新建）；任务绑定创建会话；每个任务可选「直接推送」（不调模型）或「agent 执行」 |
-| 人格模板 | 人格模板的增删改（`personas.json`）；模板只用于「还没有 SOUL.md 的会话」播种，或手动套用 |
-| 会话人格 | 每个会话目录一份 `SOUL.md`，是人格的唯一生效源；可查看/编辑/恢复默认模板/套用模板，保存后重建当前会话 |
+| 人格 | 一张卡两个子分节：〔会话人格〕每个会话目录一份 `SOUL.md`，是人格的唯一生效源，可查看/编辑/恢复默认模板/套用模板，保存后重建当前会话；〔人格模板〕模板增删改（`personas.json`），只用于「还没有 SOUL.md 的会话」播种或手动套用 |
 | 人格与模型 | 首行「默认会话」，下方按 `friend_QQ号` / `group_群号` 逐行指定模型（人格列仅作无 SOUL.md 时的播种/兼容兜底） |
 
 ### 运行与维护
@@ -112,7 +111,7 @@ npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add link:/path/to/dsh-qq-bo
 - **写句柄先占 + fork 兜底**：dsh 会话是单写者模型，在 dsh WebUI 里打开一个 QQ 会话就会占住写句柄。插件默认 `sessionIdleTimeoutMs: 0`（建立的会话永不回收），并在启动与重建后立刻占住，让界面只能复用同一个 agent；真被界面抢先时默认 `busyStrategy: fork`——从原会话的完整事件前缀分叉出新会话继续（`forkMaxEvents`，默认 4000 条，超出才回退），旧会话原样留给界面。`wait` 保留给"等界面关掉后继续原会话"的场景（`busyWaitMs`，默认 5 分钟，超时再 fork），`rotate` 只作最后兜底。`/status` 的「写句柄」行与 `/reclaim` 是配套入口。
 - **数据与工作目录同源**：每个聊天对象一个目录，它同时是 agent 默认工作目录、WebUI 左栏工作区与媒体落盘根；上下文隔离由 chatKey → 独立 sessionId 保证，不靠目录。
 - **网页搜索、长期记忆/技能工具默认只给管理员**（`qq_web_search`、`qq_recall_memory`、`qq_use_skill`、`qq_list_skills` 不在聊天工具白名单里）；要让普通用户用，把它们加进 `userTools`。
-- **人格是每会话一份 `SOUL.md`**：首次建 agent 时从当前人格模板播种一次，之后文件是唯一生效源；`personas.json` 只做模板库，`chat-overrides.json` 只保留模型（旧 persona 字段仅用于首次播种）。改完文件后发 `/persona reload`，或在 WebUI「会话人格」里保存，会重建当前会话；`/persona <模板>` 用模板覆盖、`/persona reset` 恢复默认。不做旧数据迁移。**注意**：agent 有文件工具、cwd 就是会话目录，所以它能看到/改写 `SOUL.md`；别把 `write` / `edit` 随便放进普通用户的 `userTools`。
+- **人格是每会话一份 `SOUL.md`**：首次建 agent 时从当前人格模板播种一次，之后文件是唯一生效源；`personas.json` 只做模板库，`chat-overrides.json` 只保留模型（旧 persona 字段仅用于首次播种）。改完文件后发 `/persona reload`，或在 WebUI「人格」卡的〔会话人格〕子分节里保存，会重建当前会话；`/persona <模板>` 用模板覆盖、`/persona reset` 恢复默认。不做旧数据迁移。**注意**：agent 有文件工具、cwd 就是会话目录，所以它能看到/改写 `SOUL.md`；别把 `write` / `edit` 随便放进普通用户的 `userTools`。
 - **RAG 只按当前会话检索**：每个 chatKey 独立库表，模型无法指定别的群/QQ 号；检索结果只给昵称与内容，QQ 号不进模型可见文本。没有成员画像、没有按人的聚合档案；「记住」只靠普通聊天进 RAG，需要时由 `qq_recall_memory` 检索。
 - **热应用**：绝大多数配置改完即生效、无需重启。需要重启 dsh 的只有 `dataDir` 与「工具是否注册」类开关（`registerSendTools`、`tasksEnabled`、`historyEnabled`、`searchEnabled`）；长期记忆的总开关连工具一起即时注册/注销，模型/运行时配置变化会重启 RAG worker。
 
@@ -152,7 +151,7 @@ QQ 群/私聊是**无认证入口**：任何能给机器人发消息的人都可
 | 内容 | 路径 |
 |---|---|
 | 会话目录（agent 工作目录 + 左栏分组 + 媒体根） | `<数据目录>/sessions/Friend_<QQ号>`、`Group_<群号>`（媒体在 `<会话目录>/media/<chatKey>/`） |
-| 人格模板 / 会话人格与模型覆盖 | `<数据目录>/personas.json`、`chat-overrides.json`；每个会话自己的 `<数据目录>/sessions/Friend_*\|Group_*/SOUL.md` |
+| 人格模板 / 会话人格与模型覆盖 | `<数据目录>/personas.json`、`chat-overrides.json`；每个会话自己的 `<数据目录>/sessions/Friend_*\|Group_*/SOUL.md`（前两者在 WebUI「人格」卡的〔人格模板〕〔会话人格〕两个子分节里编辑） |
 | 会话身份表（chatKey → sessionId）/ `/cwd` 覆盖 | `<数据目录>/chat-sessions.json`、`workspaces.json` |
 | 定时任务 / 群成员缓存 / 动态管理员 / 消息日志 / 长期记忆 | `<数据目录>/tasks.json`、`roster/`、`admins.json`、`message-log.ndjson`、`memory.db`、`models/`、`runtime/` |
 
@@ -196,7 +195,7 @@ dsh WebUI 的**设置**左列有独立的「qq-bot 配置」入口（需 dsh ≥
 - 配置字段在 schema 上标记为 `.volatile()`：dsh 以稳定引用热更新，不重启插件；插件监听 `loader/volatile-update` 原地合并（连接参数变化会自动重建 transport）
 - 只读部署自动禁用；中英双语跟随 WebUI 语言
 - `accessToken` 与各 API Key 为**只写字段**（宿主脱敏、永不回显，留空保存 = 保持不变）
-- 「人格模板」「会话人格」「人格与模型」「定时任务」的数据走插件自建 RPC（编辑 `personas.json` / `SOUL.md` / `chat-overrides.json` / `tasks.json`），保存后所有会话下一条消息即按新配置重建（历史保留）
+- 「人格」「人格与模型」「定时任务」的数据走插件自建 RPC（编辑 `personas.json` / `SOUL.md` / `chat-overrides.json` / `tasks.json`），保存后所有会话下一条消息即按新配置重建（历史保留）
 
 ## 插件间组合（Cordis Service）
 

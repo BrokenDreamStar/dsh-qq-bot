@@ -93,9 +93,9 @@ export interface FieldGroup {
 	logViewer?: boolean;
 	/**
 	 * 自定义交互卡片：不走 settings schema，展开体由 RPC 驱动
-	 * （人格库 / 人格与模型 / 定时任务）。此类卡片没有 fields，保存栏由面板自持。
+	 * （人格 / 人格与模型 / 定时任务 / 记忆库）。此类卡片没有 fields，保存栏由面板自持。
 	 */
-	custom?: 'personas' | 'souls' | 'routes' | 'tasks' | 'memory';
+	custom?: 'personas' | 'routes' | 'tasks' | 'memory';
 }
 
 function f(key: string, kind: FieldKind, options?: readonly string[]): FieldDef {
@@ -412,19 +412,15 @@ export const FIELD_GROUPS: FieldGroup[] = [
 		fields: [],
 	},
 	{
+		// 模板库与会话人格同卡：SOUL.md 是实际生效的人格，模板只是它的来源
+		// （会话还没有 SOUL.md 时用于播种，或在这里手动套用）——两者是同一个
+		// 功能域的两层，拆成两张卡找是配置页混乱的老毛病。卡内两个子分节
+		// 各自独立暂存/保存（编辑的是不同文件：SOUL.md 与 personas.json）。
 		id: 'personas',
 		sectionKey: 'sectionChat',
-		titleKey: 'groupPersonas',
-		descKey: 'groupPersonasDesc',
+		titleKey: 'groupPersona',
+		descKey: 'groupPersonaDesc',
 		custom: 'personas',
-		fields: [],
-	},
-	{
-		id: 'souls',
-		sectionKey: 'sectionChat',
-		titleKey: 'groupSouls',
-		descKey: 'groupSoulsDesc',
-		custom: 'souls',
 		fields: [],
 	},
 	{

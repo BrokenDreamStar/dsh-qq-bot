@@ -18,6 +18,12 @@ export const ACTIVE_CARD_KEY = 'dshqq-active-card';
 /** 合法的卡片 id 集合：只认 FIELD_GROUPS 里的卡片，避免历史残留键越攒越多。 */
 const CARD_IDS = new Set(FIELD_GROUPS.map((group) => group.id));
 
+/**
+ * 历史卡片 id → 现行 id：旧的「会话人格」卡已并入「人格」卡（模板库 + 会话
+ * 人格两个子分节）。只做选中项迁移，避免停在旧卡的浏览器刷新后跳回第一张卡。
+ */
+const LEGACY_CARD_IDS: Record<string, string> = { souls: 'personas' };
+
 /** 进程内缓存：storage 不可用（隐私模式/旧宿主/测试）时的唯一来源。 */
 let memory: Record<string, boolean> = {};
 let activeMemory: string | undefined;
@@ -76,7 +82,10 @@ export function readActiveCard(fallback = 'connection'): string {
 	if (store !== undefined) {
 		try {
 			const raw = store.getItem(ACTIVE_CARD_KEY);
-			if (raw !== null) activeMemory = CARD_IDS.has(raw) ? raw : undefined;
+			if (raw !== null) {
+				const id = LEGACY_CARD_IDS[raw] ?? raw;
+				activeMemory = CARD_IDS.has(id) ? id : undefined;
+			}
 		} catch {
 			// 同 readOpenCards：storage 不可用时只使用内存态。
 		}

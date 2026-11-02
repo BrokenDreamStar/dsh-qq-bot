@@ -92,4 +92,10 @@ describe('设置页卡片展开态', () => {
 		storage.data.set(ACTIVE_CARD_KEY, 'notACard');
 		expect(cards.readActiveCard('wake')).toBe('wake');
 	});
+
+	it('旧卡片 id 迁移到合并后的卡片：souls → personas', () => {
+		const storage = fakeStorage({ [ACTIVE_CARD_KEY]: 'souls' });
+		installWindow(storage);
+		expect(cards.readActiveCard()).toBe('personas');
+	});
 });

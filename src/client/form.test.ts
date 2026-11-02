@@ -147,7 +147,7 @@ describe('字段定义与文案字典', () => {
 	it('一张卡 = 一个功能域：私聊/群聊的差异是卡内子分节，不再各占一张卡', () => {
 		expect(FIELD_GROUPS.map((group) => group.id)).toEqual([
 			'connection', 'access', 'tools', 'search',
-			'wake', 'session', 'reply', 'roster', 'history', 'ask', 'memory', 'memoryItems', 'media', 'tasks', 'personas', 'souls', 'routes',
+			'wake', 'session', 'reply', 'roster', 'history', 'ask', 'memory', 'memoryItems', 'media', 'tasks', 'personas', 'routes',
 			'logging', 'agent',
 		]);
 		// 曾经的「私聊配置」「群聊配置」两张卡已消失。
@@ -198,11 +198,13 @@ describe('字段定义与文案字典', () => {
 		expect(hosts[0]?.fields.map((def) => def.key)).toEqual(['messageLog', 'messageLogMax', 'messageLogToFile', 'debug']);
 	});
 
-	it('人格库、人格与模型、定时任务是三张自定义卡片，位于 Agent 之前且没有 schema 字段', () => {
+	it('人格、人格与模型、定时任务、记忆库是四张自定义卡片，位于 Agent 之前且没有 schema 字段', () => {
 		const custom = FIELD_GROUPS.filter((group) => group.custom !== undefined);
-		expect(custom.map((group) => group.id)).toEqual(['memoryItems', 'tasks', 'personas', 'souls', 'routes']);
-		expect(custom.map((group) => group.custom)).toEqual(['memory', 'tasks', 'personas', 'souls', 'routes']);
+		expect(custom.map((group) => group.id)).toEqual(['memoryItems', 'tasks', 'personas', 'routes']);
+		expect(custom.map((group) => group.custom)).toEqual(['memory', 'tasks', 'personas', 'routes']);
 		expect(custom.every((group) => group.fields.length === 0)).toBe(true);
+		// 「会话人格」已并入「人格」卡（卡内两个子分节），不再单独占一张卡。
+		expect(FIELD_GROUPS.some((group) => group.id === 'souls')).toBe(false);
 		expect(FIELD_GROUPS.map((group) => group.id).indexOf('routes')).toBeLessThan(FIELD_GROUPS.map((group) => group.id).indexOf('agent'));
 		// Agent 卡片：workspaceMode 此前没有渲染入口，现已补回；dataDir 是**唯一**
 		// 的路径设置（会话目录 + 数据文件都在它下面），所以与工作目录模式同分节。
@@ -210,8 +212,13 @@ describe('字段定义与文案字典', () => {
 		const agent = FIELD_GROUPS.find((group) => group.id === 'agent');
 		expect(agent?.fields.map((def) => def.key)).toEqual(['preset', 'workspaceMode', 'dataDir']);
 		expect(agent?.fields.map((def) => def.sub)).toEqual(['subPreset', 'subWorkspace', 'subWorkspace']);
-		// 新卡片文案齐全。
-		for (const key of ['groupPersonas', 'groupPersonasDesc', 'groupRoutes', 'groupRoutesDesc', 'groupTasks', 'groupTasksDesc']) {
+		// 新卡片文案齐全（人格卡标题 + 卡内两个子分节标题）。
+		for (const key of [
+			'groupPersona', 'groupPersonaDesc',
+			'groupSouls', 'groupSoulsDesc',
+			'groupPersonas', 'groupPersonasDesc',
+			'groupRoutes', 'groupRoutesDesc', 'groupTasks', 'groupTasksDesc',
+		]) {
 			expect(zh[key], key).toBeTruthy();
 			expect(en[key], `${key} (en)`).toBeTruthy();
 		}

@@ -3,7 +3,7 @@
  * 页面 = 左侧功能域导航 + 右侧单张编辑卡；保存栏吸顶，长分类按子分节折叠。
  * 结构对齐内置样式，类名前缀 dshqq- 自持。
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { readActiveCard, writeActiveCard } from './cards.ts';
 import type { ReactNode } from 'react';
 import type { FieldDef, FieldGroup, FieldState, CardShell, CardState } from './form.ts';
@@ -28,6 +28,8 @@ const css = {
 	subsectionHead: 'dshqq-subsectionHead',
 	subsectionCount: 'dshqq-subsectionCount',
 	subsectionBody: 'dshqq-subsectionBody',
+	/** 自定义卡片里的多个子分节（如「人格」卡的会话人格 / 模板库）。 */
+	panelStack: 'dshqq-panelStack',
 	layout: 'dshqq-layout',
 	nav: 'dshqq-nav',
 	navSection: 'dshqq-navSection',
@@ -552,6 +554,7 @@ interface PersonaModelData {
 /**
  * 两张卡片共用一次加载：personas/list + routes/list + models/list。
  * 只在任一张卡片展开时首次拉取；保存后用宿主返回的新值刷新。
+ * 「人格」卡里的模板库与会话人格的模板下拉都读这一份 personas。
  */
 function usePersonaModelData(getRpc: (() => RpcCaller | undefined) | undefined, active: boolean): PersonaModelData {
 	const [status, setStatus] = useState<PersonaModelData['status']>('idle');
@@ -678,7 +681,7 @@ function useModelOptions(getRpc: (() => RpcCaller | undefined) | undefined, acti
 	return models;
 }
 
-/** 人格库编辑面板（卡片展开体）。默认人格不在这里选（见「人格与模型」的默认会话行）。 */
+/** 模板库子分节（「人格」卡内、会话人格之后）。默认人格不在这里选（见「人格与模型」的默认会话行）。 */
 function PersonaPanel(props: { t: Translate; data: PersonaModelData; disabled: boolean }): ReactNode {
 	const { t, data, disabled } = props;
 	const [draft, setDraft] = useState<PersonaRecordView[]>([]);
@@ -1063,16 +1066,22 @@ function parseSoulList(value: unknown): SoulListView[] {
 }
 
 /**
- * 「会话人格」卡片：每个会话一份 SOUL.md 的查看/编辑/重置/套模板。
- * 人格库仍是模板库；这里改的是文件本身，保存后重建桥，下一条消息生效。
+ * 「会话人格」子分节：每个会话一份 SOUL.md 的查看/编辑/重置/套模板。
+ * 模板清单由「人格」卡统一提供（与模板库同源，保存模板后下拉即时更新）；
+ * 这里改的是文件本身，保存后重建桥，下一条消息生效。
  */
-function SoulPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined) | undefined; disabled: boolean }): ReactNode {
+function SoulPanel(props: {
+	t: Translate;
+	getRpc: (() => RpcCaller | undefined) | undefined;
+	disabled: boolean;
+	/** 可套用的模板名（personas/list，与模板库子分节同一份数据）。 */
+	templates: readonly string[];
+}): ReactNode {
 	const { t, getRpc, disabled } = props;
 	const [souls, setSouls] = useState<SoulListView[]>([]);
 	const [chat, setChat] = useState('');
 	const [content, setContent] = useState('');
 	const [info, setInfo] = useState<{ path: string; source: string; exists: boolean; chars: number; template: string; error: string | null } | null>(null);
-	const [templates, setTemplates] = useState<string[]>([]);
 	const [template, setTemplate] = useState('');
 	const [busy, setBusy] = useState(false);
 	const [failed, setFailed] = useState<string | null>(null);
@@ -1120,25 +1129,12 @@ function SoulPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined) 
 
 	const load = useCallback(async (): Promise<void> => {
 		setBusy(true);
-		const [listValue, templateValue] = await Promise.all([call('souls/list', {}), call('personas/list', {})]);
+		const listValue = await call('souls/list', {});
 		setBusy(false);
-		if (listValue !== null) {
-			const list = parseSoulList(listValue);
-			setSouls(list);
-			if (list.length > 0) await read(list[0]!.chat);
-		}
-		if (templateValue !== null) {
-			const raw = Array.isArray(templateValue.personas) ? templateValue.personas : [];
-			const names: string[] = [];
-			for (const entry of raw) {
-				if (entry !== null && typeof entry === 'object') {
-					const name = (entry as Record<string, unknown>).name;
-					if (typeof name === 'string' && name !== '') names.push(name);
-				}
-			}
-			setTemplates(names);
-			setTemplate(names[0] ?? '');
-		}
+		if (listValue === null) return;
+		const list = parseSoulList(listValue);
+		setSouls(list);
+		if (list.length > 0) await read(list[0]!.chat);
 	}, [call, read]);
 
 	useEffect(() => {
@@ -1146,6 +1142,12 @@ function SoulPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined) 
 		// 只在首次挂载时拉一次；后续保存走各自端点刷新。
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
+
+	// 模板名来自「人格」卡（personas/list 同源），保存模板后下拉即时更新；
+	// 当前选中的模板被改名/删除时回退到第一个，避免下拉停在空值上。
+	useEffect(() => {
+		setTemplate((prev) => (prev !== '' && props.templates.includes(prev) ? prev : props.templates[0] ?? ''));
+	}, [props.templates]);
 
 	const save = async (): Promise<void> => {
 		if (chat === '' || disabled || busy) return;
@@ -1207,16 +1209,12 @@ function SoulPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined) 
 				</p>
 			) : null}
 			{info?.error !== null && info?.error !== undefined ? <p className={css.failed}>{info.error}</p> : null}
-			<textarea className={css.input} rows={10} value={content} disabled={disabled || busy} onChange={(event) => setContent(event.target.value)} />
-			<div className={css.footer}>
-				<button type="button" className={css.save} disabled={disabled || busy} onClick={() => void save()}>
-					{t('soulSave')}
-				</button>
-				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void reset()}>
-					{t('soulReset')}
-				</button>
+			{/* 必须带 textarea 类：.dshqq-input 固定 height:34px，会把 rows 压成一行。 */}
+			<textarea className={cls(css.input, css.textarea)} rows={10} value={content} disabled={disabled || busy} onChange={(event) => setContent(event.target.value)} />
+			{/* 套模板是另一个动作组，单独一行；保存/恢复留在 footer，窄列宽下不会被挤成竖排。 */}
+			<div className={css.chipAdd}>
 				<select className={cls(css.input, css.select)} value={template} disabled={disabled || busy} onChange={(event) => setTemplate(event.target.value)}>
-					{templates.map((name) => (
+					{props.templates.map((name) => (
 						<option key={name} value={name}>
 							{name}
 						</option>
@@ -1224,6 +1222,14 @@ function SoulPanel(props: { t: Translate; getRpc: (() => RpcCaller | undefined) 
 				</select>
 				<button type="button" className={css.discard} disabled={disabled || busy || template === ''} onClick={() => void applyTemplate()}>
 					{t('soulApplyTemplate')}
+				</button>
+			</div>
+			<div className={css.footer}>
+				<button type="button" className={css.discard} disabled={disabled || busy} onClick={() => void reset()}>
+					{t('soulReset')}
+				</button>
+				<button type="button" className={css.save} disabled={disabled || busy} onClick={() => void save()}>
+					{t('soulSave')}
 				</button>
 			</div>
 			{saved ? <p className={css.saved} role="status">{t('soulSaved')}</p> : null}
@@ -2777,10 +2783,12 @@ function ConnectedBadge(props: { t: Translate }): ReactNode {
 /**
  * 卡内子分节。长配置（尤其长期记忆）默认只展开第一组，其余折叠，避免为了
  * 一个参数滚过几十个控件；保存栏独立吸顶，不随折叠内容移动。
+ * 不可折叠形态（collapsible=false）也用于自定义卡片里的功能块
+ * （如「人格」卡的〔会话人格〕〔人格模板〕），保持与字段卡片一致的标题样式。
  */
 function FieldSubsection(props: {
 	title: string;
-	count: number;
+	count?: number;
 	collapsible: boolean;
 	defaultOpen: boolean;
 	children: ReactNode;
@@ -2804,7 +2812,7 @@ function FieldSubsection(props: {
 		>
 			<summary className={css.subsectionHead}>
 				<span>{props.title}</span>
-				<span className={css.subsectionCount}>{props.count}</span>
+				{props.count !== undefined ? <span className={css.subsectionCount}>{props.count}</span> : null}
 				<svg className={cls(css.chevron, open && css.chevronOpen)} width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
 					<path d="M3.5 5.25 7 8.75l3.5-3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
 				</svg>
@@ -3007,6 +3015,11 @@ export function DshQQSection(props: CardProps): ReactNode {
 	// 自定义数据只在对应功能域可见时拉取，避免后台轮询无谓 RPC。
 	const personaActive = activeGroup?.custom === 'personas' || activeGroup?.custom === 'routes';
 	const personaData = usePersonaModelData(getRpc, personaActive);
+	// 模板下拉与模板库同源：空名条目在模板库里不落盘，这里同样过滤掉。
+	const personaTemplates = useMemo(
+		() => personaData.personas.map((entry) => entry.name.trim()).filter((name) => name !== ''),
+		[personaData.personas],
+	);
 	const modelActive = activeGroup?.fields.some((def) => def.kind === 'modelSelect') === true;
 	const modelOptions = useModelOptions(getRpc, rpcAvailable && modelActive);
 	const tasksActive = activeGroup?.custom === 'tasks';
@@ -3024,13 +3037,21 @@ export function DshQQSection(props: CardProps): ReactNode {
 	}
 	const customBody =
 		activeGroup.custom === 'personas' ? (
-			<PersonaPanel t={props.t} data={personaData} disabled={!state.writable} />
-		) : activeGroup.custom === 'souls' ? (
-			rpcAvailable ? (
-				<SoulPanel t={props.t} getRpc={getRpc} disabled={!state.writable} />
-			) : (
-				<p className={css.hint}>{props.t('soulRpcUnavailable')}</p>
-			)
+			<div className={css.panelStack}>
+				{/* 两个子分节各自保存：SOUL.md（实际生效源）在上，模板库（来源/套用库）在下。 */}
+				<FieldSubsection title={props.t('groupSouls')} collapsible={false} defaultOpen>
+					<p className={css.hint}>{props.t('groupSoulsDesc')}</p>
+					{rpcAvailable ? (
+						<SoulPanel t={props.t} getRpc={getRpc} disabled={!state.writable} templates={personaTemplates} />
+					) : (
+						<p className={css.hint}>{props.t('soulRpcUnavailable')}</p>
+					)}
+				</FieldSubsection>
+				<FieldSubsection title={props.t('groupPersonas')} collapsible={false} defaultOpen>
+					<p className={css.hint}>{props.t('groupPersonasDesc')}</p>
+					<PersonaPanel t={props.t} data={personaData} disabled={!state.writable} />
+				</FieldSubsection>
+			</div>
 		) : activeGroup.custom === 'routes' ? (
 			<RoutePanel t={props.t} data={personaData} disabled={!state.writable} />
 		) : activeGroup.custom === 'tasks' ? (
@@ -3073,6 +3094,8 @@ export function DshQQSection(props: CardProps): ReactNode {
 											key={group.id}
 											type="button"
 											className={cls(css.navItem, isActive && css.navItemActive)}
+											// 列宽收紧后长标签（英文尤其明显）会省略号截断，悬停仍能看全称。
+											title={props.t(group.titleKey)}
 											aria-current={isActive ? 'page' : undefined}
 											onClick={() => {
 												selectGroup(group.id);
